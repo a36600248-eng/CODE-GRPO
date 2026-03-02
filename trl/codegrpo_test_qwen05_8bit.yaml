@@ -1,0 +1,47 @@
+output_dir: ./tmp_codegrpo_qwen05_test_out
+report_to: none
+logging_steps: 1
+save_strategy: "no"
+push_to_hub: false
+
+use_cpu: true
+bf16: false
+fp16: false
+
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+load_in_8bit: true
+use_peft: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+
+dataset_adapter: default
+
+datasets:
+  - path: json
+    data_files: mini_codegrpo.jsonl
+    split: train
+
+test_split_size: 0.5
+
+codegrpo_mode: test
+backend: hf
+K: 2
+num_generations: 2
+num_generations_eval: 2
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+max_completion_length: 32
+
+T_max: 1
+N_max: 2
+M_audit: 1
+M_retry: 0
+context_round_window: 1
+lambda_soft: 0.2
+beta_reason: 1.0
+gamma_shrink: 0.1
+error_max_chars: 200
+error_max_lines: 6
+eval_round_n: 1
+eval_k_list: [1, 2]

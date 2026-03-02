@@ -1,0 +1,20 @@
+﻿# Core runtime
+torch>=2.1.0
+accelerate>=1.4.0
+datasets>=3.0.0
+transformers>=4.56.2,<5.0.0
+packaging>20.0
+
+# CodeGRPO runtime
+peft>=0.8.0
+bitsandbytes>=0.43.0
+sentencepiece>=0.2.0
+
+# Optional: vLLM (server/Linux CUDA environment)
+vllm>=0.10.2,<0.13.0; platform_system == "Linux"
+
+# Logging / monitoring
+tensorboard>=2.14.0
+
+# Basic testing
+pytest>=8.0.0
