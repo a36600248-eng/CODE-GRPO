@@ -151,6 +151,9 @@ class CodeGRPOTreeRunner:
                             "pruned_double_zero": node.exec_summary.get("pruned_reason", "") == "double_zero_rewards",
                             "logic_format_ok_rate": node.exec_summary.get("logic_format_ok_rate", 0.0),
                             "exec_format_ok_rate": node.exec_summary.get("exec_format_ok_rate", 0.0),
+                            "generation_debug": node.exec_summary.get("generation_debug", {}),
+                            "logic_audit": node.exec_summary.get("logic_audit", []),
+                            "exec_audit": node.exec_summary.get("exec_audit", []),
                             "code_preview": summarize_error(
                                 node.code or "",
                                 max_chars=self.args.error_max_chars,
@@ -307,6 +310,8 @@ class CodeGRPOTreeRunner:
         )
         raw_output = self.backend.generate(prompt_text)
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction = parse_generation_output(raw_output)
+        trace_max_chars = max(self.args.error_max_chars * 4, self.args.error_max_chars)
+        trace_max_lines = max(self.args.error_max_lines * 4, self.args.error_max_lines)
 
         code = parent.code if parent.frozen_code else parsed_code
         reasoning = parent.reasoning if parent.frozen_reason else parsed_reason
@@ -354,30 +359,46 @@ class CodeGRPOTreeRunner:
         if audit_indices:
             logic_scores = []
             logic_format_flags = []
+            logic_audit_details: list[dict[str, Any]] = []
             for idx in audit_indices:
                 case = test_cases[idx]
                 logic_output = self.backend.generate(
                     build_logic_prompt(code, case["input"], question_prompt=prompt)
                 )
-                _, logic_prediction, logic_format_ok = parse_logic_response(
+                logic_reason, logic_prediction, logic_format_ok = parse_logic_response(
                     logic_output, require_reason_before_prediction=self.args.require_reason_before_prediction
                 )
                 logic_correct = 1.0 if values_equal(logic_prediction, case["output"]) else 0.0
-                logic_scores.append(
-                    _apply_format_penalty(logic_correct, logic_format_ok, penalty=self.args.format_penalty_logic)
-                )
+                logic_score = _apply_format_penalty(logic_correct, logic_format_ok, penalty=self.args.format_penalty_logic)
+                logic_scores.append(logic_score)
                 logic_format_flags.append(1.0 if logic_format_ok else 0.0)
+                logic_audit_details.append(
+                    {
+                        "case_index": idx,
+                        "input": _safe_preview(case["input"], max_chars=400),
+                        "expected_output": _safe_preview(case["output"], max_chars=400),
+                        "raw_output": summarize_error(logic_output, trace_max_chars, trace_max_lines),
+                        "parsed_reason": summarize_error(logic_reason, trace_max_chars, trace_max_lines),
+                        "parsed_prediction": _safe_preview(logic_prediction, max_chars=400),
+                        "format_ok": logic_format_ok,
+                        "match": bool(logic_correct),
+                        "score_after_penalty": logic_score,
+                    }
+                )
             R_soft = _mean(logic_scores)
             logic_format_ok_rate = _mean(logic_format_flags)
         else:
             R_soft = 0.0
             logic_format_ok_rate = 0.0
+            logic_audit_details = []
         R_code = _compute_code_reward(pass_rate=pass_rate, r_soft=R_soft, lambda_soft=self.args.lambda_soft)
 
+        exec_audit_details: list[dict[str, Any]] = []
         if parent.frozen_reason:
             R_reason = parent.R_reason
             status_reason = parent.status_reason
             exec_format_ok_rate = float(parent.exec_summary.get("exec_format_ok_rate", 0.0))
+            exec_audit_details = list(parent.exec_summary.get("exec_audit", []))
         elif audit_indices:
             correctness = []
             exec_format_flags = []
@@ -391,15 +412,30 @@ class CodeGRPOTreeRunner:
                         case["input"],
                     )
                 )
-                _, exec_prediction, exec_format_ok = parse_exec_response(
+                exec_reason, exec_prediction, exec_format_ok = parse_exec_response(
                     exec_output, require_reason_before_prediction=self.args.require_reason_before_prediction
                 )
                 exec_correct = 1.0 if is_match(exec_prediction, actual) else 0.0
                 exec_raw_correct_flags.append(exec_correct)
-                correctness.append(
-                    _apply_format_penalty(exec_correct, exec_format_ok, penalty=self.args.format_penalty_exec)
-                )
+                exec_score = _apply_format_penalty(exec_correct, exec_format_ok, penalty=self.args.format_penalty_exec)
+                correctness.append(exec_score)
                 exec_format_flags.append(1.0 if exec_format_ok else 0.0)
+                exec_audit_details.append(
+                    {
+                        "case_index": idx,
+                        "input": _safe_preview(case["input"], max_chars=400),
+                        "actual_kind": actual.kind,
+                        "actual_value": _safe_preview(actual.value, max_chars=400) if actual.kind == "OK" else "",
+                        "actual_error_type": actual.error_type or "",
+                        "actual_error_msg": summarize_error(actual.error_msg or "", trace_max_chars, trace_max_lines),
+                        "raw_output": summarize_error(exec_output, trace_max_chars, trace_max_lines),
+                        "parsed_reason": summarize_error(exec_reason, trace_max_chars, trace_max_lines),
+                        "parsed_prediction": _safe_preview(exec_prediction, max_chars=400),
+                        "format_ok": exec_format_ok,
+                        "match": bool(exec_correct),
+                        "score_after_penalty": exec_score,
+                    }
+                )
             R_reason = _mean(correctness)
             exec_format_ok_rate = _mean(exec_format_flags)
             status_reason = "HONEST" if all(score == 1.0 for score in exec_raw_correct_flags) else "HALLUCINATION"
@@ -407,6 +443,7 @@ class CodeGRPOTreeRunner:
             R_reason = 0.0
             status_reason = "NOT_RUN"
             exec_format_ok_rate = 0.0
+            exec_audit_details = []
         R_reason_final = R_reason * (0.5 + 0.5 * pass_rate)
 
         child = Node(
@@ -428,6 +465,14 @@ class CodeGRPOTreeRunner:
                 "error_summary": error_summary,
                 "logic_format_ok_rate": logic_format_ok_rate,
                 "exec_format_ok_rate": exec_format_ok_rate,
+                "generation_debug": {
+                    "raw_output": summarize_error(raw_output, trace_max_chars, trace_max_lines),
+                    "parsed_reason": summarize_error(parsed_reason, trace_max_chars, trace_max_lines),
+                    "parsed_logic_prediction": _safe_preview(parsed_logic_prediction, max_chars=400),
+                    "parsed_exec_prediction": _safe_preview(parsed_exec_prediction, max_chars=400),
+                },
+                "logic_audit": logic_audit_details,
+                "exec_audit": exec_audit_details,
                 "history": history
                 + [
                     {
