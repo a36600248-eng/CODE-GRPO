@@ -48,7 +48,12 @@ class CodeGRPOConfig(GRPOConfig):
     eval_k_list: list[int] = field(default_factory=lambda: [1, 3, 5], metadata={"help": "k values for pass@k metrics."})
 
     debug_trace_dir: str = field(
-        default="codegrpo_traces", metadata={"help": "Relative directory under output_dir for per-question JSON traces."}
+        default="traces/rollout",
+        metadata={"help": "Relative directory under output_dir for per-question JSON traces."},
+    )
+    dump_train_traces: bool = field(
+        default=False,
+        metadata={"help": "Whether to dump per-question rollout traces during train mode as well."},
     )
 
     def __post_init__(self):

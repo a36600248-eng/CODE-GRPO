@@ -115,8 +115,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         return list(deduped.values())
 
     def _dump_rollout_traces(self, rollouts):
-        if not self.accelerator.is_main_process:
-            return
         trace_dir = os.path.join(self.args.output_dir, self.args.debug_trace_dir)
         os.makedirs(trace_dir, exist_ok=True)
         for rollout in rollouts:
@@ -304,6 +302,9 @@ class CodeGRPOTrainer(GRPOTrainer):
             self._dump_rollout_traces(rollouts)
             logger.info("[EVAL] dumped %d rollout trace files", len(rollouts))
         else:
+            if self.args.dump_train_traces:
+                self._dump_rollout_traces(rollouts)
+                logger.info("[TRAIN] dumped %d rollout trace files", len(rollouts))
             logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
 
         if mode == "eval":

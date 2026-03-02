@@ -13,12 +13,18 @@
 # limitations under the License.
 
 import argparse
+import json
+import logging as py_logging
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
 
 import torch
 from accelerate import logging
 from datasets import load_dataset
+from transformers import TrainerCallback
 
 from trl import (
     DatasetMixtureConfig,
@@ -39,6 +45,181 @@ logger = logging.get_logger(__name__)
 
 # Enable logging in a Hugging Face Space
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
+
+
+def _safe_slug(value: str, fallback: str, max_len: int = 64) -> str:
+    text = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("-._").lower()
+    if not text:
+        text = fallback
+    return text[:max_len]
+
+
+def _first_dataset_tag(script_args, dataset_args) -> str:
+    if script_args.dataset_name:
+        return _safe_slug(script_args.dataset_name.split("/")[-1], "dataset", 48)
+    datasets = getattr(dataset_args, "datasets", None) or []
+    if not datasets:
+        return "dataset"
+    first = datasets[0]
+    path_tag = _safe_slug(getattr(first, "path", "dataset"), "dataset", 32)
+    data_files = getattr(first, "data_files", None)
+    file_tag = ""
+    if isinstance(data_files, str):
+        file_tag = _safe_slug(os.path.splitext(os.path.basename(data_files))[0], "data", 24)
+    elif isinstance(data_files, list) and data_files:
+        file_tag = _safe_slug(os.path.splitext(os.path.basename(str(data_files[0])))[0], "data", 24)
+    elif isinstance(data_files, dict) and data_files:
+        first_key = sorted(data_files.keys())[0]
+        file_tag = _safe_slug(os.path.splitext(os.path.basename(str(data_files[first_key])))[0], "data", 24)
+    return f"{path_tag}-{file_tag}" if file_tag else path_tag
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def _get_rank() -> int:
+    for key in ("RANK", "LOCAL_RANK"):
+        value = os.environ.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return 0
+
+
+def _configure_run_layout(script_args, training_args, model_args, dataset_args) -> dict[str, str]:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    mode = _safe_slug(getattr(training_args, "codegrpo_mode", "train"), "train", 16)
+    backend = _safe_slug(getattr(training_args, "backend", "hf"), "hf", 16)
+    model_tag = _safe_slug(os.path.basename(str(model_args.model_name_or_path).rstrip("/\\")), "model", 48)
+    dataset_tag = _first_dataset_tag(script_args, dataset_args)
+    run_id = f"{timestamp}__{mode}__{model_tag}__{dataset_tag}__{backend}"
+
+    base_output_dir = os.path.abspath(training_args.output_dir)
+    run_root = os.path.join(base_output_dir, mode, run_id)
+    artifacts_dir = os.path.join(run_root, "test_out" if mode == "test" else "train_out")
+    logs_dir = os.path.join(run_root, "logs")
+    tensorboard_dir = os.path.join(run_root, "tensorboard")
+    for path in (run_root, artifacts_dir, logs_dir, tensorboard_dir):
+        os.makedirs(path, exist_ok=True)
+
+    training_args.output_dir = artifacts_dir
+    training_args.logging_dir = tensorboard_dir
+    if not getattr(training_args, "run_name", None):
+        training_args.run_name = run_id
+
+    return {
+        "run_id": run_id,
+        "run_root": run_root,
+        "artifacts_dir": artifacts_dir,
+        "logs_dir": logs_dir,
+        "tensorboard_dir": tensorboard_dir,
+        "mode": mode,
+    }
+
+
+def _attach_runtime_file_logger(log_path: str):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    root_logger = py_logging.getLogger()
+    abs_path = os.path.abspath(log_path)
+    for handler in root_logger.handlers:
+        if isinstance(handler, py_logging.FileHandler) and getattr(handler, "baseFilename", "") == abs_path:
+            return
+    file_handler = py_logging.FileHandler(abs_path, encoding="utf-8")
+    file_handler.setLevel(py_logging.INFO)
+    file_handler.setFormatter(
+        py_logging.Formatter(
+            fmt="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root_logger.addHandler(file_handler)
+    if root_logger.level > py_logging.INFO:
+        root_logger.setLevel(py_logging.INFO)
+    for logger_name in ("accelerate", "transformers", "trl", "datasets"):
+        named_logger = py_logging.getLogger(logger_name)
+        named_logger.propagate = True
+        if named_logger.level > py_logging.INFO:
+            named_logger.setLevel(py_logging.INFO)
+
+
+class TextMetricsCallback(TrainerCallback):
+    """Persist train/eval metrics to plain text and jsonl files."""
+
+    def __init__(self, text_path: str, jsonl_path: str):
+        self.text_path = text_path
+        self.jsonl_path = jsonl_path
+        os.makedirs(os.path.dirname(self.text_path), exist_ok=True)
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _append_text(self, line: str):
+        with open(self.text_path, "a", encoding="utf-8") as handle:
+            handle.write(line.rstrip() + "\n")
+
+    def _append_json(self, payload: dict[str, Any]):
+        with open(self.jsonl_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_json_safe(payload), ensure_ascii=False) + "\n")
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        del args, control, kwargs
+        self._append_text(f"[{self._now()}] TRAIN_BEGIN step={state.global_step}")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        del args, control, kwargs
+        self._append_text(f"[{self._now()}] TRAIN_END step={state.global_step}")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        del args, control, kwargs
+        if not logs:
+            return
+        payload = {
+            "time": self._now(),
+            "step": int(state.global_step),
+            "epoch": state.epoch,
+            "logs": logs,
+        }
+        self._append_json(payload)
+        self._append_text(f"[{payload['time']}] LOG step={payload['step']} epoch={payload['epoch']} logs={payload['logs']}")
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        del args, control, kwargs
+        payload = {
+            "time": self._now(),
+            "event": "EVAL",
+            "step": int(state.global_step),
+            "epoch": state.epoch,
+            "metrics": metrics or {},
+        }
+        self._append_json(payload)
+        self._append_text(
+            f"[{payload['time']}] EVAL step={payload['step']} epoch={payload['epoch']} metrics={payload['metrics']}"
+        )
+
+
+def _write_run_manifest(path: str, run_layout: dict[str, str], script_args, training_args, model_args, dataset_args):
+    payload = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "run_id": run_layout["run_id"],
+        "mode": run_layout["mode"],
+        "paths": run_layout,
+        "script_args": _json_safe(vars(script_args)),
+        "training_args": _json_safe(vars(training_args)),
+        "model_args": _json_safe(vars(model_args)),
+        "dataset_args": _json_safe(vars(dataset_args)),
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
 @dataclass
@@ -75,6 +256,29 @@ def _adapt_splits(dataset, adapter, train_split: str, test_split: str):
 
 
 def main(script_args, training_args, model_args, dataset_args):
+    run_layout = _configure_run_layout(script_args, training_args, model_args, dataset_args)
+    rank = _get_rank()
+    runtime_log_path = os.path.join(run_layout["logs_dir"], f"runtime_rank{rank}.txt")
+    trainer_text_log_path = os.path.join(run_layout["logs_dir"], f"trainer_events_rank{rank}.txt")
+    trainer_jsonl_path = os.path.join(run_layout["logs_dir"], f"trainer_events_rank{rank}.jsonl")
+    _attach_runtime_file_logger(runtime_log_path)
+    if rank == 0:
+        _write_run_manifest(
+            os.path.join(run_layout["run_root"], "run_manifest.json"),
+            run_layout,
+            script_args,
+            training_args,
+            model_args,
+            dataset_args,
+        )
+    logger.info(
+        "[RUN] run_id=%s mode=%s output_dir=%s logs_dir=%s",
+        run_layout["run_id"],
+        run_layout["mode"],
+        training_args.output_dir,
+        run_layout["logs_dir"],
+    )
+
     adapter = load_dataset_adapter(script_args.dataset_adapter)
     dataset = _load_dataset(script_args, dataset_args)
 
@@ -103,16 +307,25 @@ def main(script_args, training_args, model_args, dataset_args):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         peft_config=get_peft_config(model_args),
+        callbacks=[TextMetricsCallback(trainer_text_log_path, trainer_jsonl_path)],
     )
 
     if training_args.codegrpo_mode == "test":
         test_dataset = eval_dataset if eval_dataset is not None else train_dataset
         metrics = trainer.evaluate(eval_dataset=test_dataset)
+        trainer.log_metrics("test", metrics)
+        trainer.save_metrics("test", metrics)
+        if rank == 0:
+            with open(os.path.join(run_layout["logs_dir"], "test_metrics.txt"), "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(_json_safe(metrics), ensure_ascii=False) + "\n")
         trainer.accelerator.print(metrics)
         trainer.accelerator.print("CodeGRPO test mode completed.")
         return
 
-    trainer.train()
+    train_result = trainer.train()
+    trainer.log_metrics("train", train_result.metrics)
+    trainer.save_metrics("train", train_result.metrics)
+    trainer.save_state()
     trainer.accelerator.print("CodeGRPO training completed.")
     trainer.save_model(training_args.output_dir)
     trainer.accelerator.print(f"Model saved to {training_args.output_dir}.")
@@ -137,4 +350,3 @@ if __name__ == "__main__":
         return_remaining_strings=True
     )
     main(script_args, training_args, model_args, dataset_args)
-
