@@ -8,17 +8,24 @@ EXEC_PREDICTION_PATTERN = re.compile(r"<EXEC_PREDICTION>\s*(.*?)\s*</EXEC_PREDIC
 LEGACY_PREDICTION_PATTERN = re.compile(r"<PREDICTION>\s*(.*?)\s*</PREDICTION>", re.DOTALL | re.IGNORECASE)
 
 
+def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    match = None
+    for candidate in pattern.finditer(text):
+        match = candidate
+    return match
+
+
 def parse_generation_output(text: str) -> tuple[str, str, str, str]:
     """Parse <CODE>, <REASON>, <LOGIC_PREDICTION>, <EXEC_PREDICTION> sections from generation output."""
     text = text or ""
-    code_match = CODE_PATTERN.search(text)
-    reason_match = REASON_PATTERN.search(text)
+    code_match = _last_match(CODE_PATTERN, text)
+    reason_match = _last_match(REASON_PATTERN, text)
     code = code_match.group(1).strip() if code_match else text.strip()
     reason_block = reason_match.group(1).strip() if reason_match else ""
 
-    logic_match = LOGIC_PREDICTION_PATTERN.search(reason_block) or LOGIC_PREDICTION_PATTERN.search(text)
-    exec_match = EXEC_PREDICTION_PATTERN.search(reason_block) or EXEC_PREDICTION_PATTERN.search(text)
-    legacy_match = LEGACY_PREDICTION_PATTERN.search(reason_block)
+    logic_match = _last_match(LOGIC_PREDICTION_PATTERN, reason_block) or _last_match(LOGIC_PREDICTION_PATTERN, text)
+    exec_match = _last_match(EXEC_PREDICTION_PATTERN, reason_block) or _last_match(EXEC_PREDICTION_PATTERN, text)
+    legacy_match = _last_match(LEGACY_PREDICTION_PATTERN, reason_block) or _last_match(LEGACY_PREDICTION_PATTERN, text)
 
     logic_prediction = logic_match.group(1).strip() if logic_match else ""
     exec_prediction = exec_match.group(1).strip() if exec_match else ""
@@ -60,8 +67,8 @@ def parse_logic_response(text: str, require_reason_before_prediction: bool = Tru
     (reason_text, logic_prediction, format_ok)
     """
     text = text or ""
-    reason_match = REASON_PATTERN.search(text)
-    logic_match = LOGIC_PREDICTION_PATTERN.search(text)
+    reason_match = _last_match(REASON_PATTERN, text)
+    logic_match = _last_match(LOGIC_PREDICTION_PATTERN, text)
 
     reason = reason_match.group(1).strip() if reason_match else ""
     prediction = logic_match.group(1).strip() if logic_match else parse_logic_prediction_only(text)
@@ -77,8 +84,8 @@ def parse_exec_response(text: str, require_reason_before_prediction: bool = True
     (reason_text, exec_prediction, format_ok)
     """
     text = text or ""
-    reason_match = REASON_PATTERN.search(text)
-    exec_match = EXEC_PREDICTION_PATTERN.search(text)
+    reason_match = _last_match(REASON_PATTERN, text)
+    exec_match = _last_match(EXEC_PREDICTION_PATTERN, text)
 
     reason = reason_match.group(1).strip() if reason_match else ""
     prediction = exec_match.group(1).strip() if exec_match else parse_exec_prediction_only(text)

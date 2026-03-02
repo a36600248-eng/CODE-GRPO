@@ -40,6 +40,20 @@ def test_parse_generation_output():
     assert exec_prediction == "'x'"
 
 
+def test_parse_generation_output_prefers_last_tag_block():
+    text = (
+        "<CODE>\nprint('old')\n</CODE>\n"
+        "<REASON>\nold\n<LOGIC_PREDICTION>\n1\n</LOGIC_PREDICTION>\n<EXEC_PREDICTION>\n1\n</EXEC_PREDICTION>\n</REASON>\n"
+        "<CODE>\nprint('new')\n</CODE>\n"
+        "<REASON>\nnew\n<LOGIC_PREDICTION>\n2\n</LOGIC_PREDICTION>\n<EXEC_PREDICTION>\n2\n</EXEC_PREDICTION>\n</REASON>"
+    )
+    code, reason, logic_prediction, exec_prediction = parse_generation_output(text)
+    assert code == "print('new')"
+    assert reason == "new"
+    assert logic_prediction == "2"
+    assert exec_prediction == "2"
+
+
 def test_parse_prediction_only_fallback():
     raw = "ValueError"
     assert parse_prediction_only(raw) == "ValueError"
@@ -65,6 +79,17 @@ def test_parse_exec_response_format_bad_order():
     assert reason == "arg mismatch"
     assert pred == "TypeError"
     assert not format_ok
+
+
+def test_parse_logic_response_prefers_last_match():
+    text = (
+        "<REASON>first</REASON><LOGIC_PREDICTION>1</LOGIC_PREDICTION>"
+        "<REASON>second</REASON><LOGIC_PREDICTION>2</LOGIC_PREDICTION>"
+    )
+    reason, pred, format_ok = parse_logic_response(text, require_reason_before_prediction=True)
+    assert reason == "second"
+    assert pred == "2"
+    assert format_ok
 
 
 def test_canonical_completion_contains_tags():

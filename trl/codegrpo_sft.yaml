@@ -1,0 +1,37 @@
+output_dir: /root/autodl-tmp/trl_outputs/codegrpo_sft_out
+report_to: none
+logging_steps: 1
+save_strategy: "steps"
+save_steps: 50
+save_total_limit: 2
+push_to_hub: false
+
+use_cpu: false
+bf16: true
+fp16: false
+
+model_name_or_path: Qwen/Qwen2.5-Coder-3B-Instruct
+load_in_8bit: false
+use_peft: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+add_format_instruction: true
+
+datasets:
+  - path: json
+    data_files: codegrpo_sft_template.jsonl
+    split: train
+
+dataset_train_split: train
+dataset_test_split: train
+eval_strategy: "no"
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+num_train_epochs: 1
+max_steps: 100
+max_length: 1024
