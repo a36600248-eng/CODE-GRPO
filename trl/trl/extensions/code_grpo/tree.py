@@ -254,8 +254,22 @@ class CodeGRPOTreeRunner:
             if local_budget <= 0:
                 break
             to_generate = min(self.args.K, local_budget)
+
+            history = list(parent.exec_summary.get("history", []))
+            context_history = history[-self.args.context_round_window :]
+            need_code = not parent.frozen_code
+            need_reason = not parent.frozen_reason
+            prompt_text = build_generation_prompt(
+                question_prompt=prompt,
+                history=context_history,
+                need_code=need_code,
+                need_reason=need_reason,
+                parent_code=parent.code,
+            )
+
+            raw_outputs = self.backend.generate_many([prompt_text], num_generations=to_generate)
             siblings: list[Node] = []
-            for _ in range(to_generate):
+            for raw_output in raw_outputs:
                 node_serial += 1
                 child = self._generate_node(
                     node_id=f"n{node_serial}",
@@ -264,6 +278,8 @@ class CodeGRPOTreeRunner:
                     test_cases=test_cases,
                     audit_indices=audit_indices,
                     round_idx=round_idx,
+                    prompt_text_override=prompt_text,
+                    raw_output_override=raw_output,
                 )
                 siblings.append(child)
             produced_total += len(siblings)
@@ -295,20 +311,22 @@ class CodeGRPOTreeRunner:
         test_cases: list[dict[str, Any]],
         audit_indices: list[int],
         round_idx: int,
+        prompt_text_override: str | None = None,
+        raw_output_override: str | None = None,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
         context_history = history[-self.args.context_round_window :]
         need_code = not parent.frozen_code
         need_reason = not parent.frozen_reason
 
-        prompt_text = build_generation_prompt(
+        prompt_text = prompt_text_override or build_generation_prompt(
             question_prompt=prompt,
             history=context_history,
             need_code=need_code,
             need_reason=need_reason,
             parent_code=parent.code,
         )
-        raw_output = self.backend.generate(prompt_text)
+        raw_output = raw_output_override if raw_output_override is not None else self.backend.generate(prompt_text)
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction = parse_generation_output(raw_output)
         trace_max_chars = max(self.args.error_max_chars * 4, self.args.error_max_chars)
         trace_max_lines = max(self.args.error_max_lines * 4, self.args.error_max_lines)
@@ -360,11 +378,10 @@ class CodeGRPOTreeRunner:
             logic_scores = []
             logic_format_flags = []
             logic_audit_details: list[dict[str, Any]] = []
-            for idx in audit_indices:
+            logic_prompts = [build_logic_prompt(code, test_cases[idx]["input"], question_prompt=prompt) for idx in audit_indices]
+            logic_outputs = self.backend.generate_many(logic_prompts)
+            for idx, logic_output in zip(audit_indices, logic_outputs, strict=True):
                 case = test_cases[idx]
-                logic_output = self.backend.generate(
-                    build_logic_prompt(code, case["input"], question_prompt=prompt)
-                )
                 logic_reason, logic_prediction, logic_format_ok = parse_logic_response(
                     logic_output, require_reason_before_prediction=self.args.require_reason_before_prediction
                 )
@@ -403,15 +420,11 @@ class CodeGRPOTreeRunner:
             correctness = []
             exec_format_flags = []
             exec_raw_correct_flags = []
-            for idx in audit_indices:
+            exec_prompts = [build_exec_prompt(code, test_cases[idx]["input"]) for idx in audit_indices]
+            exec_outputs = self.backend.generate_many(exec_prompts)
+            for idx, exec_output in zip(audit_indices, exec_outputs, strict=True):
                 case = test_cases[idx]
                 actual = exec_results[idx]
-                exec_output = self.backend.generate(
-                    build_exec_prompt(
-                        code,
-                        case["input"],
-                    )
-                )
                 exec_reason, exec_prediction, exec_format_ok = parse_exec_response(
                     exec_output, require_reason_before_prediction=self.args.require_reason_before_prediction
                 )

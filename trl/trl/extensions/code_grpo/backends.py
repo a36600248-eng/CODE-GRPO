@@ -9,6 +9,10 @@ class Backend(ABC):
         pass
 
     @abstractmethod
+    def generate_many(self, prompts: list[str], **gen_cfg) -> list[str]:
+        pass
+
+    @abstractmethod
     def logprob(self, prompt: str, target_text: str, **cfg) -> float:
         pass
 
@@ -34,6 +38,22 @@ class HFBackend(Backend):
             output_ids = self.model.generate(**encoded, **cfg)
         completion_ids = output_ids[:, encoded["input_ids"].shape[1] :]
         return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
+
+    def generate_many(self, prompts: list[str], **gen_cfg) -> list[str]:
+        if not prompts:
+            return []
+        cfg = {**self.generation_defaults, **gen_cfg}
+        num_generations = int(cfg.pop("num_generations", 1) or 1)
+        expanded_prompts: list[str] = []
+        for prompt in prompts:
+            expanded_prompts.extend([prompt] * num_generations)
+        encoded = self.tokenizer(expanded_prompts, return_tensors="pt", padding=True, add_special_tokens=False)
+        encoded = {k: v.to(self.device) for k, v in encoded.items()}
+        prompt_width = encoded["input_ids"].shape[1]
+        with torch.no_grad():
+            output_ids = self.model.generate(**encoded, **cfg)
+        completion_ids = output_ids[:, prompt_width:]
+        return [self.tokenizer.decode(row, skip_special_tokens=True) for row in completion_ids]
 
     def logprob(self, prompt: str, target_text: str, **cfg) -> float:
         del cfg
@@ -72,6 +92,25 @@ class VLLMBackend(Backend):
             return ""
         return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
 
+    def generate_many(self, prompts: list[str], **gen_cfg) -> list[str]:
+        if not prompts:
+            return []
+        num_generations = int(gen_cfg.pop("num_generations", 1) or 1)
+        if gen_cfg:
+            # vLLM wrapper is configured at initialization time; for per-call overrides, fallback to HF path.
+            expanded_prompts: list[str] = []
+            for prompt in prompts:
+                expanded_prompts.extend([prompt] * num_generations)
+            return [self.hf_fallback.generate(prompt, **gen_cfg) for prompt in expanded_prompts]
+        _, completion_ids, _, _, _ = self.vllm_generation.generate(prompts, num_generations=num_generations)
+        if not completion_ids:
+            return ["" for _ in range(len(prompts) * num_generations)]
+        decoded = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in completion_ids]
+        expected = len(prompts) * num_generations
+        if len(decoded) < expected:
+            decoded.extend(["" for _ in range(expected - len(decoded))])
+        return decoded[:expected]
+
     def logprob(self, prompt: str, target_text: str, **cfg) -> float:
         # vLLM generation path does not provide teacher-forcing logprob consistently; use HF model forward path.
         return self.hf_fallback.logprob(prompt, target_text, **cfg)
@@ -93,4 +132,3 @@ def build_backend(
             raise ValueError("backend='vllm' requires initialized vLLM generation backend.")
         return VLLMBackend(vllm_generation=vllm_generation, tokenizer=tokenizer, hf_fallback=hf_backend)
     raise ValueError(f"Unknown backend '{backend_name}'. Expected one of: hf, vllm.")
-

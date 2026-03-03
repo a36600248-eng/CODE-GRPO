@@ -1,0 +1,20 @@
+# Local TRL package (this repository)
+-e ./trl
+
+# Core training stack
+torch>=2.5.1
+transformers>=4.56.2,<5.0.0
+accelerate>=1.4.0
+datasets>=3.0.0
+peft>=0.8.0
+
+# vLLM backend (Linux server, A800)
+vllm>=0.10.2,<0.13.0
+
+# Common utilities
+bitsandbytes>=0.43.0; platform_system == "Linux"
+sentencepiece>=0.2.0
+safetensors>=0.4.0
+pyyaml>=6.0
+tensorboard>=2.14.0
+pytest>=8.0.0
