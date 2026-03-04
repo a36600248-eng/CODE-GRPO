@@ -475,6 +475,7 @@ class CodeGRPOTreeRunner:
                     prediction_max_chars=self.args.prediction_max_chars,
                     reason_max_chars=self.args.reasoning_max_chars,
                     disallow_code_in_reasoning=self.args.disallow_code_in_reasoning,
+                    allow_outside_noise_chars=self.args.format_outside_noise_chars,
                 )
                 logic_correct = 1.0 if values_equal(logic_prediction, case["output"]) else 0.0
                 logic_score = _apply_format_penalty(logic_correct, logic_format_ok, penalty=self.args.format_penalty_logic)
@@ -532,6 +533,7 @@ class CodeGRPOTreeRunner:
                     prediction_max_chars=self.args.prediction_max_chars,
                     reason_max_chars=self.args.reasoning_max_chars,
                     disallow_code_in_reasoning=self.args.disallow_code_in_reasoning,
+                    allow_outside_noise_chars=self.args.format_outside_noise_chars,
                 )
                 exec_correct = 1.0 if is_match(exec_prediction, actual) else 0.0
                 exec_raw_correct_flags.append(exec_correct)

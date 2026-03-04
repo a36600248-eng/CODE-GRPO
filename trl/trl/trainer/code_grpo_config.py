@@ -53,6 +53,15 @@ class CodeGRPOConfig(GRPOConfig):
         default=True,
         metadata={"help": "Mark format invalid when reasoning contains code-like content."},
     )
+    format_outside_noise_chars: int = field(
+        default=80,
+        metadata={
+            "help": (
+                "Allowed non-whitespace chars outside required reasoning tags when parsing logic/exec responses. "
+                "Use 0 for fully strict parsing."
+            )
+        },
+    )
     beta_reason: float = field(default=1.0, metadata={"help": "Reason loss coefficient."})
     gamma_shrink: float = field(default=0.1, metadata={"help": "Advantage shrink factor for fully-correct nodes."})
 
@@ -112,5 +121,7 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("reasoning_max_chars must be > 0.")
         if self.prediction_max_chars <= 0:
             raise ValueError("prediction_max_chars must be > 0.")
+        if self.format_outside_noise_chars < 0:
+            raise ValueError("format_outside_noise_chars must be >= 0.")
         if self.debug_trace_sample_size < 0:
             raise ValueError("debug_trace_sample_size must be >= 0.")

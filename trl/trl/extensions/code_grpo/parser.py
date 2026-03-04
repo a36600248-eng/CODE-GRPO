@@ -85,6 +85,20 @@ def _has_non_whitespace_outside_spans(text: str, spans: list[tuple[int, int]]) -
     return bool(text[cursor:].strip())
 
 
+def _outside_non_ws_length(text: str, spans: list[tuple[int, int]]) -> int:
+    if not spans:
+        return len(re.sub(r"\s+", "", text or ""))
+    spans = sorted(spans, key=lambda x: x[0])
+    chunks: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        chunks.append(text[cursor:start])
+        cursor = max(cursor, end)
+    chunks.append(text[cursor:])
+    outside = "".join(chunks)
+    return len(re.sub(r"\s+", "", outside))
+
+
 def _is_single_line_value(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -101,6 +115,7 @@ def _format_ok_strict(
     prediction_max_chars: int,
     reason_max_chars: int,
     disallow_code_in_reasoning: bool,
+    allow_outside_noise_chars: int = 0,
 ) -> bool:
     if reason_match is None or prediction_match is None:
         return False
@@ -114,8 +129,10 @@ def _format_ok_strict(
         return False
     if disallow_code_in_reasoning and CODE_LIKE_PATTERN.search(reason):
         return False
-    # For reasoning stages, enforce no extra prose outside required tags.
-    if _has_non_whitespace_outside_spans(text, [reason_match.span(), prediction_match.span()]):
+    # Allow small prompt-echo noise outside tags to avoid over-sparse rewards.
+    # Keep strict behavior when `allow_outside_noise_chars` is 0.
+    outside_noise = _outside_non_ws_length(text, [reason_match.span(), prediction_match.span()])
+    if outside_noise > max(0, int(allow_outside_noise_chars)):
         return False
     return True
 
@@ -126,6 +143,7 @@ def parse_logic_response(
     prediction_max_chars: int = 200,
     reason_max_chars: int = 400,
     disallow_code_in_reasoning: bool = True,
+    allow_outside_noise_chars: int = 0,
 ) -> tuple[str, str, bool]:
     """
     Parse logic response and return:
@@ -145,6 +163,7 @@ def parse_logic_response(
         prediction_max_chars=prediction_max_chars,
         reason_max_chars=reason_max_chars,
         disallow_code_in_reasoning=disallow_code_in_reasoning,
+        allow_outside_noise_chars=allow_outside_noise_chars,
     )
     return reason, prediction, format_ok
 
@@ -155,6 +174,7 @@ def parse_exec_response(
     prediction_max_chars: int = 200,
     reason_max_chars: int = 400,
     disallow_code_in_reasoning: bool = True,
+    allow_outside_noise_chars: int = 0,
 ) -> tuple[str, str, bool]:
     """
     Parse execution response and return:
@@ -174,6 +194,7 @@ def parse_exec_response(
         prediction_max_chars=prediction_max_chars,
         reason_max_chars=reason_max_chars,
         disallow_code_in_reasoning=disallow_code_in_reasoning,
+        allow_outside_noise_chars=allow_outside_noise_chars,
     )
     return reason, prediction, format_ok
 

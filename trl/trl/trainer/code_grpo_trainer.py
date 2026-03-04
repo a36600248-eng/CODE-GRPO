@@ -160,6 +160,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "mean_R_code": rollout.mean_R_code,
                 "mean_R_reason_final": rollout.mean_R_reason_final,
                 "mean_pass_rate": rollout.mean_pass_rate,
+                **rollout.eval_metrics,
                 "eval_metrics": rollout.eval_metrics,
             }
             lines.append(json.dumps(payload, ensure_ascii=False))
