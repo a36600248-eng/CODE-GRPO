@@ -7,6 +7,7 @@ LOGIC_PREDICTION_PATTERN = re.compile(r"<LOGIC_PREDICTION>\s*(.*?)\s*</LOGIC_PRE
 EXEC_PREDICTION_PATTERN = re.compile(r"<EXEC_PREDICTION>\s*(.*?)\s*</EXEC_PREDICTION>", re.DOTALL | re.IGNORECASE)
 LEGACY_PREDICTION_PATTERN = re.compile(r"<PREDICTION>\s*(.*?)\s*</PREDICTION>", re.DOTALL | re.IGNORECASE)
 CODE_LIKE_PATTERN = re.compile(r"```|<CODE>|def\s+\w+\s*\(|class\s+\w+\s*[:(]", re.IGNORECASE)
+FENCED_BLOCK_PATTERN = re.compile(r"^\s*```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```\s*$", re.DOTALL)
 
 
 def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
@@ -16,9 +17,19 @@ def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
     return match
 
 
+def _normalize_response_text(text: str) -> str:
+    text = (text or "").replace("\ufeff", "").strip()
+    if not text:
+        return ""
+    fenced_match = FENCED_BLOCK_PATTERN.match(text)
+    if fenced_match:
+        return fenced_match.group(1).strip()
+    return text
+
+
 def parse_generation_output(text: str) -> tuple[str, str, str, str]:
     """Parse <CODE>, <REASON>, <LOGIC_PREDICTION>, <EXEC_PREDICTION> sections from generation output."""
-    text = text or ""
+    text = _normalize_response_text(text)
     code_match = _last_match(CODE_PATTERN, text)
     reason_match = _last_match(REASON_PATTERN, text)
     code = code_match.group(1).strip() if code_match else text.strip()
@@ -120,7 +131,7 @@ def parse_logic_response(
     Parse logic response and return:
     (reason_text, logic_prediction, format_ok)
     """
-    text = text or ""
+    text = _normalize_response_text(text)
     reason_match = _last_match(REASON_PATTERN, text)
     logic_match = _last_match(LOGIC_PREDICTION_PATTERN, text)
 
@@ -149,7 +160,7 @@ def parse_exec_response(
     Parse execution response and return:
     (reason_text, exec_prediction, format_ok)
     """
-    text = text or ""
+    text = _normalize_response_text(text)
     reason_match = _last_match(REASON_PATTERN, text)
     exec_match = _last_match(EXEC_PREDICTION_PATTERN, text)
 

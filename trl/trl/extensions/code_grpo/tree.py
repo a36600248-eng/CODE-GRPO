@@ -51,12 +51,12 @@ def _clamp01(value: float) -> float:
 
 
 def _apply_format_penalty(correct_score: float, format_ok: bool, penalty: float) -> float:
-    # Keep `penalty` arg for backward-compatible config, but enforce strict zero
-    # reward on format violations to prevent reward hacking via verbose outputs.
-    del penalty
-    if not format_ok:
-        return 0.0
-    return _clamp01(correct_score)
+    # Preserve learning signal when value prediction is correct but formatting is noisy.
+    # `penalty=1.0` keeps strict-zero behavior for format violations.
+    if format_ok:
+        return _clamp01(correct_score)
+    penalty = _clamp01(penalty)
+    return _clamp01(correct_score * max(0.0, 1.0 - penalty))
 
 
 def _safe_preview(value: Any, max_chars: int = 200) -> str:

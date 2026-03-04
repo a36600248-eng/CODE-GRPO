@@ -11,7 +11,7 @@ def serialize_value(value: Any) -> str:
 
 GENERATION_FEWSHOT = """Format example (follow exactly this structure):
 <REASON>
-Use multiplication by 2 to transform the input.
+Use multiplication by 2.
 </REASON>
 <CODE>
 def solve(x):
@@ -49,14 +49,15 @@ def build_generation_prompt(
     parent_code: str | None = None,
 ) -> str:
     parts = [
-        "You solve programming tasks.",
-        "Return output in this exact tag order and include all tags exactly once:",
+        "You solve one Python programming task.",
+        "Return exactly two tags in this order, each exactly once:",
         "<REASON>...</REASON>",
         "<CODE>...</CODE>",
-        "Hard constraints:",
-        "1) Output only these tags and their contents. No markdown, no extra prose outside tags.",
-        "2) Do NOT output any prediction tags here.",
-        "3) <REASON> should briefly explain the implemented algorithm only.",
+        "Rules:",
+        "1) No markdown fences.",
+        "2) No text before <REASON> or after </CODE>.",
+        "3) Do NOT output prediction tags in this stage.",
+        "4) <REASON> must be one short sentence describing algorithm intent.",
         GENERATION_FEWSHOT,
         "Question:",
         question_prompt.strip(),
@@ -126,22 +127,19 @@ def build_generation_prompt(
 
 def build_logic_prompt(code: str, case_input: Any, question_prompt: str = "") -> str:
     return (
-        "You are evaluating code intent, not rewriting code.\n"
-        "Given task statement, Python code, and an input, infer intended logic and predict the ideal output.\n"
-        "Ignore implementation-level issues such as syntax errors.\n"
-        "Output format is mandatory and must contain only these tags (exactly once):\n"
+        "You evaluate intended code logic; do not rewrite code.\n"
+        "Infer the intended output for this input.\n"
+        "Ignore implementation-level issues such as syntax/runtime errors.\n"
+        "Output exactly these tags, once, in this order:\n"
         "<REASON>...</REASON>\n"
         "<LOGIC_PREDICTION>...</LOGIC_PREDICTION>\n"
-        "Hard constraints:\n"
-        "1) <REASON> must appear before <LOGIC_PREDICTION>.\n"
-        "2) No extra text outside tags.\n"
-        "3) Do NOT output code, pseudocode, markdown, or examples.\n"
-        "4) <REASON> should be short (one sentence).\n"
-        "5) <LOGIC_PREDICTION> must be one-line final value only.\n"
+        "No markdown, no extra text outside tags.\n"
+        "<REASON> must be one short sentence.\n"
+        "<LOGIC_PREDICTION> must be one-line final value only.\n"
         f"Question:\n{question_prompt.strip()}\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
-        "Now answer for the current code/input with the required tags only."
+        "Now respond with tags only."
     )
 
 
@@ -150,20 +148,17 @@ def build_exec_prompt(
     case_input: Any,
 ) -> str:
     return (
-        "You are simulating actual code execution, not solving the task directly.\n"
-        "Analyze Python code and predict actual execution result for the input.\n"
-        "Output format is mandatory and must contain only these tags (exactly once):\n"
+        "You simulate actual execution of the given code.\n"
+        "Predict actual result for the input (value or error type).\n"
+        "Output exactly these tags, once, in this order:\n"
         "<REASON>...</REASON>\n"
         "<EXEC_PREDICTION>...</EXEC_PREDICTION>\n"
-        "Hard constraints:\n"
-        "1) <REASON> must appear before <EXEC_PREDICTION>.\n"
-        "2) No extra text outside tags.\n"
-        "3) Do NOT output code, pseudocode, markdown, or examples.\n"
-        "4) <REASON> should be short (one sentence).\n"
-        "5) <EXEC_PREDICTION> must be one-line final value or error type (e.g., SyntaxError, Timeout).\n"
+        "No markdown, no extra text outside tags.\n"
+        "<REASON> must be one short sentence.\n"
+        "<EXEC_PREDICTION> must be one-line final value or error type (e.g., SyntaxError).\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
-        "Now answer for the current code/input with the required tags only."
+        "Now respond with tags only."
     )
 
 
