@@ -1,5 +1,6 @@
 import math
 import random
+import ast
 from typing import Any
 
 from .error_utils import summarize_error
@@ -65,6 +66,19 @@ def _safe_preview(value: Any, max_chars: int = 200) -> str:
 def _is_double_zero_node(node: Node, eps: float = 1e-12) -> bool:
     """Return True when both rewards are (numerically) zero."""
     return abs(node.R_code) <= eps and abs(node.R_reason) <= eps
+
+
+def _parse_case_input(value: Any) -> Any:
+    """Parse serialized case input while keeping plain strings safe."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return ast.literal_eval(text)
+    except Exception:  # noqa: BLE001
+        return value
 
 
 class CodeGRPOTreeRunner:
@@ -392,7 +406,7 @@ class CodeGRPOTreeRunner:
         code_mask = [1] * len(token_ids)
         reason_mask = [0] * len(token_ids)
 
-        case_inputs = [case["input"] for case in test_cases]
+        case_inputs = [_parse_case_input(case["input"]) for case in test_cases]
         exec_results = execute_batch(
             code=code,
             case_inputs=case_inputs,
@@ -409,10 +423,10 @@ class CodeGRPOTreeRunner:
         error_summary = next((res.error_msg for res in exec_results if res.kind != "OK" and res.error_msg), "")
         failed_case_input: Any | None = None
         failed_case_actual: str | None = None
-        for case, actual, passed in zip(test_cases, exec_results, pass_flags, strict=True):
+        for case, actual, passed, parsed_input in zip(test_cases, exec_results, pass_flags, case_inputs, strict=True):
             if passed:
                 continue
-            failed_case_input = case["input"]
+            failed_case_input = parsed_input
             if actual.kind == "OK":
                 failed_case_actual = _safe_preview(actual.value)
             else:
@@ -423,7 +437,7 @@ class CodeGRPOTreeRunner:
             logic_scores = []
             logic_format_flags = []
             logic_audit_details: list[dict[str, Any]] = []
-            logic_prompts = [build_logic_prompt(code, test_cases[idx]["input"], question_prompt=prompt) for idx in audit_indices]
+            logic_prompts = [build_logic_prompt(code, case_inputs[idx], question_prompt=prompt) for idx in audit_indices]
             logic_outputs = self.backend.generate_many(logic_prompts)
             for idx, logic_output in zip(audit_indices, logic_outputs, strict=True):
                 case = test_cases[idx]
@@ -441,7 +455,7 @@ class CodeGRPOTreeRunner:
                 logic_audit_details.append(
                     {
                         "case_index": idx,
-                        "input": _safe_preview(case["input"], max_chars=400),
+                        "input": _safe_preview(case_inputs[idx], max_chars=400),
                         "expected_output": _safe_preview(case["output"], max_chars=400),
                         "raw_output": summarize_error(logic_output, trace_max_chars, trace_max_lines),
                         "parsed_reason": summarize_error(logic_reason, trace_max_chars, trace_max_lines),
@@ -471,7 +485,7 @@ class CodeGRPOTreeRunner:
             correctness = []
             exec_format_flags = []
             exec_raw_correct_flags = []
-            exec_prompts = [build_exec_prompt(code, test_cases[idx]["input"]) for idx in audit_indices]
+            exec_prompts = [build_exec_prompt(code, case_inputs[idx]) for idx in audit_indices]
             exec_outputs = self.backend.generate_many(exec_prompts)
             for idx, exec_prompt, exec_output in zip(audit_indices, exec_prompts, exec_outputs, strict=True):
                 case = test_cases[idx]
@@ -497,7 +511,7 @@ class CodeGRPOTreeRunner:
                 exec_audit_details.append(
                     {
                         "case_index": idx,
-                        "input": _safe_preview(case["input"], max_chars=400),
+                        "input": _safe_preview(case_inputs[idx], max_chars=400),
                         "actual_kind": actual.kind,
                         "actual_value": _safe_preview(actual.value, max_chars=400) if actual.kind == "OK" else "",
                         "actual_error_type": actual.error_type or "",
