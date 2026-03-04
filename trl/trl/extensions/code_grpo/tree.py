@@ -84,6 +84,20 @@ def _parse_case_input(value: Any) -> Any:
         return value
 
 
+def _has_solve_entrypoint(code: str) -> bool:
+    """Return True when code defines a top-level `solve` function."""
+    if not isinstance(code, str) or not code.strip():
+        return False
+    try:
+        module = ast.parse(code)
+    except Exception:  # noqa: BLE001
+        return False
+    for node in module.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "solve":
+            return True
+    return False
+
+
 def _build_exec_audit_completion(reasoning: str, exec_prediction: str) -> str:
     return (
         "<REASON>\n"
@@ -485,7 +499,15 @@ class CodeGRPOTreeRunner:
             R_soft = 0.0
             logic_format_ok_rate = 0.0
             logic_audit_details = []
-        R_code = _compute_code_reward(pass_rate=pass_rate, r_soft=R_soft, lambda_soft=self.args.lambda_soft)
+        # Guard against reward hacking: only allow soft reward to influence R_code
+        # when code is syntactically valid and defines `solve`.
+        soft_reward_eligible = status_code != "SYNTAX_ERROR" and _has_solve_entrypoint(code)
+        R_soft_effective = R_soft if soft_reward_eligible else 0.0
+        R_code = _compute_code_reward(
+            pass_rate=pass_rate,
+            r_soft=R_soft_effective,
+            lambda_soft=self.args.lambda_soft,
+        )
 
         exec_audit_details: list[dict[str, Any]] = []
         exec_train_samples: list[dict[str, str]] = []
@@ -577,6 +599,9 @@ class CodeGRPOTreeRunner:
                 "error_summary": error_summary,
                 "logic_format_ok_rate": logic_format_ok_rate,
                 "exec_format_ok_rate": exec_format_ok_rate,
+                "soft_reward_eligible": soft_reward_eligible,
+                "R_soft_raw": R_soft,
+                "R_soft_effective": R_soft_effective,
                 "generation_debug": {
                     "raw_output": summarize_error(raw_output, trace_max_chars, trace_max_lines),
                     "parsed_reason": summarize_error(parsed_reason, trace_max_chars, trace_max_lines),
