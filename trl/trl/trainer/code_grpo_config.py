@@ -29,6 +29,15 @@ class CodeGRPOConfig(GRPOConfig):
     context_round_window: int = field(default=2, metadata={"help": "Rounds of feedback to carry to next prompt."})
 
     lambda_soft: float = field(default=0.2, metadata={"help": "Soft reward coefficient for code reward."})
+    soft_reward_ineligible_scale: float = field(
+        default=0.3,
+        metadata={
+            "help": (
+                "Scale applied to soft reward when node is soft-reward-ineligible "
+                "(e.g., syntax error or missing top-level solve). 0 keeps hard gate."
+            )
+        },
+    )
     format_penalty_logic: float = field(
         default=0.3,
         metadata={"help": "Penalty applied when logic response format is invalid."},
@@ -107,6 +116,10 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("M_audit and M_retry must be non-negative.")
         if not (0.0 <= self.lambda_soft <= 1.0):
             raise ValueError(f"lambda_soft must be in [0, 1], got: {self.lambda_soft}")
+        if not (0.0 <= self.soft_reward_ineligible_scale <= 1.0):
+            raise ValueError(
+                f"soft_reward_ineligible_scale must be in [0, 1], got: {self.soft_reward_ineligible_scale}"
+            )
         if not (0.0 <= self.format_penalty_logic <= 1.0):
             raise ValueError(f"format_penalty_logic must be in [0, 1], got: {self.format_penalty_logic}")
         if not (0.0 <= self.format_penalty_exec <= 1.0):

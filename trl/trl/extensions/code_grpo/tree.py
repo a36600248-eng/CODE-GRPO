@@ -188,6 +188,9 @@ class CodeGRPOTreeRunner:
                             "status_code": node.status_code,
                             "R_code": node.R_code,
                             "R_reason": node.R_reason,
+                            "R_soft_raw": float(node.exec_summary.get("R_soft_raw", 0.0)),
+                            "R_soft_effective": float(node.exec_summary.get("R_soft_effective", 0.0)),
+                            "soft_reward_eligible": bool(node.exec_summary.get("soft_reward_eligible", False)),
                             "frozen_code": node.frozen_code,
                             "frozen_reason": node.frozen_reason,
                             "pruned_double_zero": node.exec_summary.get("pruned_reason", "") == "double_zero_rewards",
@@ -284,6 +287,13 @@ class CodeGRPOTreeRunner:
             syntax_error_rate = _mean([1.0 if node.status_code == "SYNTAX_ERROR" else 0.0 for node in collected_nodes])
             timeout_rate = _mean([1.0 if node.status_code == "TIMEOUT" else 0.0 for node in collected_nodes])
             soft_lift = _mean([max(0.0, node.R_code - node.pass_rate) for node in collected_nodes])
+            mean_R_soft_raw = _mean([float(node.exec_summary.get("R_soft_raw", 0.0)) for node in collected_nodes])
+            mean_R_soft_effective = _mean(
+                [float(node.exec_summary.get("R_soft_effective", 0.0)) for node in collected_nodes]
+            )
+            soft_reward_eligible_rate = _mean(
+                [1.0 if bool(node.exec_summary.get("soft_reward_eligible", False)) else 0.0 for node in collected_nodes]
+            )
             eval_metrics.update(
                 {
                     "logic_format_ok_rate": logic_format_ok_rate,
@@ -291,6 +301,9 @@ class CodeGRPOTreeRunner:
                     "syntax_error_rate": syntax_error_rate,
                     "timeout_rate": timeout_rate,
                     "soft_lift": soft_lift,
+                    "mean_R_soft_raw": mean_R_soft_raw,
+                    "mean_R_soft_effective": mean_R_soft_effective,
+                    "soft_reward_eligible_rate": soft_reward_eligible_rate,
                 }
             )
 
@@ -500,10 +513,11 @@ class CodeGRPOTreeRunner:
             R_soft = 0.0
             logic_format_ok_rate = 0.0
             logic_audit_details = []
-        # Guard against reward hacking: only allow soft reward to influence R_code
-        # when code is syntactically valid and defines `solve`.
+        # Guard against reward hacking while preserving early learning signal:
+        # ineligible nodes do not get full soft reward, but can keep a down-scaled portion.
         soft_reward_eligible = status_code != "SYNTAX_ERROR" and _has_solve_entrypoint(code)
-        R_soft_effective = R_soft if soft_reward_eligible else 0.0
+        soft_scale = 1.0 if soft_reward_eligible else self.args.soft_reward_ineligible_scale
+        R_soft_effective = _clamp01(R_soft * soft_scale)
         R_code = _compute_code_reward(
             pass_rate=pass_rate,
             r_soft=R_soft_effective,
@@ -636,6 +650,9 @@ class CodeGRPOTreeRunner:
                         "exec_failed_input": exec_failed.get("input") if exec_failed else None,
                         "exec_failed_prediction": exec_failed.get("parsed_prediction") if exec_failed else None,
                         "exec_actual_kind": exec_failed.get("actual_kind") if exec_failed else None,
+                        "soft_reward_eligible": soft_reward_eligible,
+                        "R_soft_raw": R_soft,
+                        "R_soft_effective": R_soft_effective,
                     }
                 ],
             },
@@ -645,12 +662,16 @@ class CodeGRPOTreeRunner:
             prompt_text=prompt_text,
         )
         self.logger.info(
-            "[REWARD] node=%s pass_rate=%.4f R_code=%.4f R_reason=%.4f R_reason_final=%.4f",
+            "[REWARD] node=%s pass_rate=%.4f R_code=%.4f R_reason=%.4f R_reason_final=%.4f "
+            "R_soft_raw=%.4f R_soft_effective=%.4f soft_eligible=%s",
             child.node_id,
             child.pass_rate,
             child.R_code,
             child.R_reason,
             child.R_reason_final,
+            R_soft,
+            R_soft_effective,
+            soft_reward_eligible,
         )
         return child
 

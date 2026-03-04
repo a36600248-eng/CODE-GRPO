@@ -53,10 +53,11 @@ num_generations: 2
 num_generations_eval: 2
 T_max: 2
 N_max: 8
-M_audit: 1
+M_audit: 2
 M_retry: 1
 context_round_window: 2
 lambda_soft: 0.2
+soft_reward_ineligible_scale: 0.3
 beta_reason: 1.0
 gamma_shrink: 0.1
 format_outside_noise_chars: 80
