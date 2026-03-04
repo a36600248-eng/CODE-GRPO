@@ -51,9 +51,12 @@ def _clamp01(value: float) -> float:
 
 
 def _apply_format_penalty(correct_score: float, format_ok: bool, penalty: float) -> float:
-    if format_ok:
-        return _clamp01(correct_score)
-    return _clamp01(correct_score - penalty)
+    # Keep `penalty` arg for backward-compatible config, but enforce strict zero
+    # reward on format violations to prevent reward hacking via verbose outputs.
+    del penalty
+    if not format_ok:
+        return 0.0
+    return _clamp01(correct_score)
 
 
 def _safe_preview(value: Any, max_chars: int = 200) -> str:
@@ -79,6 +82,17 @@ def _parse_case_input(value: Any) -> Any:
         return ast.literal_eval(text)
     except Exception:  # noqa: BLE001
         return value
+
+
+def _build_exec_audit_completion(reasoning: str, exec_prediction: str) -> str:
+    return (
+        "<REASON>\n"
+        f"{(reasoning or '').strip()}\n"
+        "</REASON>\n"
+        "<EXEC_PREDICTION>\n"
+        f"{(exec_prediction or '').strip()}\n"
+        "</EXEC_PREDICTION>"
+    )
 
 
 class CodeGRPOTreeRunner:
@@ -502,12 +516,13 @@ class CodeGRPOTreeRunner:
                 exec_score = _apply_format_penalty(exec_correct, exec_format_ok, penalty=self.args.format_penalty_exec)
                 correctness.append(exec_score)
                 exec_format_flags.append(1.0 if exec_format_ok else 0.0)
-                exec_train_samples.append(
-                    {
-                        "prompt_text": exec_prompt,
-                        "completion_text": exec_output,
-                    }
-                )
+                if exec_format_ok:
+                    exec_train_samples.append(
+                        {
+                            "prompt_text": exec_prompt,
+                            "completion_text": _build_exec_audit_completion(exec_reason, exec_prediction),
+                        }
+                    )
                 exec_audit_details.append(
                     {
                         "case_index": idx,

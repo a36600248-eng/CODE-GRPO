@@ -23,7 +23,7 @@ def _exec_worker(code: str, case_input: Any, queue: "mp.Queue[tuple[str, Any, st
         elif "output" in scope:
             value = scope["output"]
         else:
-            value = None
+            raise RuntimeError("MissingEntrypointError: expected solve(case_input), main(case_input), or global output")
         queue.put(("OK", value, None, None))
     except Exception as exc:  # noqa: BLE001
         queue.put(("RUNTIME_ERROR", None, type(exc).__name__, "".join(traceback.format_exception(exc))))
@@ -95,7 +95,9 @@ def _exec_batch_worker(
             elif "output" in scope:
                 value = scope["output"]
             else:
-                value = None
+                raise RuntimeError(
+                    "MissingEntrypointError: expected solve(case_input), main(case_input), or global output"
+                )
             results.append(("OK", value, None, None))
         except Exception as exc:  # noqa: BLE001
             results.append(("RUNTIME_ERROR", None, type(exc).__name__, "".join(traceback.format_exception(exc))))
