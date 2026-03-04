@@ -15,6 +15,10 @@ class CodeGRPOConfig(GRPOConfig):
     backend: str = field(default="hf", metadata={"help": "Generation backend: hf or vllm."})
 
     K: int = field(default=2, metadata={"help": "Sibling group size per parent expansion."})
+    K_reason: int = field(
+        default=4,
+        metadata={"help": "Sibling size for reason-only rollout when code is frozen and reason is not frozen."},
+    )
     T_max: int = field(default=3, metadata={"help": "Maximum rounds per question."})
     N_max: int = field(default=16, metadata={"help": "Maximum generated nodes per question."})
     M_audit: int = field(default=3, metadata={"help": "Fixed audit subset size per question."})
@@ -37,6 +41,18 @@ class CodeGRPOConfig(GRPOConfig):
         default=True,
         metadata={"help": "Whether <REASON> must appear before prediction tags to count as format-valid."},
     )
+    reasoning_max_chars: int = field(
+        default=400,
+        metadata={"help": "Max allowed characters in reasoning tags for logic/exec parsing."},
+    )
+    prediction_max_chars: int = field(
+        default=200,
+        metadata={"help": "Max allowed characters in prediction tags for logic/exec parsing."},
+    )
+    disallow_code_in_reasoning: bool = field(
+        default=True,
+        metadata={"help": "Mark format invalid when reasoning contains code-like content."},
+    )
     beta_reason: float = field(default=1.0, metadata={"help": "Reason loss coefficient."})
     gamma_shrink: float = field(default=0.1, metadata={"help": "Advantage shrink factor for fully-correct nodes."})
 
@@ -51,6 +67,14 @@ class CodeGRPOConfig(GRPOConfig):
         default="traces/rollout",
         metadata={"help": "Relative directory under output_dir for per-question JSON traces."},
     )
+    debug_trace_sample_size: int = field(
+        default=1,
+        metadata={"help": "How many rollout traces to dump per train step when dump_train_traces=True (0 means all)."},
+    )
+    debug_trace_question_ids: list[str] = field(
+        default_factory=list,
+        metadata={"help": "Optional question_id whitelist for trace dump. Empty means no whitelist."},
+    )
     dump_train_traces: bool = field(
         default=False,
         metadata={"help": "Whether to dump per-question rollout traces during train mode as well."},
@@ -64,6 +88,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError(f"backend must be one of ['hf', 'vllm'], got: {self.backend}")
         if self.K < 2:
             raise ValueError("K must be >= 2 for sibling-group GRPO.")
+        if self.K_reason < 1:
+            raise ValueError("K_reason must be >= 1.")
         if self.K != self.num_generations:
             raise ValueError(
                 f"K ({self.K}) must equal num_generations ({self.num_generations}) to keep sibling grouping consistent."
@@ -82,3 +108,9 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("eval_k_list must contain at least one k value.")
         if any(k < 1 for k in self.eval_k_list):
             raise ValueError("All values in eval_k_list must be >= 1.")
+        if self.reasoning_max_chars <= 0:
+            raise ValueError("reasoning_max_chars must be > 0.")
+        if self.prediction_max_chars <= 0:
+            raise ValueError("prediction_max_chars must be > 0.")
+        if self.debug_trace_sample_size < 0:
+            raise ValueError("debug_trace_sample_size must be >= 0.")

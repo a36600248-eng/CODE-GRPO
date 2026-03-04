@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import time
 from typing import Any
 
 import torch
@@ -97,6 +98,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         )
         self._trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
+        logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
@@ -131,6 +135,37 @@ class CodeGRPOTrainer(GRPOTrainer):
             with open(trace_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
             self._trace_dump_counter += 1
+
+    def _select_rollouts_for_trace(self, rollouts, mode: str):
+        selected = list(rollouts)
+        whitelist = {str(qid) for qid in getattr(self.args, "debug_trace_question_ids", [])}
+        if whitelist:
+            selected = [rollout for rollout in selected if rollout.question_id in whitelist]
+        sample_size = int(getattr(self.args, "debug_trace_sample_size", 0) or 0)
+        if sample_size > 0 and len(selected) > sample_size and not whitelist:
+            seed = int(self.args.seed + self.state.global_step + (0 if mode == "train" else 10_000_000))
+            rng = random.Random(seed)
+            selected = rng.sample(selected, sample_size)
+        return selected
+
+    def _append_rollout_summaries(self, rollouts, mode: str):
+        lines = []
+        for rollout in rollouts:
+            payload = {
+                "mode": mode,
+                "global_step": int(self.state.global_step),
+                "question_id": rollout.question_id,
+                "node_count": rollout.node_count,
+                "resample_count": rollout.resample_count,
+                "mean_R_code": rollout.mean_R_code,
+                "mean_R_reason_final": rollout.mean_R_reason_final,
+                "mean_pass_rate": rollout.mean_pass_rate,
+                "eval_metrics": rollout.eval_metrics,
+            }
+            lines.append(json.dumps(payload, ensure_ascii=False))
+        if lines:
+            with open(self._rollout_summary_path, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
 
     def _build_training_batch(self, train_samples: list) -> dict[str, torch.Tensor]:
         device = self.accelerator.device
@@ -224,6 +259,7 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _generate_and_score_completions(self, inputs: list[dict[str, Any]]) -> dict[str, torch.Tensor | Any]:
         mode = "train" if self.model.training else "eval"
         examples = self._unique_examples(inputs)
+        rollout_t0 = time.perf_counter()
 
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
@@ -233,6 +269,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             rollout_seed = base_rng.randint(0, 2**31 - 1)
             rollout = self.tree_runner.run_question(example, rng=random.Random(rollout_seed))
             rollouts.append(rollout)
+        rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
 
         train_samples = [sample for rollout in rollouts for sample in rollout.train_samples]
         if not train_samples and examples:
@@ -241,6 +278,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 reasoning="",
                 logic_prediction="",
                 exec_prediction="",
+                include_predictions=False,
             )
             _, fallback_code_mask, fallback_reason_mask = build_token_masks(self.code_tokenizer, fallback_completion)
             train_samples = [
@@ -283,6 +321,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._metrics[mode]["std_R_reason_final"].append(std_r_reason)
         self._metrics[mode]["node_count"].append(node_count)
         self._metrics[mode]["resample_count"].append(resample_count)
+        self._metrics[mode]["rollout_time_s"].append(float(rollout_time_s))
+        self._metrics[mode]["rollout_nodes_per_s"].append(float(node_count / rollout_time_s))
+        self._metrics[mode]["rollout_questions_per_s"].append(float(len(examples) / rollout_time_s))
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
@@ -296,15 +337,18 @@ class CodeGRPOTrainer(GRPOTrainer):
             merged_eval_metrics["pass_at_k_round_n"] = merged_pass_at_k_round_n
 
         if self.args.codegrpo_mode == "test":
-            self._dump_rollout_traces(rollouts)
-            logger.info("[TEST] dumped %d rollout trace files", len(rollouts))
+            selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="test")
+            self._dump_rollout_traces(selected_rollouts)
+            logger.info("[TEST] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
         elif mode == "eval":
-            self._dump_rollout_traces(rollouts)
-            logger.info("[EVAL] dumped %d rollout trace files", len(rollouts))
+            selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="eval")
+            self._dump_rollout_traces(selected_rollouts)
+            logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
         else:
             if self.args.dump_train_traces:
-                self._dump_rollout_traces(rollouts)
-                logger.info("[TRAIN] dumped %d rollout trace files", len(rollouts))
+                selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="train")
+                self._dump_rollout_traces(selected_rollouts)
+                logger.info("[TRAIN] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
             logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
 
         if mode == "eval":
@@ -318,6 +362,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "resample_count": resample_count,
                 **merged_eval_metrics,
             }
+        self._append_rollout_summaries(rollouts, mode=mode)
 
         return batch
 

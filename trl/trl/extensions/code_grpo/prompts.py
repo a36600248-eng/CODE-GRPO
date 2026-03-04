@@ -10,19 +10,13 @@ def serialize_value(value: Any) -> str:
 
 
 GENERATION_FEWSHOT = """Format example (follow exactly this structure):
+<REASON>
+Use multiplication by 2 to transform the input.
+</REASON>
 <CODE>
 def solve(x):
     return x * 2
-</CODE>
-<REASON>
-The task asks for double of the input.
-<LOGIC_PREDICTION>
-6
-</LOGIC_PREDICTION>
-<EXEC_PREDICTION>
-6
-</EXEC_PREDICTION>
-</REASON>"""
+</CODE>"""
 
 
 LOGIC_FEWSHOT = """Example:
@@ -57,14 +51,12 @@ def build_generation_prompt(
     parts = [
         "You solve programming tasks.",
         "Return output in this exact tag order and include all tags exactly once:",
+        "<REASON>...</REASON>",
         "<CODE>...</CODE>",
-        "<REASON>...<LOGIC_PREDICTION>...</LOGIC_PREDICTION><EXEC_PREDICTION>...</EXEC_PREDICTION></REASON>",
         "Hard constraints:",
         "1) Output only these tags and their contents. No markdown, no extra prose outside tags.",
-        "2) <REASON> must appear before both prediction tags.",
-        "3) <LOGIC_PREDICTION> is the ideal output by intended logic (ignore minor implementation issues).",
-        "4) <EXEC_PREDICTION> is the actual execution outcome for the code (value or error type).",
-        "5) Always provide concise final predictions (single value or error name).",
+        "2) Do NOT output any prediction tags here.",
+        "3) <REASON> should briefly explain the implemented algorithm only.",
         GENERATION_FEWSHOT,
         "Question:",
         question_prompt.strip(),
@@ -79,21 +71,49 @@ def build_generation_prompt(
             ]
         )
     if history:
-        parts.append("Recent execution feedback and failed-case summaries:")
+        parts.append("Recent execution and reasoning feedback summaries:")
         for item in history:
             entry = (
                 f"- round={item.get('round', '')}, status={item.get('status_code', '')}, "
                 f"error={item.get('error_summary', '')}"
             )
+            status_reason = item.get("status_reason")
+            if status_reason:
+                entry += f", reason_status={status_reason}"
             code_preview = (item.get("code_preview") or "").strip()
             if code_preview:
                 entry += f", code_snippet={code_preview}"
+            logic_mismatch_count = item.get("logic_mismatch_count")
+            if logic_mismatch_count is not None:
+                entry += f", logic_mismatch_count={logic_mismatch_count}"
+            exec_mismatch_count = item.get("exec_mismatch_count")
+            if exec_mismatch_count is not None:
+                entry += f", exec_mismatch_count={exec_mismatch_count}"
+            logic_fmt = item.get("logic_format_ok_rate")
+            if logic_fmt is not None:
+                entry += f", logic_format_ok_rate={logic_fmt}"
+            exec_fmt = item.get("exec_format_ok_rate")
+            if exec_fmt is not None:
+                entry += f", exec_format_ok_rate={exec_fmt}"
             failed_input = item.get("failed_input")
             failed_actual = item.get("failed_actual")
             if failed_input is not None:
                 entry += (
                     f", failed_input={serialize_value(failed_input)}, "
                     f"failed_actual={serialize_value(failed_actual)}"
+                )
+            logic_failed_input = item.get("logic_failed_input")
+            if logic_failed_input is not None:
+                entry += (
+                    f", logic_failed_input={serialize_value(logic_failed_input)}, "
+                    f"logic_failed_prediction={serialize_value(item.get('logic_failed_prediction'))}"
+                )
+            exec_failed_input = item.get("exec_failed_input")
+            if exec_failed_input is not None:
+                entry += (
+                    f", exec_failed_input={serialize_value(exec_failed_input)}, "
+                    f"exec_failed_prediction={serialize_value(item.get('exec_failed_prediction'))}, "
+                    f"exec_actual_kind={serialize_value(item.get('exec_actual_kind'))}"
                 )
             parts.append(entry)
     if not need_code:
@@ -106,16 +126,18 @@ def build_generation_prompt(
 
 def build_logic_prompt(code: str, case_input: Any, question_prompt: str = "") -> str:
     return (
+        "You are evaluating code intent, not rewriting code.\n"
         "Given task statement, Python code, and an input, infer intended logic and predict the ideal output.\n"
         "Ignore implementation-level issues such as syntax errors.\n"
-        "Output format is mandatory and must contain only these tags:\n"
+        "Output format is mandatory and must contain only these tags (exactly once):\n"
         "<REASON>...</REASON>\n"
         "<LOGIC_PREDICTION>...</LOGIC_PREDICTION>\n"
         "Hard constraints:\n"
         "1) <REASON> must appear before <LOGIC_PREDICTION>.\n"
         "2) No extra text outside tags.\n"
-        "3) Prediction must be a concise final value.\n"
-        f"{LOGIC_FEWSHOT}\n"
+        "3) Do NOT output code, pseudocode, markdown, or examples.\n"
+        "4) <REASON> should be short (one sentence).\n"
+        "5) <LOGIC_PREDICTION> must be one-line final value only.\n"
         f"Question:\n{question_prompt.strip()}\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
@@ -128,15 +150,17 @@ def build_exec_prompt(
     case_input: Any,
 ) -> str:
     return (
+        "You are simulating actual code execution, not solving the task directly.\n"
         "Analyze Python code and predict actual execution result for the input.\n"
-        "Output format is mandatory and must contain only these tags:\n"
+        "Output format is mandatory and must contain only these tags (exactly once):\n"
         "<REASON>...</REASON>\n"
         "<EXEC_PREDICTION>...</EXEC_PREDICTION>\n"
         "Hard constraints:\n"
         "1) <REASON> must appear before <EXEC_PREDICTION>.\n"
         "2) No extra text outside tags.\n"
-        "3) Prediction must be either the concrete output value or an error type (e.g., SyntaxError, Timeout).\n"
-        f"{EXEC_FEWSHOT}\n"
+        "3) Do NOT output code, pseudocode, markdown, or examples.\n"
+        "4) <REASON> should be short (one sentence).\n"
+        "5) <EXEC_PREDICTION> must be one-line final value or error type (e.g., SyntaxError, Timeout).\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
         "Now answer for the current code/input with the required tags only."

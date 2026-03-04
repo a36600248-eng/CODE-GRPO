@@ -3,7 +3,7 @@ import random
 from typing import Any
 
 from .error_utils import summarize_error
-from .executor import execute
+from .executor import execute_batch
 from .matcher import is_match, values_equal
 from .parser import (
     build_canonical_completion,
@@ -166,26 +166,67 @@ class CodeGRPOTreeRunner:
                 }
             )
 
+            code_pass_nodes = [node for node in next_frontier if node.pass_rate == 1.0]
+            if code_pass_nodes:
+                # Once any code passes, focus the next round only on a single passed-code node.
+                focus_node = max(code_pass_nodes, key=lambda n: (n.R_reason, n.R_reason_final, n.node_id))
+                for node in next_frontier:
+                    if node.node_id != focus_node.node_id:
+                        node.exec_summary["pruned_reason"] = "focus_on_passed_code"
+                next_frontier = [focus_node]
+                self.logger.info(
+                    "[TREE] focus_on_passed_code round=%d focus_node=%s dropped=%d",
+                    round_idx,
+                    focus_node.node_id,
+                    max(0, len(code_pass_nodes) - 1),
+                )
+
             frontier = [node for node in next_frontier if not (node.frozen_code and node.frozen_reason)]
             if solved:
                 break
 
-        train_samples = [
-            TrainSample(
-                question_id=question_id,
-                prompt_text=node.prompt_text,
-                completion_text=node.completion_text,
-                code_token_mask=node.code_token_mask,
-                reason_token_mask=node.reason_token_mask,
-                A_code=node.A_code,
-                A_reason=node.A_reason,
-                R_code=node.R_code,
-                R_reason_final=node.R_reason_final,
-                pass_rate=node.pass_rate,
-            )
-            for node in collected_nodes
-            if node.completion_text
-        ]
+        train_samples: list[TrainSample] = []
+        for node in collected_nodes:
+            if node.completion_text:
+                train_samples.append(
+                    TrainSample(
+                        question_id=question_id,
+                        prompt_text=node.prompt_text,
+                        completion_text=node.completion_text,
+                        code_token_mask=node.code_token_mask,
+                        reason_token_mask=node.reason_token_mask,
+                        A_code=node.A_code,
+                        A_reason=node.A_reason,
+                        R_code=node.R_code,
+                        R_reason_final=node.R_reason_final,
+                        pass_rate=node.pass_rate,
+                    )
+                )
+
+            # Execution-audit outputs are optimized by A_reason (reason branch),
+            # while logic-audit outputs are score-only and never backpropagated.
+            for item in node.exec_summary.get("exec_train_samples", []):
+                exec_prompt_text = str(item.get("prompt_text", ""))
+                exec_completion_text = str(item.get("completion_text", ""))
+                if not exec_prompt_text or not exec_completion_text:
+                    continue
+                token_ids = self.tokenizer(exec_completion_text, add_special_tokens=False)["input_ids"]
+                if not token_ids:
+                    continue
+                train_samples.append(
+                    TrainSample(
+                        question_id=question_id,
+                        prompt_text=exec_prompt_text,
+                        completion_text=exec_completion_text,
+                        code_token_mask=[0] * len(token_ids),
+                        reason_token_mask=[1] * len(token_ids),
+                        A_code=0.0,
+                        A_reason=node.A_reason,
+                        R_code=node.R_code,
+                        R_reason_final=node.R_reason_final,
+                        pass_rate=node.pass_rate,
+                    )
+                )
 
         r_code = [node.R_code for node in collected_nodes]
         r_reason = [node.R_reason_final for node in collected_nodes]
@@ -253,12 +294,13 @@ class CodeGRPOTreeRunner:
             local_budget = budget - produced_total
             if local_budget <= 0:
                 break
-            to_generate = min(self.args.K, local_budget)
+            branch_k = self.args.K_reason if (parent.frozen_code and not parent.frozen_reason) else self.args.K
+            to_generate = min(branch_k, local_budget)
 
             history = list(parent.exec_summary.get("history", []))
             context_history = history[-self.args.context_round_window :]
             need_code = not parent.frozen_code
-            need_reason = not parent.frozen_reason
+            need_reason = not (parent.frozen_reason and parent.frozen_code)
             prompt_text = build_generation_prompt(
                 question_prompt=prompt,
                 history=context_history,
@@ -317,7 +359,8 @@ class CodeGRPOTreeRunner:
         history = list(parent.exec_summary.get("history", []))
         context_history = history[-self.args.context_round_window :]
         need_code = not parent.frozen_code
-        need_reason = not parent.frozen_reason
+        need_reason = not (parent.frozen_reason and parent.frozen_code)
+        can_reuse_reason = parent.frozen_reason and parent.frozen_code
 
         prompt_text = prompt_text_override or build_generation_prompt(
             question_prompt=prompt,
@@ -332,7 +375,7 @@ class CodeGRPOTreeRunner:
         trace_max_lines = max(self.args.error_max_lines * 4, self.args.error_max_lines)
 
         code = parent.code if parent.frozen_code else parsed_code
-        reasoning = parent.reasoning if parent.frozen_reason else parsed_reason
+        reasoning = parent.reasoning if can_reuse_reason else parsed_reason
         if code is None:
             code = ""
         if reasoning is None:
@@ -343,21 +386,23 @@ class CodeGRPOTreeRunner:
             reasoning=reasoning,
             logic_prediction=parsed_logic_prediction,
             exec_prediction=parsed_exec_prediction,
+            include_predictions=False,
         )
-        _, code_mask, reason_mask = build_token_masks(self.tokenizer, completion_text)
+        token_ids, _, _ = build_token_masks(self.tokenizer, completion_text)
+        code_mask = [1] * len(token_ids)
+        reason_mask = [0] * len(token_ids)
 
-        exec_results: list[ExecResult] = []
-        pass_flags: list[bool] = []
-        for case in test_cases:
-            actual = execute(
-                code=code,
-                case_input=case["input"],
-                timeout_s=self.args.code_timeout_seconds,
-                error_max_chars=self.args.error_max_chars,
-                error_max_lines=self.args.error_max_lines,
-            )
-            exec_results.append(actual)
-            pass_flags.append(self._is_test_pass(case["output"], actual))
+        case_inputs = [case["input"] for case in test_cases]
+        exec_results = execute_batch(
+            code=code,
+            case_inputs=case_inputs,
+            timeout_s=self.args.code_timeout_seconds,
+            error_max_chars=self.args.error_max_chars,
+            error_max_lines=self.args.error_max_lines,
+        )
+        pass_flags: list[bool] = [
+            self._is_test_pass(case["output"], actual) for case, actual in zip(test_cases, exec_results, strict=True)
+        ]
 
         pass_rate = _mean([1.0 if ok else 0.0 for ok in pass_flags])
         status_code = _code_status(exec_results, pass_all=all(pass_flags))
@@ -383,7 +428,11 @@ class CodeGRPOTreeRunner:
             for idx, logic_output in zip(audit_indices, logic_outputs, strict=True):
                 case = test_cases[idx]
                 logic_reason, logic_prediction, logic_format_ok = parse_logic_response(
-                    logic_output, require_reason_before_prediction=self.args.require_reason_before_prediction
+                    logic_output,
+                    require_reason_before_prediction=self.args.require_reason_before_prediction,
+                    prediction_max_chars=self.args.prediction_max_chars,
+                    reason_max_chars=self.args.reasoning_max_chars,
+                    disallow_code_in_reasoning=self.args.disallow_code_in_reasoning,
                 )
                 logic_correct = 1.0 if values_equal(logic_prediction, case["output"]) else 0.0
                 logic_score = _apply_format_penalty(logic_correct, logic_format_ok, penalty=self.args.format_penalty_logic)
@@ -411,28 +460,40 @@ class CodeGRPOTreeRunner:
         R_code = _compute_code_reward(pass_rate=pass_rate, r_soft=R_soft, lambda_soft=self.args.lambda_soft)
 
         exec_audit_details: list[dict[str, Any]] = []
-        if parent.frozen_reason:
+        exec_train_samples: list[dict[str, str]] = []
+        if can_reuse_reason:
             R_reason = parent.R_reason
             status_reason = parent.status_reason
             exec_format_ok_rate = float(parent.exec_summary.get("exec_format_ok_rate", 0.0))
             exec_audit_details = list(parent.exec_summary.get("exec_audit", []))
+            exec_train_samples = []
         elif audit_indices:
             correctness = []
             exec_format_flags = []
             exec_raw_correct_flags = []
             exec_prompts = [build_exec_prompt(code, test_cases[idx]["input"]) for idx in audit_indices]
             exec_outputs = self.backend.generate_many(exec_prompts)
-            for idx, exec_output in zip(audit_indices, exec_outputs, strict=True):
+            for idx, exec_prompt, exec_output in zip(audit_indices, exec_prompts, exec_outputs, strict=True):
                 case = test_cases[idx]
                 actual = exec_results[idx]
                 exec_reason, exec_prediction, exec_format_ok = parse_exec_response(
-                    exec_output, require_reason_before_prediction=self.args.require_reason_before_prediction
+                    exec_output,
+                    require_reason_before_prediction=self.args.require_reason_before_prediction,
+                    prediction_max_chars=self.args.prediction_max_chars,
+                    reason_max_chars=self.args.reasoning_max_chars,
+                    disallow_code_in_reasoning=self.args.disallow_code_in_reasoning,
                 )
                 exec_correct = 1.0 if is_match(exec_prediction, actual) else 0.0
                 exec_raw_correct_flags.append(exec_correct)
                 exec_score = _apply_format_penalty(exec_correct, exec_format_ok, penalty=self.args.format_penalty_exec)
                 correctness.append(exec_score)
                 exec_format_flags.append(1.0 if exec_format_ok else 0.0)
+                exec_train_samples.append(
+                    {
+                        "prompt_text": exec_prompt,
+                        "completion_text": exec_output,
+                    }
+                )
                 exec_audit_details.append(
                     {
                         "case_index": idx,
@@ -457,7 +518,16 @@ class CodeGRPOTreeRunner:
             status_reason = "NOT_RUN"
             exec_format_ok_rate = 0.0
             exec_audit_details = []
+            exec_train_samples = []
         R_reason_final = R_reason * (0.5 + 0.5 * pass_rate)
+        logic_mismatch_count = int(sum(1 for item in logic_audit_details if not item.get("match", False)))
+        exec_mismatch_count = int(sum(1 for item in exec_audit_details if not item.get("match", False)))
+        logic_failed = next((item for item in logic_audit_details if not item.get("match", False)), None)
+        exec_failed = next((item for item in exec_audit_details if not item.get("match", False)), None)
+        child_frozen_code = parent.frozen_code or pass_rate == 1.0
+        child_frozen_reason = (child_frozen_code and R_reason == 1.0) or (
+            parent.frozen_reason and parent.frozen_code and parent.code == code
+        )
 
         child = Node(
             node_id=node_id,
@@ -472,8 +542,8 @@ class CodeGRPOTreeRunner:
             R_reason_final=R_reason_final,
             status_code=status_code,  # type: ignore[arg-type]
             status_reason=status_reason,  # type: ignore[arg-type]
-            frozen_code=parent.frozen_code or pass_rate == 1.0,
-            frozen_reason=parent.frozen_reason or R_reason == 1.0,
+            frozen_code=child_frozen_code,
+            frozen_reason=child_frozen_reason,
             exec_summary={
                 "error_summary": error_summary,
                 "logic_format_ok_rate": logic_format_ok_rate,
@@ -486,11 +556,13 @@ class CodeGRPOTreeRunner:
                 },
                 "logic_audit": logic_audit_details,
                 "exec_audit": exec_audit_details,
+                "exec_train_samples": exec_train_samples,
                 "history": history
                 + [
                     {
                         "round": str(round_idx),
                         "status_code": status_code,
+                        "status_reason": status_reason,
                         "error_summary": error_summary,
                         "code_preview": summarize_error(
                             code,
@@ -499,6 +571,15 @@ class CodeGRPOTreeRunner:
                         ),
                         "failed_input": failed_case_input,
                         "failed_actual": failed_case_actual,
+                        "logic_mismatch_count": logic_mismatch_count,
+                        "exec_mismatch_count": exec_mismatch_count,
+                        "logic_format_ok_rate": logic_format_ok_rate,
+                        "exec_format_ok_rate": exec_format_ok_rate,
+                        "logic_failed_input": logic_failed.get("input") if logic_failed else None,
+                        "logic_failed_prediction": logic_failed.get("parsed_prediction") if logic_failed else None,
+                        "exec_failed_input": exec_failed.get("input") if exec_failed else None,
+                        "exec_failed_prediction": exec_failed.get("parsed_prediction") if exec_failed else None,
+                        "exec_actual_kind": exec_failed.get("actual_kind") if exec_failed else None,
                     }
                 ],
             },
@@ -519,15 +600,28 @@ class CodeGRPOTreeRunner:
 
     def _assign_group_advantages(self, siblings: list[Node]) -> None:
         code_vals = [node.R_code for node in siblings]
-        reason_vals = [node.R_reason_final for node in siblings]
         mean_code = _mean(code_vals)
-        mean_reason = _mean(reason_vals)
         std_code = _std(code_vals)
-        std_reason = _std(reason_vals)
         eps = 1e-8
         for node in siblings:
             node.A_code = (node.R_code - mean_code) / (std_code + eps)
-            node.A_reason = (node.R_reason_final - mean_reason) / (std_reason + eps)
+
+        # Compute A_reason within same-code groups to avoid cross-code distribution shift.
+        reason_groups: dict[str, list[Node]] = {}
+        for node in siblings:
+            key = node.code or ""
+            reason_groups.setdefault(key, []).append(node)
+        for group_nodes in reason_groups.values():
+            if len(group_nodes) <= 1:
+                for node in group_nodes:
+                    node.A_reason = 0.0
+                continue
+            mean_reason = _mean([node.R_reason_final for node in group_nodes])
+            std_reason = _std([node.R_reason_final for node in group_nodes])
+            for node in group_nodes:
+                node.A_reason = (node.R_reason_final - mean_reason) / (std_reason + eps)
+
+        for node in siblings:
             if node.pass_rate == 1.0 and node.R_reason == 1.0:
                 node.A_code *= self.args.gamma_shrink
                 node.A_reason *= self.args.gamma_shrink
