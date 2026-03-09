@@ -136,6 +136,7 @@ def build_logic_prompt(code: str, case_input: Any, question_prompt: str = "") ->
         "No markdown, no extra text outside tags.\n"
         "<REASON> must be one short sentence.\n"
         "<LOGIC_PREDICTION> must be one-line final value only.\n"
+        f"{LOGIC_FEWSHOT}\n"
         f"Question:\n{question_prompt.strip()}\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
@@ -156,6 +157,26 @@ def build_exec_prompt(
         "No markdown, no extra text outside tags.\n"
         "<REASON> must be one short sentence.\n"
         "<EXEC_PREDICTION> must be one-line final value or error type (e.g., SyntaxError).\n"
+        f"{EXEC_FEWSHOT}\n"
+        f"Code:\n{code}\n"
+        f"Input:\n{serialize_value(case_input)}\n"
+        "Now respond with tags only."
+    )
+
+
+def build_frozen_reason_prompt(
+    code: str,
+    case_input: Any,
+) -> str:
+    return (
+        "You are given a fixed Python function. Do not modify code.\n"
+        "Simulate execution for the input and output exactly these tags once:\n"
+        "<REASON>...</REASON>\n"
+        "<EXEC_PREDICTION>...</EXEC_PREDICTION>\n"
+        "No markdown, no extra text outside tags.\n"
+        "<REASON> must be one short sentence.\n"
+        "<EXEC_PREDICTION> must be one-line final value or error type.\n"
+        f"{EXEC_FEWSHOT}\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
         "Now respond with tags only."

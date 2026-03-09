@@ -107,12 +107,14 @@ def _configure_run_layout(script_args, training_args, model_args, dataset_args) 
     run_root = os.path.join(base_output_dir, mode, run_id)
     artifacts_dir = os.path.join(run_root, "test_out" if mode == "test" else "train_out")
     logs_dir = os.path.join(run_root, "logs")
+    traces_dir = os.path.join(run_root, "traces", "rollout")
     tensorboard_dir = os.path.join(run_root, "tensorboard")
-    for path in (run_root, artifacts_dir, logs_dir, tensorboard_dir):
+    for path in (run_root, artifacts_dir, logs_dir, traces_dir, tensorboard_dir):
         os.makedirs(path, exist_ok=True)
 
     training_args.output_dir = artifacts_dir
     training_args.logging_dir = tensorboard_dir
+    training_args.debug_trace_dir = traces_dir
     if not getattr(training_args, "run_name", None):
         training_args.run_name = run_id
 
@@ -121,6 +123,7 @@ def _configure_run_layout(script_args, training_args, model_args, dataset_args) 
         "run_root": run_root,
         "artifacts_dir": artifacts_dir,
         "logs_dir": logs_dir,
+        "traces_dir": traces_dir,
         "tensorboard_dir": tensorboard_dir,
         "mode": mode,
     }
@@ -222,6 +225,35 @@ def _write_run_manifest(path: str, run_layout: dict[str, str], script_args, trai
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
+def _write_run_index(path: str, run_layout: dict[str, str], rank: int):
+    lines = [
+        f"run_id: {run_layout['run_id']}",
+        f"mode: {run_layout['mode']}",
+        "",
+        "Directories:",
+        f"- artifacts: {run_layout['artifacts_dir']}",
+        f"- logs: {run_layout['logs_dir']}",
+        f"- traces: {run_layout['traces_dir']}",
+        f"- tensorboard: {run_layout['tensorboard_dir']}",
+        "",
+        "Most useful files:",
+        f"- runtime log: {os.path.join(run_layout['logs_dir'], f'runtime_rank{rank}.txt')}",
+        f"- trainer text log: {os.path.join(run_layout['logs_dir'], f'trainer_events_rank{rank}.txt')}",
+        f"- trainer jsonl log: {os.path.join(run_layout['logs_dir'], f'trainer_events_rank{rank}.jsonl')}",
+        f"- rollout summary: {os.path.join(run_layout['logs_dir'], f'rollout_summary_rank{rank}.jsonl')}",
+        f"- traces: {os.path.join(run_layout['traces_dir'], '*.json')}",
+        f"- trainer state / checkpoints / saved model: {run_layout['artifacts_dir']}",
+        "",
+        "Reading order:",
+        "1. trainer_events_rank*.txt  -> step-level loss and metrics",
+        "2. rollout_summary_rank*.jsonl -> per-question summary",
+        "3. traces/*.json -> full tree and audit details for sampled questions",
+        "4. runtime_rank*.txt -> raw runtime log",
+    ]
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
 @dataclass
 class CodeGRPOScriptArguments(ScriptArguments):
     dataset_adapter: str = field(
@@ -271,6 +303,7 @@ def main(script_args, training_args, model_args, dataset_args):
             model_args,
             dataset_args,
         )
+        _write_run_index(os.path.join(run_layout["run_root"], "RUN_INDEX.txt"), run_layout, rank)
     logger.info(
         "[RUN] run_id=%s mode=%s output_dir=%s logs_dir=%s",
         run_layout["run_id"],

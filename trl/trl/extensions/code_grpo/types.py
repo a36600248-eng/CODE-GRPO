@@ -26,7 +26,6 @@ class Node:
     R_soft: float = 0.0
     R_code: float = 0.0
     R_reason: float = 0.0
-    R_reason_final: float = 0.0
     status_code: CodeStatus = "FAIL"
     status_reason: ReasonStatus = "NOT_RUN"
     frozen_code: bool = False
@@ -50,7 +49,6 @@ class TrainSample:
     A_code: float
     A_reason: float
     R_code: float
-    R_reason_final: float
     pass_rate: float
 
 
@@ -63,9 +61,8 @@ class QuestionRollout:
     resample_count: int
     train_samples: list[TrainSample]
     mean_R_code: float
-    mean_R_reason_final: float
+    mean_R_reason: float
     mean_pass_rate: float
     std_R_code: float
-    std_R_reason_final: float
+    std_R_reason: float
     eval_metrics: dict[str, float] = field(default_factory=dict)
-

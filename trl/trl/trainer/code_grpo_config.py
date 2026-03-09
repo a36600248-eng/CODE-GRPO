@@ -29,6 +29,22 @@ class CodeGRPOConfig(GRPOConfig):
     context_round_window: int = field(default=2, metadata={"help": "Rounds of feedback to carry to next prompt."})
 
     lambda_soft: float = field(default=0.2, metadata={"help": "Soft reward coefficient for code reward."})
+    code_compile_reward_scale: float = field(
+        default=0.1,
+        metadata={"help": "Residual reward scale for compile-success signal in main generation reward."},
+    )
+    code_format_reward_scale: float = field(
+        default=0.05,
+        metadata={"help": "Residual reward scale for main-generation format compliance signal."},
+    )
+    logic_format_reward_scale: float = field(
+        default=0.1,
+        metadata={"help": "Additive scale for logic-audit format signal in reason reward."},
+    )
+    exec_case_baseline_ema_alpha: float = field(
+        default=0.1,
+        metadata={"help": "EMA alpha for execution case baseline used in fallback case-level advantage."},
+    )
     soft_reward_ineligible_scale: float = field(
         default=0.3,
         metadata={
@@ -42,9 +58,17 @@ class CodeGRPOConfig(GRPOConfig):
         default=0.3,
         metadata={"help": "Penalty applied when logic response format is invalid."},
     )
+    format_bonus_logic: float = field(
+        default=0.05,
+        metadata={"help": "Bonus added when logic response format is valid."},
+    )
     format_penalty_exec: float = field(
         default=0.3,
         metadata={"help": "Penalty applied when execution response format is invalid."},
+    )
+    format_bonus_exec: float = field(
+        default=0.05,
+        metadata={"help": "Bonus added when execution response format is valid."},
     )
     require_reason_before_prediction: bool = field(
         default=True,
@@ -70,6 +94,39 @@ class CodeGRPOConfig(GRPOConfig):
                 "Use 0 for fully strict parsing."
             )
         },
+    )
+    use_chat_template_for_codegrpo: bool = field(
+        default=True,
+        metadata={"help": "Whether to render CodeGRPO prompts with tokenizer chat template before generation."},
+    )
+    terminal_logic_backprop_bonus: float = field(
+        default=0.1,
+        metadata={
+            "help": (
+                "Base bonus scale for terminal logic backpropagation. "
+                "Applied to matched logic case-level rewards on ancestors when descendants solve the task."
+            )
+        },
+    )
+    terminal_logic_backprop_decay: float = field(
+        default=0.7,
+        metadata={"help": "Per-hop decay for terminal logic backprop bonus along ancestor chain."},
+    )
+    terminal_logic_backprop_max_depth: int = field(
+        default=6,
+        metadata={"help": "Maximum ancestor hops for terminal logic backprop bonus."},
+    )
+    terminal_backprop_code_similarity_threshold: float = field(
+        default=0.75,
+        metadata={"help": "Minimum parent-child code similarity to continue terminal bonus backpropagation."},
+    )
+    frozen_reason_one_shot: bool = field(
+        default=True,
+        metadata={"help": "Run a single reason-only round after code is frozen/passed, then stop tree growth."},
+    )
+    unify_reason_when_code_frozen: bool = field(
+        default=True,
+        metadata={"help": "When code is frozen and passed, use a unified reason/execution audit prompt."},
     )
     beta_reason: float = field(default=1.0, metadata={"help": "Reason loss coefficient."})
     gamma_shrink: float = field(default=0.1, metadata={"help": "Advantage shrink factor for fully-correct nodes."})
@@ -116,14 +173,34 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("M_audit and M_retry must be non-negative.")
         if not (0.0 <= self.lambda_soft <= 1.0):
             raise ValueError(f"lambda_soft must be in [0, 1], got: {self.lambda_soft}")
+        if not (0.0 <= self.code_compile_reward_scale <= 1.0):
+            raise ValueError(
+                f"code_compile_reward_scale must be in [0, 1], got: {self.code_compile_reward_scale}"
+            )
+        if not (0.0 <= self.code_format_reward_scale <= 1.0):
+            raise ValueError(
+                f"code_format_reward_scale must be in [0, 1], got: {self.code_format_reward_scale}"
+            )
+        if not (0.0 <= self.logic_format_reward_scale <= 1.0):
+            raise ValueError(
+                f"logic_format_reward_scale must be in [0, 1], got: {self.logic_format_reward_scale}"
+            )
+        if not (0.0 <= self.exec_case_baseline_ema_alpha <= 1.0):
+            raise ValueError(
+                f"exec_case_baseline_ema_alpha must be in [0, 1], got: {self.exec_case_baseline_ema_alpha}"
+            )
         if not (0.0 <= self.soft_reward_ineligible_scale <= 1.0):
             raise ValueError(
                 f"soft_reward_ineligible_scale must be in [0, 1], got: {self.soft_reward_ineligible_scale}"
             )
         if not (0.0 <= self.format_penalty_logic <= 1.0):
             raise ValueError(f"format_penalty_logic must be in [0, 1], got: {self.format_penalty_logic}")
+        if not (0.0 <= self.format_bonus_logic <= 1.0):
+            raise ValueError(f"format_bonus_logic must be in [0, 1], got: {self.format_bonus_logic}")
         if not (0.0 <= self.format_penalty_exec <= 1.0):
             raise ValueError(f"format_penalty_exec must be in [0, 1], got: {self.format_penalty_exec}")
+        if not (0.0 <= self.format_bonus_exec <= 1.0):
+            raise ValueError(f"format_bonus_exec must be in [0, 1], got: {self.format_bonus_exec}")
         if self.eval_round_n < 1:
             raise ValueError("eval_round_n must be >= 1.")
         if not self.eval_k_list:
@@ -136,5 +213,20 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("prediction_max_chars must be > 0.")
         if self.format_outside_noise_chars < 0:
             raise ValueError("format_outside_noise_chars must be >= 0.")
+        if not (0.0 <= self.terminal_logic_backprop_bonus <= 1.0):
+            raise ValueError(
+                f"terminal_logic_backprop_bonus must be in [0, 1], got: {self.terminal_logic_backprop_bonus}"
+            )
+        if not (0.0 <= self.terminal_logic_backprop_decay <= 1.0):
+            raise ValueError(
+                f"terminal_logic_backprop_decay must be in [0, 1], got: {self.terminal_logic_backprop_decay}"
+            )
+        if self.terminal_logic_backprop_max_depth < 0:
+            raise ValueError("terminal_logic_backprop_max_depth must be >= 0.")
+        if not (0.0 <= self.terminal_backprop_code_similarity_threshold <= 1.0):
+            raise ValueError(
+                "terminal_backprop_code_similarity_threshold must be in [0, 1], "
+                f"got: {self.terminal_backprop_code_similarity_threshold}"
+            )
         if self.debug_trace_sample_size < 0:
             raise ValueError("debug_trace_sample_size must be >= 0.")

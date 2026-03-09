@@ -119,7 +119,8 @@ class CodeGRPOTrainer(GRPOTrainer):
         return list(deduped.values())
 
     def _dump_rollout_traces(self, rollouts):
-        trace_dir = os.path.join(self.args.output_dir, self.args.debug_trace_dir)
+        trace_root = str(self.args.debug_trace_dir)
+        trace_dir = trace_root if os.path.isabs(trace_root) else os.path.join(self.args.output_dir, trace_root)
         os.makedirs(trace_dir, exist_ok=True)
         for rollout in rollouts:
             safe_qid = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in rollout.question_id)
@@ -158,7 +159,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "node_count": rollout.node_count,
                 "resample_count": rollout.resample_count,
                 "mean_R_code": rollout.mean_R_code,
-                "mean_R_reason_final": rollout.mean_R_reason_final,
+                "mean_R_reason": rollout.mean_R_reason,
                 "mean_pass_rate": rollout.mean_pass_rate,
                 **rollout.eval_metrics,
                 "eval_metrics": rollout.eval_metrics,
@@ -179,7 +180,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         advantages_code = []
         advantages_reason = []
         r_code = []
-        r_reason_final = []
         pass_rates = []
 
         for sample in train_samples:
@@ -208,7 +208,6 @@ class CodeGRPOTrainer(GRPOTrainer):
             advantages_code.append(sample.A_code)
             advantages_reason.append(sample.A_reason)
             r_code.append(sample.R_code)
-            r_reason_final.append(sample.R_reason_final)
             pass_rates.append(sample.pass_rate)
 
         prompt_ids = pad(
@@ -252,7 +251,6 @@ class CodeGRPOTrainer(GRPOTrainer):
             "advantages_code": torch.tensor(advantages_code, dtype=torch.float32, device=device),
             "advantages_reason": torch.tensor(advantages_reason, dtype=torch.float32, device=device),
             "r_code": torch.tensor(r_code, dtype=torch.float32, device=device),
-            "r_reason_final": torch.tensor(r_reason_final, dtype=torch.float32, device=device),
             "pass_rate": torch.tensor(pass_rates, dtype=torch.float32, device=device),
             "num_items_in_batch": completion_mask.sum(),
         }
@@ -268,7 +266,11 @@ class CodeGRPOTrainer(GRPOTrainer):
         rollouts = []
         for _idx, example in enumerate(examples):
             rollout_seed = base_rng.randint(0, 2**31 - 1)
-            rollout = self.tree_runner.run_question(example, rng=random.Random(rollout_seed))
+            rollout = self.tree_runner.run_question(
+                example,
+                rng=random.Random(rollout_seed),
+                update_exec_baseline=(mode == "train"),
+            )
             rollouts.append(rollout)
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
 
@@ -292,7 +294,6 @@ class CodeGRPOTrainer(GRPOTrainer):
                     "A_code": 0.0,
                     "A_reason": 0.0,
                     "R_code": 0.0,
-                    "R_reason_final": 0.0,
                     "pass_rate": 0.0,
                 }
             ]
@@ -308,18 +309,18 @@ class CodeGRPOTrainer(GRPOTrainer):
         batch = self._build_training_batch(train_samples)
 
         mean_r_code = self._mean([rollout.mean_R_code for rollout in rollouts])
-        mean_r_reason = self._mean([rollout.mean_R_reason_final for rollout in rollouts])
+        mean_r_reason = self._mean([rollout.mean_R_reason for rollout in rollouts])
         mean_pass_rate = self._mean([rollout.mean_pass_rate for rollout in rollouts])
         std_r_code = self._mean([rollout.std_R_code for rollout in rollouts])
-        std_r_reason = self._mean([rollout.std_R_reason_final for rollout in rollouts])
+        std_r_reason = self._mean([rollout.std_R_reason for rollout in rollouts])
         node_count = float(sum(rollout.node_count for rollout in rollouts))
         resample_count = float(sum(rollout.resample_count for rollout in rollouts))
 
         self._metrics[mode]["mean_R_code"].append(mean_r_code)
-        self._metrics[mode]["mean_R_reason_final"].append(mean_r_reason)
+        self._metrics[mode]["mean_R_reason"].append(mean_r_reason)
         self._metrics[mode]["mean_pass_rate"].append(mean_pass_rate)
         self._metrics[mode]["std_R_code"].append(std_r_code)
-        self._metrics[mode]["std_R_reason_final"].append(std_r_reason)
+        self._metrics[mode]["std_R_reason"].append(std_r_reason)
         self._metrics[mode]["node_count"].append(node_count)
         self._metrics[mode]["resample_count"].append(resample_count)
         self._metrics[mode]["rollout_time_s"].append(float(rollout_time_s))
@@ -355,10 +356,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         if mode == "eval":
             self._last_eval_metrics = {
                 "mean_R_code": mean_r_code,
-                "mean_R_reason_final": mean_r_reason,
+                "mean_R_reason": mean_r_reason,
                 "mean_pass_rate": mean_pass_rate,
                 "std_R_code": std_r_code,
-                "std_R_reason_final": std_r_reason,
+                "std_R_reason": std_r_reason,
                 "node_count": node_count,
                 "resample_count": resample_count,
                 **merged_eval_metrics,
