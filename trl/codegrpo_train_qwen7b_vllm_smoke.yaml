@@ -1,12 +1,9 @@
 output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo
-report_to:
-  - tensorboard
+report_to: none
 logging_steps: 1
-save_strategy: "steps"
-save_steps: 8
-save_total_limit: 2
-eval_strategy: "steps"
-eval_steps: 8
+save_strategy: "no"
+save_total_limit: 0
+eval_strategy: "no"
 push_to_hub: false
 
 use_cpu: false
@@ -32,10 +29,10 @@ backend: vllm
 use_vllm: true
 vllm_mode: colocate
 vllm_tensor_parallel_size: 1
-vllm_gpu_memory_utilization: 0.6
+vllm_gpu_memory_utilization: 0.35
 
 num_train_epochs: 1
-max_steps: 8
+max_steps: 4
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
@@ -44,16 +41,16 @@ gradient_checkpointing: true
 gradient_accumulation_steps: 1
 generation_batch_size: 2
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 2
-max_completion_length: 96
+per_device_eval_batch_size: 1
+max_completion_length: 48
 
 K: 2
-K_reason: 2
+K_reason: 1
 num_generations: 2
 num_generations_eval: 2
 T_max: 2
-N_max: 8
-M_audit: 2
+N_max: 4
+M_audit: 1
 M_retry: 1
 context_round_window: 2
 lambda_soft: 0.2
