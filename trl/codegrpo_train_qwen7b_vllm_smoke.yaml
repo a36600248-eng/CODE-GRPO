@@ -42,7 +42,7 @@ gradient_accumulation_steps: 1
 generation_batch_size: 2
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-max_completion_length: 48
+max_completion_length: 64
 
 K: 2
 K_reason: 1
