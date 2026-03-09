@@ -13,10 +13,13 @@
 # limitations under the License.
 
 import argparse
+import glob
 import json
 import logging as py_logging
 import os
+import random
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -235,6 +238,7 @@ def _write_run_index(path: str, run_layout: dict[str, str], rank: int):
         f"- logs: {run_layout['logs_dir']}",
         f"- traces: {run_layout['traces_dir']}",
         f"- tensorboard: {run_layout['tensorboard_dir']}",
+        f"- review bundle: {os.path.join(run_layout['run_root'], 'review_bundle')}",
         "",
         "Most useful files:",
         f"- runtime log: {os.path.join(run_layout['logs_dir'], f'runtime_rank{rank}.txt')}",
@@ -242,6 +246,7 @@ def _write_run_index(path: str, run_layout: dict[str, str], rank: int):
         f"- trainer jsonl log: {os.path.join(run_layout['logs_dir'], f'trainer_events_rank{rank}.jsonl')}",
         f"- rollout summary: {os.path.join(run_layout['logs_dir'], f'rollout_summary_rank{rank}.jsonl')}",
         f"- traces: {os.path.join(run_layout['traces_dir'], '*.json')}",
+        f"- packaged share folder: {os.path.join(run_layout['run_root'], 'review_bundle')}",
         f"- trainer state / checkpoints / saved model: {run_layout['artifacts_dir']}",
         "",
         "Reading order:",
@@ -252,6 +257,82 @@ def _write_run_index(path: str, run_layout: dict[str, str], rank: int):
     ]
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
+
+
+def _copy_if_exists(src: str, dst: str):
+    if not os.path.exists(src):
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_size: int = 3):
+    bundle_root = os.path.join(run_layout["run_root"], "review_bundle")
+    logs_bundle = os.path.join(bundle_root, "logs")
+    traces_bundle = os.path.join(bundle_root, "traces")
+    artifacts_bundle = os.path.join(bundle_root, "artifacts")
+    os.makedirs(logs_bundle, exist_ok=True)
+    os.makedirs(traces_bundle, exist_ok=True)
+    os.makedirs(artifacts_bundle, exist_ok=True)
+
+    # Core metadata
+    _copy_if_exists(os.path.join(run_layout["run_root"], "RUN_INDEX.txt"), os.path.join(bundle_root, "RUN_INDEX.txt"))
+    _copy_if_exists(
+        os.path.join(run_layout["run_root"], "run_manifest.json"),
+        os.path.join(bundle_root, "run_manifest.json"),
+    )
+
+    # Logs
+    for filename in (
+        f"runtime_rank{rank}.txt",
+        f"trainer_events_rank{rank}.txt",
+        f"trainer_events_rank{rank}.jsonl",
+        f"rollout_summary_rank{rank}.jsonl",
+        "test_metrics.txt",
+    ):
+        _copy_if_exists(
+            os.path.join(run_layout["logs_dir"], filename),
+            os.path.join(logs_bundle, filename),
+        )
+
+    # Artifact summaries, but not heavy checkpoints.
+    for filename in (
+        "trainer_state.json",
+        "train_results.json",
+        "eval_results.json",
+        "test_results.json",
+        "all_results.json",
+    ):
+        _copy_if_exists(
+            os.path.join(run_layout["artifacts_dir"], filename),
+            os.path.join(artifacts_bundle, filename),
+        )
+
+    # Randomly sample a few rollout traces for quick review.
+    trace_candidates = sorted(glob.glob(os.path.join(run_layout["traces_dir"], "*.json")))
+    if trace_candidates:
+        rng = random.Random(run_layout["run_id"])
+        selected = (
+            rng.sample(trace_candidates, min(trace_sample_size, len(trace_candidates)))
+            if len(trace_candidates) > trace_sample_size
+            else trace_candidates
+        )
+        for src in selected:
+            _copy_if_exists(src, os.path.join(traces_bundle, os.path.basename(src)))
+
+    bundle_note = [
+        "This folder is the minimal package to send for debugging.",
+        "",
+        "Included:",
+        "- RUN_INDEX.txt and run_manifest.json",
+        "- plain-text and jsonl logs",
+        "- trainer state / result json files",
+        "- a random sample of rollout trace json files",
+        "",
+        "If a requested file is missing here, it was not produced in this run.",
+    ]
+    with open(os.path.join(bundle_root, "README.txt"), "w", encoding="utf-8") as handle:
+        handle.write("\n".join(bundle_note) + "\n")
 
 
 @dataclass
@@ -351,6 +432,7 @@ def main(script_args, training_args, model_args, dataset_args):
         if rank == 0:
             with open(os.path.join(run_layout["logs_dir"], "test_metrics.txt"), "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(_json_safe(metrics), ensure_ascii=False) + "\n")
+            _build_review_bundle(run_layout, rank)
         trainer.accelerator.print(metrics)
         trainer.accelerator.print("CodeGRPO test mode completed.")
         return
@@ -362,6 +444,8 @@ def main(script_args, training_args, model_args, dataset_args):
     trainer.accelerator.print("CodeGRPO training completed.")
     trainer.save_model(training_args.output_dir)
     trainer.accelerator.print(f"Model saved to {training_args.output_dir}.")
+    if rank == 0:
+        _build_review_bundle(run_layout, rank)
 
     if training_args.push_to_hub:
         trainer.push_to_hub(dataset_name=script_args.dataset_name)
