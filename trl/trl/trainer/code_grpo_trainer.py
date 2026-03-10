@@ -12,7 +12,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixi
 from ..extensions.code_grpo import (
     CodeGRPOTreeRunner,
     build_backend,
-    build_canonical_completion,
+    build_generation_completion,
     build_token_masks,
 )
 from .code_grpo_config import CodeGRPOConfig
@@ -276,14 +276,7 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         train_samples = [sample for rollout in rollouts for sample in rollout.train_samples]
         if not train_samples and examples:
-            fallback_completion = build_canonical_completion(
-                code="",
-                reasoning="",
-                logic_prediction="",
-                exec_prediction="",
-                include_predictions=False,
-                include_reason=False,
-            )
+            fallback_completion = build_generation_completion("")
             _, fallback_code_mask, fallback_reason_mask = build_token_masks(self.code_tokenizer, fallback_completion)
             train_samples = [
                 {

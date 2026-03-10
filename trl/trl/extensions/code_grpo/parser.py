@@ -2,6 +2,7 @@ import re
 
 
 CODE_PATTERN = re.compile(r"<CODE>\s*(.*?)\s*</CODE>", re.DOTALL | re.IGNORECASE)
+FENCED_CODE_BLOCK_PATTERN = re.compile(r"^\s*```(?:python)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 REASON_PATTERN = re.compile(r"<REASON>\s*(.*?)\s*</REASON>", re.DOTALL | re.IGNORECASE)
 LOGIC_PREDICTION_PATTERN = re.compile(r"<LOGIC_PREDICTION>\s*(.*?)\s*</LOGIC_PREDICTION>", re.DOTALL | re.IGNORECASE)
 EXEC_PREDICTION_PATTERN = re.compile(r"<EXEC_PREDICTION>\s*(.*?)\s*</EXEC_PREDICTION>", re.DOTALL | re.IGNORECASE)
@@ -18,11 +19,11 @@ def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
     return match
 
 
-def _normalize_response_text(text: str) -> str:
+def _normalize_response_text(text: str, *, strip_fenced_block: bool = True) -> str:
     text = (text or "").replace("\ufeff", "").strip()
     if not text:
         return ""
-    fenced_match = FENCED_BLOCK_PATTERN.match(text)
+    fenced_match = FENCED_BLOCK_PATTERN.match(text) if strip_fenced_block else None
     if fenced_match:
         return fenced_match.group(1).strip()
     return text
@@ -30,10 +31,16 @@ def _normalize_response_text(text: str) -> str:
 
 def parse_generation_output(text: str) -> tuple[str, str, str, str]:
     """Parse <CODE>, <REASON>, <LOGIC_PREDICTION>, <EXEC_PREDICTION> sections from generation output."""
-    text = _normalize_response_text(text)
+    text = _normalize_response_text(text, strip_fenced_block=False)
     code_match = _last_match(CODE_PATTERN, text)
+    fenced_match = FENCED_CODE_BLOCK_PATTERN.match(text)
     reason_match = _last_match(REASON_PATTERN, text)
-    code = code_match.group(1).strip() if code_match else text.strip()
+    if code_match:
+        code = code_match.group(1).strip()
+    elif fenced_match:
+        code = fenced_match.group(1).strip()
+    else:
+        code = text.strip()
     reason_block = reason_match.group(1).strip() if reason_match else ""
 
     logic_match = _last_match(LOGIC_PREDICTION_PATTERN, reason_block) or _last_match(LOGIC_PREDICTION_PATTERN, text)
@@ -54,9 +61,14 @@ def parse_generation_output(text: str) -> tuple[str, str, str, str]:
 
 
 def _canonicalize_generation_text(text: str, *, prefilled_code: bool) -> str:
-    normalized = _normalize_response_text(text)
+    normalized = _normalize_response_text(text, strip_fenced_block=False)
     if not normalized:
         return ""
+
+    fenced_match = FENCED_CODE_BLOCK_PATTERN.match(normalized)
+    if fenced_match:
+        code = fenced_match.group(1).strip()
+        return f"```python\n{code}\n```"
 
     code_matches = list(CODE_PATTERN.finditer(normalized))
     if code_matches:
@@ -83,18 +95,23 @@ def parse_generation_response(
     Parse generation response and return:
     (code, reason, logic_prediction, exec_prediction, format_ok)
 
-    Main-generation format is valid when:
-    - <CODE> exists exactly once
-    - outside-tag non-whitespace chars <= allow_outside_noise_chars
+    Main-generation format is valid when either:
+    - one fenced Python code block exists and outside noise is within threshold, or
+    - one legacy <CODE> block exists and outside noise is within threshold, or
+    - prefilled-code mode is enabled and the completion closes the block without trailing noise.
     """
-    normalized = _normalize_response_text(text)
+    normalized = _normalize_response_text(text, strip_fenced_block=False)
     canonical = _canonicalize_generation_text(normalized, prefilled_code=prefilled_code)
     code_matches = list(CODE_PATTERN.finditer(normalized))
     code_match = code_matches[0] if len(code_matches) == 1 else None
+    fenced_match = FENCED_CODE_BLOCK_PATTERN.match(normalized)
     code, reason, logic_prediction, exec_prediction = parse_generation_output(canonical)
 
     format_ok = False
-    if prefilled_code and not code_matches:
+    if fenced_match is not None:
+        outside_noise = _outside_non_ws_length(normalized, [fenced_match.span()])
+        format_ok = outside_noise <= max(0, int(allow_outside_noise_chars))
+    elif prefilled_code and not code_matches:
         lowered = normalized.lower()
         close_idx = lowered.find(CODE_CLOSE_TAG.lower())
         if close_idx >= 0:
@@ -255,6 +272,14 @@ def parse_exec_response(
     return reason, prediction, format_ok
 
 
+def build_generation_completion(code: str) -> str:
+    return (
+        "```python\n"
+        f"{code.strip()}\n"
+        "```"
+    )
+
+
 def build_canonical_completion(
     code: str,
     reasoning: str,
@@ -305,8 +330,26 @@ def build_token_masks(tokenizer, completion_text: str) -> tuple[list[int], list[
     code_end_tag = completion_text.find("</CODE>")
     reason_start_tag = completion_text.find("<REASON>")
     reason_end_tag = completion_text.find("</REASON>")
+    fenced_match = FENCED_CODE_BLOCK_PATTERN.match(completion_text)
 
     if code_start_tag < 0 or code_end_tag < 0:
+        if fenced_match:
+            code_span = fenced_match.span(1)
+            encoded = tokenizer(
+                completion_text,
+                add_special_tokens=False,
+                return_offsets_mapping=bool(getattr(tokenizer, "is_fast", False)),
+            )
+            ids = encoded["input_ids"]
+            if "offset_mapping" not in encoded:
+                return ids, [1] * len(ids), [0] * len(ids)
+            code_mask: list[int] = []
+            reason_mask: list[int] = []
+            for start, end in encoded["offset_mapping"]:
+                token_span = (start, end)
+                code_mask.append(1 if _span_overlap(token_span, code_span) else 0)
+                reason_mask.append(0)
+            return ids, code_mask, reason_mask
         encoded = tokenizer(completion_text, add_special_tokens=False)
         ids = encoded["input_ids"]
         return ids, [1] * len(ids), [0] * len(ids)

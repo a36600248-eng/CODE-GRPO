@@ -474,3 +474,78 @@ Harden main-generation formatting without touching reward balance.
 2. `mean_pass_rate`
 3. Whether `exec_format_ok_rate` / `logic_confirmed_rate` stay stable
 4. Whether code outputs stop carrying extra prose in traces
+
+### Follow-up run after format hardening
+
+### Representative run
+
+- `20260311_003647__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. Main-generation format got much worse, not better.
+   - `generation_format_ok_rate` dropped to about `0.1525`.
+   - This is far below the earlier Group D+ baseline (`~0.4325`).
+
+2. Pass-related metrics also dropped.
+   - `mean_pass_rate` dropped to about `0.1617`.
+   - `best_pass_rate_overall` dropped to about `0.3767`.
+   - Unlike the earlier 100-step run, the second half became worse than the first half.
+
+3. The root cause is visible in traces: the model is still returning fenced code blocks.
+   - Example traces:
+     - `mbpp_train_635_rank0_000022`
+     - `mbpp_train_644_rank0_000087`
+     - `mbpp_train_725_rank0_000026`
+   - Typical raw output is:
+     - ````python ... ````
+   - So the stricter parser is correctly marking format invalid, but the current "prefill `<CODE>` in user prompt" strategy is not actually steering the model into the desired format.
+
+4. This means the latest hardening was directionally correct, but the implementation choice was too naive.
+   - Strict parsing exposed the real problem.
+   - The current prefill method is not a true assistant-side prefill; it is only text appended inside the user prompt.
+   - Qwen still falls back to its default fenced-code behavior.
+
+### Interpretation
+
+Do not keep the current format-hardening result as the new baseline.
+
+What this run proves:
+
+- The earlier `generation_format_ok_rate ~0.43` was partly relying on looser handling.
+- Simply appending `<CODE>` inside the user message is not enough to force strict code-only output.
+- The next fix should target generation control more directly, rather than making parsing even stricter.
+
+### Recommended next direction
+
+1. Keep the stricter generation metric so the failure remains visible.
+2. Replace the current pseudo-prefill with a stronger generation-control mechanism:
+   - align the main-generation protocol with the model prior by using fenced Python code blocks, or
+   - implement a true assistant-prefill path if the chat template supports it.
+3. Do not rebalance rewards again before fixing this generation-format bottleneck.
+
+## Code update after format-hardening rollback
+
+### Goal
+
+Align the main-generation format with the model's observed prior instead of forcing `<CODE>`.
+
+### Code changes
+
+1. Main generation now expects exactly one fenced Python block:
+   - opening fence: ```python
+   - closing fence: ```
+
+2. Main-generation parsing now accepts fenced code as the primary valid format.
+
+3. Main-generation training samples are stored in the same fenced-code format.
+   - This keeps prompt format and training target format aligned.
+
+4. Logic / execution audit formats remain unchanged.
+   - They still use tagged outputs because their format compliance is already high.
+
+### What to check after the next run
+
+1. `generation_format_ok_rate` should recover materially from the failed strict-`<CODE>` attempt.
+2. `mean_pass_rate` should at least return toward the earlier Group D+ baseline.
+3. Traces should show fenced code without extra prose outside the block.

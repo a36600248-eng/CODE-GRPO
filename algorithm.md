@@ -173,11 +173,13 @@ Node:
 
 约束（与实现一致）：
 
-* 主生成阶段只要求输出 `<CODE>`，不再要求 `<REASON>`。
+* 主生成阶段只要求输出**单个 fenced Python code block**，不再要求 `<REASON>`。
 * 主生成阶段**不要求**输出 `<LOGIC_PREDICTION>` / `<EXEC_PREDICTION>`。
-* 主生成 prompt 会在末尾预填一个打开的 `<CODE>` 标签，要求模型**直接续写代码正文**，最后只补一个 `</CODE>`。
-* 主生成解析使用单独的严格阈值 `generation_outside_noise_chars`；默认主生成不允许标签外废话，而逻辑/执行审计仍可沿用单独的 `format_outside_noise_chars`。
-* 主生成解码时会在首个 `</CODE>` 处截断，再做格式校验与代码提取，减少尾部解释性废话污染。
+* 主生成的合法格式是：
+  * opening fence: ` ```python `
+  * closing fence: ` ``` `
+  * 标签外不允许额外文本（由 `generation_outside_noise_chars` 控制，默认 0）
+* 主生成解析使用单独的严格阈值 `generation_outside_noise_chars`；逻辑/执行审计仍可沿用单独的 `format_outside_noise_chars`。
 * 逻辑推理与执行推理在后续审计阶段用**单独 prompt**完成：
   * 逻辑审计：`<REASON> + <LOGIC_PREDICTION>`
   * 执行审计：`<REASON> + <EXEC_PREDICTION>`
@@ -193,7 +195,7 @@ Node:
 
 当前实现的训练分配（与代码一致）：
 
-* 主生成样本（`<CODE>`）：`code_token_mask=全1`，`reason_token_mask=全0`，即 `A_code` 作用于主生成输出的全部 token
+* 主生成样本（单个 fenced Python code block）：`code_token_mask=全1`，`reason_token_mask=全0`，即 `A_code` 作用于主生成输出的全部 token
 * 执行审计样本（`<REASON> + <EXEC_PREDICTION>`）：`code_token_mask=全0`，`reason_token_mask=全1`，该样本的 case-level `advantage` 写入 `A_reason`
 * 逻辑审计样本（`<REASON> + <LOGIC_PREDICTION>`）：`code_token_mask=全0`，`reason_token_mask=全1`，该样本的 case-level `advantage` 写入 `A_reason`
 
@@ -459,7 +461,7 @@ L = - A_code   * sum(logprob(main_generation_tokens))
 
 其中：
 
-* `main_generation_tokens`：主生成阶段输出（`<CODE>`）的全部 token
+* `main_generation_tokens`：主生成阶段输出（单个 fenced Python code block）的全部 token
 * `logic_audit_tokens`：逻辑审计阶段输出（`<REASON> + <LOGIC_PREDICTION>`）的 token
 * `exec_audit_tokens`：执行审计阶段输出（`<REASON> + <EXEC_PREDICTION>`）的 token
 * 不允许把两路奖励混成一个 `A_total` 更新全部 token

@@ -11,12 +11,10 @@ def serialize_value(value: Any) -> str:
 
 
 GENERATION_FEWSHOT = """Format example (follow exactly this structure):
-<CODE>
+```python
 def solve(x):
     return x * 2
-</CODE>"""
-
-GENERATION_PREFILL = "<CODE>\n"
+```"""
 
 
 LOGIC_FEWSHOT = """Example:
@@ -110,13 +108,11 @@ def build_generation_prompt(
     history_summary = summarize_generation_history(history)
     parts = [
         "You solve one Python programming task.",
-        "The assistant reply is prefilled with the opening tag below.",
-        "Write only Python code, then close the block with </CODE> exactly once.",
+        "Return exactly one fenced Python code block.",
         "Rules:",
-        "1) No markdown fences.",
-        "2) Do not repeat <CODE>.",
-        "3) No text after </CODE>.",
-        "4) Do NOT output any reasoning or prediction tags in this stage.",
+        "1) Use ```python as the opening fence and ``` as the closing fence.",
+        "2) No text before the opening fence or after the closing fence.",
+        "3) Do NOT output any reasoning or prediction tags in this stage.",
         GENERATION_FEWSHOT,
         "Question:",
         question_prompt.strip(),
@@ -136,12 +132,7 @@ def build_generation_prompt(
         parts.extend(["Earlier history summary:", history_summary["earlier_summary"]])
     if not need_code:
         parts.append("Code is frozen; keep prior code behavior unchanged.")
-    parts.extend(
-        [
-            "Continue immediately after this opening tag and output code only:",
-            "<CODE>",
-        ]
-    )
+    parts.append("Now answer with one fenced Python code block only.")
     return "\n".join(parts)
 
 

@@ -6,6 +6,7 @@ from .executor import execute
 from .matcher import is_match
 from .parser import (
     build_canonical_completion,
+    build_generation_completion,
     build_token_masks,
     parse_exec_prediction_only,
     parse_exec_response,
@@ -29,6 +30,7 @@ __all__ = [
     "TrainSample",
     "build_backend",
     "build_canonical_completion",
+    "build_generation_completion",
     "build_token_masks",
     "execute",
     "is_match",
