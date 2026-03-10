@@ -1,0 +1,102 @@
+{
+  "dataset": "mbpp",
+  "config": "sanitized",
+  "splits": {
+    "train": {
+      "raw_count": 120,
+      "converted_count": 120,
+      "skipped_count": 0,
+      "skip_reasons": {}
+    },
+    "validation": {
+      "raw_count": 43,
+      "converted_count": 43,
+      "skipped_count": 0,
+      "skip_reasons": {}
+    },
+    "test": {
+      "raw_count": 257,
+      "converted_count": 241,
+      "skipped_count": 16,
+      "skip_reasons": {
+        "ValueError": 16
+      }
+    }
+  },
+  "files": {
+    "train": "mbpp_sanitized_codegrpo_train.jsonl",
+    "validation": "mbpp_sanitized_codegrpo_validation.jsonl",
+    "test": "mbpp_sanitized_codegrpo_test.jsonl",
+    "trainval": "mbpp_sanitized_codegrpo_trainval.jsonl",
+    "small_train": "mbpp_sanitized_codegrpo_small64.jsonl",
+    "small_train_size": 64
+  },
+  "skipped_examples": {
+    "test": [
+      {
+        "task_id": 82,
+        "reason": "ValueError: Unsupported literal: volume_sphere(10)"
+      },
+      {
+        "task_id": 85,
+        "reason": "ValueError: Unsupported literal: surfacearea_sphere(10)"
+      },
+      {
+        "task_id": 98,
+        "reason": "ValueError: Unsupported literal: multiply_num((8, 2, 3, -1, 7))"
+      },
+      {
+        "task_id": 111,
+        "reason": "ValueError: Unsupported literal: common_in_nested_lists([[12, 18, 23, 25, 45], [7, 12, 18, 24, 28], [1, 5, 8, 12, 15, 16, 18]])"
+      },
+      {
+        "task_id": 124,
+        "reason": "ValueError: Unsupported literal: angle_complex(0, 1j)"
+      },
+      {
+        "task_id": 137,
+        "reason": "ValueError: Unsupported literal: zero_count([0, 1, 2, -1, -5, 6, 0, -3, -2, 3, 4, 6, 8])"
+      },
+      {
+        "task_id": 139,
+        "reason": "ValueError: Unsupported literal: circle_circumference(10)"
+      },
+      {
+        "task_id": 140,
+        "reason": "ValueError: Unsupported literal: extract_singly([(3, 4, 5), (4, 5, 7), (1, 4)])"
+      },
+      {
+        "task_id": 163,
+        "reason": "ValueError: Unsupported literal: area_polygon(4, 20)"
+      },
+      {
+        "task_id": 232,
+        "reason": "ValueError: Unsupported literal: larg_nnum([10, 20, 50, 70, 90, 20, 50, 40, 60, 80, 100], 2)"
+      },
+      {
+        "task_id": 233,
+        "reason": "ValueError: Unsupported literal: lateralsuface_cylinder(10, 5)"
+      },
+      {
+        "task_id": 246,
+        "reason": "ValueError: Unsupported literal: babylonian_squareroot(10)"
+      },
+      {
+        "task_id": 248,
+        "reason": "ValueError: Unsupported literal: harmonic_sum(7)"
+      },
+      {
+        "task_id": 276,
+        "reason": "ValueError: Unsupported literal: volume_cylinder(10, 5)"
+      },
+      {
+        "task_id": 300,
+        "reason": "ValueError: Unsupported literal: count_binary_seq(1)"
+      },
+      {
+        "task_id": 312,
+        "reason": "ValueError: Unsupported literal: volume_cone(5, 12)"
+      }
+    ]
+  }
+}
