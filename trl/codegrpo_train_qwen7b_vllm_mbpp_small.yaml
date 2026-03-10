@@ -53,12 +53,12 @@ N_max: 4
 M_audit: 3
 M_retry: 1
 context_round_window: 2
-lambda_soft: 0.12
+lambda_soft: 0.08
 code_compile_reward_scale: 0.1
 code_format_reward_scale: 0.12
 logic_format_reward_scale: 0.12
 exec_case_baseline_ema_alpha: 0.1
-soft_reward_ineligible_scale: 0.3
+soft_reward_ineligible_scale: 0.2
 format_bonus_logic: 0.05
 format_bonus_exec: 0.05
 use_chat_template_for_codegrpo: true
