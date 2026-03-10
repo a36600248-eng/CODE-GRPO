@@ -393,6 +393,7 @@ class CodeGRPOTreeRunner:
         exec_raw_correct_flags: list[float] = []
         exec_audit_details: list[dict[str, Any]] = []
         exec_train_samples: list[dict[str, Any]] = []
+        reason_only_prompt_previews: list[str] = []
 
         if audit_indices:
             case_inputs = [_parse_case_input(test_cases[idx]["input"]) for idx in audit_indices]
@@ -416,6 +417,8 @@ class CodeGRPOTreeRunner:
                 unified_outputs,
                 strict=True,
             ):
+                prompt_preview = summarize_error(unified_prompt, trace_max_chars, trace_max_lines)
+                reason_only_prompt_previews.append(prompt_preview)
                 exec_reason, exec_prediction, format_ok = parse_exec_response(
                     unified_output,
                     require_reason_before_prediction=self.args.require_reason_before_prediction,
@@ -459,6 +462,7 @@ class CodeGRPOTreeRunner:
                         "raw_output": summarize_error(unified_output, trace_max_chars, trace_max_lines),
                         "parsed_reason": summarize_error(exec_reason, trace_max_chars, trace_max_lines),
                         "parsed_prediction": _safe_preview(exec_prediction, max_chars=400),
+                        "prompt_preview": prompt_preview,
                         "format_ok": bool(format_ok),
                         "match": bool(logic_correct),
                         "correct_raw": logic_correct,
@@ -503,6 +507,7 @@ class CodeGRPOTreeRunner:
                         "raw_output": summarize_error(unified_output, trace_max_chars, trace_max_lines),
                         "parsed_reason": summarize_error(exec_reason, trace_max_chars, trace_max_lines),
                         "parsed_prediction": _safe_preview(exec_prediction, max_chars=400),
+                        "prompt_preview": prompt_preview,
                         "format_ok": bool(format_ok),
                         "match": bool(exec_correct),
                         "correct_raw": exec_correct,
@@ -554,6 +559,11 @@ class CodeGRPOTreeRunner:
                     "parsed_logic_prediction": "",
                     "parsed_exec_prediction": "",
                     "reason_only": True,
+                    "prompt_preview": summarize_error(
+                        "\n\n".join(reason_only_prompt_previews[:2]),
+                        trace_max_chars,
+                        trace_max_lines,
+                    ),
                 },
                 "logic_audit": logic_audit_details,
                 "logic_train_samples": logic_train_samples,
@@ -794,49 +804,60 @@ class CodeGRPOTreeRunner:
                     )
                 )
 
-        r_code = [node.R_code for node in collected_nodes]
-        r_reason = [node.R_reason for node in collected_nodes]
-        pass_rates = [node.pass_rate for node in collected_nodes]
+        search_nodes = [node for node in collected_nodes if not bool(node.exec_summary.get("final_reason_stage", False))]
+        final_reason_nodes = [node for node in collected_nodes if bool(node.exec_summary.get("final_reason_stage", False))]
+        metric_nodes = search_nodes or collected_nodes
+
+        r_code = [node.R_code for node in metric_nodes]
+        r_reason = [node.R_reason for node in metric_nodes]
+        pass_rates = [node.pass_rate for node in metric_nodes]
         eval_metrics = self._compute_eval_metrics(rounds)
         if collected_nodes:
             logic_items = [
-                item for node in collected_nodes for item in node.exec_summary.get("logic_train_samples", [])
+                item for node in metric_nodes for item in node.exec_summary.get("logic_train_samples", [])
             ]
             exec_items = [
-                item for node in collected_nodes for item in node.exec_summary.get("exec_train_samples", [])
+                item for node in metric_nodes for item in node.exec_summary.get("exec_train_samples", [])
+            ]
+            final_logic_items = [
+                item for node in final_reason_nodes for item in node.exec_summary.get("logic_train_samples", [])
+            ]
+            final_exec_items = [
+                item for node in final_reason_nodes for item in node.exec_summary.get("exec_train_samples", [])
             ]
             logic_format_ok_rate = _mean(
-                [float(node.exec_summary.get("logic_format_ok_rate", 0.0)) for node in collected_nodes]
+                [float(node.exec_summary.get("logic_format_ok_rate", 0.0)) for node in metric_nodes]
             )
             exec_format_ok_rate = _mean(
-                [float(node.exec_summary.get("exec_format_ok_rate", 0.0)) for node in collected_nodes]
+                [float(node.exec_summary.get("exec_format_ok_rate", 0.0)) for node in metric_nodes]
             )
             generation_format_ok_rate = _mean(
-                [float(node.exec_summary.get("generation_format_ok", 0.0)) for node in collected_nodes]
+                [float(node.exec_summary.get("generation_format_ok", 0.0)) for node in metric_nodes if node.completion_text]
             )
-            compile_ok_rate = _mean([float(node.exec_summary.get("compile_score", 0.0)) for node in collected_nodes])
-            syntax_error_rate = _mean([1.0 if node.status_code == "SYNTAX_ERROR" else 0.0 for node in collected_nodes])
-            timeout_rate = _mean([1.0 if node.status_code == "TIMEOUT" else 0.0 for node in collected_nodes])
-            soft_lift = _mean([max(0.0, node.R_code - node.pass_rate) for node in collected_nodes])
-            mean_R_soft_raw = _mean([float(node.exec_summary.get("R_soft_raw", 0.0)) for node in collected_nodes])
+            compile_ok_rate = _mean([float(node.exec_summary.get("compile_score", 0.0)) for node in metric_nodes])
+            syntax_error_rate = _mean([1.0 if node.status_code == "SYNTAX_ERROR" else 0.0 for node in metric_nodes])
+            timeout_rate = _mean([1.0 if node.status_code == "TIMEOUT" else 0.0 for node in metric_nodes])
+            soft_lift = _mean([max(0.0, node.R_code - node.pass_rate) for node in metric_nodes])
+            mean_R_soft_raw = _mean([float(node.exec_summary.get("R_soft_raw", 0.0)) for node in metric_nodes])
             mean_R_soft_match_raw = _mean(
-                [float(node.exec_summary.get("R_soft_match_raw", 0.0)) for node in collected_nodes]
+                [float(node.exec_summary.get("R_soft_match_raw", 0.0)) for node in metric_nodes]
             )
             mean_R_soft_effective = _mean(
-                [float(node.exec_summary.get("R_soft_effective", 0.0)) for node in collected_nodes]
+                [float(node.exec_summary.get("R_soft_effective", 0.0)) for node in metric_nodes]
             )
             soft_reward_eligible_rate = _mean(
-                [1.0 if bool(node.exec_summary.get("soft_reward_eligible", False)) else 0.0 for node in collected_nodes]
+                [1.0 if bool(node.exec_summary.get("soft_reward_eligible", False)) else 0.0 for node in metric_nodes]
             )
             mean_terminal_backprop_bonus = _mean(
-                [float(node.exec_summary.get("terminal_backprop_bonus", 0.0)) for node in collected_nodes]
+                [float(node.exec_summary.get("terminal_backprop_bonus", 0.0)) for node in metric_nodes]
             )
             logic_confirmed_rate = _mean([1.0 if bool(item.get("confirmed", False)) else 0.0 for item in logic_items])
-            main_sample_count = float(sum(1 for node in collected_nodes if node.completion_text))
+            main_sample_count = float(sum(1 for node in metric_nodes if node.completion_text))
             logic_sample_count = float(len(logic_items))
             exec_sample_count = float(len(exec_items))
             eval_metrics.update(
                 {
+                    "search_node_count": float(len(search_nodes)),
                     "logic_format_ok_rate": logic_format_ok_rate,
                     "exec_format_ok_rate": exec_format_ok_rate,
                     "generation_format_ok_rate": generation_format_ok_rate,
@@ -853,6 +874,20 @@ class CodeGRPOTreeRunner:
                     "main_sample_count": main_sample_count,
                     "logic_sample_count": logic_sample_count,
                     "exec_sample_count": exec_sample_count,
+                    "final_reason_mean_R_code": _mean([node.R_code for node in final_reason_nodes]),
+                    "final_reason_mean_R_reason": _mean([node.R_reason for node in final_reason_nodes]),
+                    "final_reason_mean_pass_rate": _mean([node.pass_rate for node in final_reason_nodes]),
+                    "final_reason_logic_format_ok_rate": _mean(
+                        [float(node.exec_summary.get("logic_format_ok_rate", 0.0)) for node in final_reason_nodes]
+                    ),
+                    "final_reason_exec_format_ok_rate": _mean(
+                        [float(node.exec_summary.get("exec_format_ok_rate", 0.0)) for node in final_reason_nodes]
+                    ),
+                    "final_reason_logic_confirmed_rate": _mean(
+                        [1.0 if bool(item.get("confirmed", False)) else 0.0 for item in final_logic_items]
+                    ),
+                    "final_reason_logic_sample_count": float(len(final_logic_items)),
+                    "final_reason_exec_sample_count": float(len(final_exec_items)),
                 }
             )
 
@@ -1070,6 +1105,7 @@ class CodeGRPOTreeRunner:
                 for idx, unified_prompt, unified_output in zip(audit_indices, unified_prompts, unified_outputs, strict=True):
                     case = test_cases[idx]
                     actual = exec_results[idx]
+                    prompt_preview = summarize_error(unified_prompt, trace_max_chars, trace_max_lines)
                     exec_reason, exec_prediction, format_ok = parse_exec_response(
                         unified_output,
                         require_reason_before_prediction=self.args.require_reason_before_prediction,
@@ -1113,6 +1149,7 @@ class CodeGRPOTreeRunner:
                             "raw_output": summarize_error(unified_output, trace_max_chars, trace_max_lines),
                             "parsed_reason": summarize_error(exec_reason, trace_max_chars, trace_max_lines),
                             "parsed_prediction": _safe_preview(exec_prediction, max_chars=400),
+                            "prompt_preview": prompt_preview,
                             "format_ok": bool(format_ok),
                             "match": bool(logic_correct),
                             "correct_raw": logic_correct,
@@ -1157,6 +1194,7 @@ class CodeGRPOTreeRunner:
                             "raw_output": summarize_error(unified_output, trace_max_chars, trace_max_lines),
                             "parsed_reason": summarize_error(exec_reason, trace_max_chars, trace_max_lines),
                             "parsed_prediction": _safe_preview(exec_prediction, max_chars=400),
+                            "prompt_preview": prompt_preview,
                             "format_ok": bool(format_ok),
                             "match": bool(exec_correct),
                             "correct_raw": exec_correct,
@@ -1170,6 +1208,7 @@ class CodeGRPOTreeRunner:
                 logic_outputs = self.backend.generate_many(logic_prompts)
                 for idx, logic_prompt, logic_output in zip(audit_indices, logic_prompts, logic_outputs, strict=True):
                     case = test_cases[idx]
+                    logic_prompt_preview = summarize_error(logic_prompt, trace_max_chars, trace_max_lines)
                     logic_reason, logic_prediction, logic_format_ok = parse_logic_response(
                         logic_output,
                         require_reason_before_prediction=self.args.require_reason_before_prediction,
@@ -1212,6 +1251,7 @@ class CodeGRPOTreeRunner:
                             "raw_output": summarize_error(logic_output, trace_max_chars, trace_max_lines),
                             "parsed_reason": summarize_error(logic_reason, trace_max_chars, trace_max_lines),
                             "parsed_prediction": _safe_preview(logic_prediction, max_chars=400),
+                            "prompt_preview": logic_prompt_preview,
                             "format_ok": logic_format_ok,
                             "match": bool(logic_correct),
                             "correct_raw": logic_correct,
@@ -1225,6 +1265,7 @@ class CodeGRPOTreeRunner:
                 exec_outputs = self.backend.generate_many(exec_prompts)
                 for idx, exec_prompt, exec_output in zip(audit_indices, exec_prompts, exec_outputs, strict=True):
                     actual = exec_results[idx]
+                    exec_prompt_preview = summarize_error(exec_prompt, trace_max_chars, trace_max_lines)
                     exec_reason, exec_prediction, exec_format_ok = parse_exec_response(
                         exec_output,
                         require_reason_before_prediction=self.args.require_reason_before_prediction,
@@ -1269,6 +1310,7 @@ class CodeGRPOTreeRunner:
                             "raw_output": summarize_error(exec_output, trace_max_chars, trace_max_lines),
                             "parsed_reason": summarize_error(exec_reason, trace_max_chars, trace_max_lines),
                             "parsed_prediction": _safe_preview(exec_prediction, max_chars=400),
+                            "prompt_preview": exec_prompt_preview,
                             "format_ok": exec_format_ok,
                             "match": bool(exec_correct),
                             "correct_raw": exec_correct,
@@ -1558,9 +1600,11 @@ class CodeGRPOTreeRunner:
         metrics: dict[str, float] = {}
         round_n = self.args.eval_round_n
         k_list = list(self.args.eval_k_list)
+        search_rounds = [round_item for round_item in rounds if str(round_item.get("stage", "search")) == "search"]
+        eval_rounds = search_rounds if search_rounds else rounds
 
-        if 1 <= round_n <= len(rounds):
-            round_nodes = rounds[round_n - 1]["nodes"]
+        if 1 <= round_n <= len(eval_rounds):
+            round_nodes = eval_rounds[round_n - 1]["nodes"]
         else:
             round_nodes = []
         for k in k_list:
@@ -1569,7 +1613,7 @@ class CodeGRPOTreeRunner:
         if k_list:
             metrics["pass_at_k_round_n"] = metrics.get(f"pass_at_{k_list[0]}_round_{round_n}", 0.0)
 
-        flat_nodes = [node for round_item in rounds for node in round_item["nodes"]]
+        flat_nodes = [node for round_item in eval_rounds for node in round_item["nodes"]]
         for k in k_list:
             metrics[f"pass_at_{k}"] = 1.0 if any(node["pass_rate"] == 1.0 for node in flat_nodes[:k]) else 0.0
 
