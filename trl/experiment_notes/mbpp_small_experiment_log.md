@@ -281,3 +281,95 @@ Test the midpoint between Group B and Group C without changing the tree or audit
 - Better pass metrics than Group C
 - Less soft-reward optimism than Group B
 - Final-reason coverage remains active
+
+### Representative run
+
+- `20260310_224208__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. Group D is the best balance so far.
+   - `mean_pass_rate` recovered from about `0.1133` in Group C to about `0.2067`.
+   - `best_pass_rate_overall` recovered from about `0.2733` in Group C to about `0.4467`.
+   - This is close to Group B, but without returning all the way to Group B's optimistic behavior.
+
+2. Soft-reward optimism is lower than Group B, though not fully eliminated.
+   - `mean_R_soft_raw` sits around `0.4629`, between Group B (`~0.5221`) and Group C (`~0.3922`).
+   - Typical wrong-code `R_code` values are also in a middle range.
+   - Example:
+     - `mbpp_train_610` wrong-code nodes stayed around `R_code ≈ 0.10 ~ 0.26`.
+     - This is clearly less inflated than the earlier more optimistic groups.
+
+3. Confirmed logic coverage is also back to a healthier level.
+   - `logic_confirmed_rate` rose to about `0.125`, essentially back near Group B (`~0.1283`) and much better than Group C (`~0.0633`).
+
+4. Final-reason coverage is active again.
+   - `final_reason_node_count` mean is about `0.24`, much better than Group C (`~0.12`) and close to Group B (`~0.28`).
+   - `final_reason_hits` rose to `12/50`.
+
+5. Main generation format is still a weakness.
+   - `generation_format_ok_rate` is about `0.435`, almost unchanged from Group B and only slightly above Group C.
+   - Group D did not solve strict `<CODE>` formatting.
+
+6. Execution audit remains the strongest signal.
+   - `exec_format_ok_rate` stayed high at about `0.9583`.
+   - This is still the most reliable training signal in the current setup.
+
+7. Some overly positive soft-reward cases remain.
+   - Examples still exist with `pass_rate = 0` and fairly high `mean_R_soft_raw`, such as:
+     - `mbpp_train_733`
+     - `mbpp_train_640`
+   - So the optimism issue is reduced, not fully solved.
+
+### Interpretation
+
+Group D is the strongest configuration among A/B/C/D so far.
+
+- Better than Group C on pass metrics and final-reason coverage.
+- Less optimistic than Group B.
+- Similar to Group B on confirmed logic coverage.
+
+This is the first group that looks like a practical default rather than just an exploratory checkpoint.
+
+### Current recommendation
+
+Keep Group D as the working baseline for now.
+
+Do not change the tree yet.
+If another test is needed, the next adjustment should be small and targeted, for example:
+
+- keep `lambda_soft = 0.10`
+- keep `M_audit = 3`
+- keep `soft_reward_ineligible_scale = 0.2`
+- increase training length modestly before changing reward again
+
+Reason:
+
+- The reward calibration now looks usable.
+- The main remaining weaknesses are training stability/coverage and main-generation formatting, not a broken reward balance.
+
+## Group D+
+
+### Goal
+
+Keep the current best reward balance and test whether a longer run improves coverage and stability.
+
+### Parameter changes
+
+- `max_steps: 50 -> 100`
+- keep all Group D reward and tree settings unchanged
+
+### Why this group
+
+1. Group D is currently the best-balanced configuration.
+2. The remaining question is no longer "is reward balance broken?" but "does a longer run improve coverage?"
+3. The cleanest next experiment is to extend training length without adding new reward confounders.
+
+### What to check after Group D+
+
+1. `mean_pass_rate`
+2. `best_pass_rate_overall`
+3. `logic_confirmed_rate`
+4. `final_reason_node_count`
+5. `generation_format_ok_rate`
+6. Whether late-stage metrics are more stable than in the 50-step runs

@@ -32,7 +32,7 @@ vllm_tensor_parallel_size: 1
 vllm_gpu_memory_utilization: 0.35
 
 num_train_epochs: 1
-max_steps: 50
+max_steps: 100
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
