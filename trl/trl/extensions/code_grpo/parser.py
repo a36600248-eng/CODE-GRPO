@@ -55,7 +55,6 @@ def parse_generation_output(text: str) -> tuple[str, str, str, str]:
 def parse_generation_response(
     text: str,
     *,
-    reason_max_chars: int = 400,
     allow_outside_noise_chars: int = 0,
 ) -> tuple[str, str, str, str, bool]:
     """
@@ -63,23 +62,18 @@ def parse_generation_response(
     (code, reason, logic_prediction, exec_prediction, format_ok)
 
     Main-generation format is valid when:
-    - both <REASON> and <CODE> exist
-    - <REASON> appears before <CODE>
-    - reason length <= reason_max_chars
+    - <CODE> exists exactly once
     - outside-tag non-whitespace chars <= allow_outside_noise_chars
     """
     normalized = _normalize_response_text(text)
     code_match = _last_match(CODE_PATTERN, normalized)
-    reason_match = _last_match(REASON_PATTERN, normalized)
     code, reason, logic_prediction, exec_prediction = parse_generation_output(normalized)
 
     format_ok = False
-    if code_match is not None and reason_match is not None:
-        reason_before_code = reason_match.start() < code_match.start() and reason_match.end() <= code_match.start()
-        reason_len_ok = len((reason_match.group(1) or "").strip()) <= max(0, int(reason_max_chars))
-        outside_noise = _outside_non_ws_length(normalized, [reason_match.span(), code_match.span()])
+    if code_match is not None:
+        outside_noise = _outside_non_ws_length(normalized, [code_match.span()])
         outside_ok = outside_noise <= max(0, int(allow_outside_noise_chars))
-        format_ok = bool(reason_before_code and reason_len_ok and outside_ok)
+        format_ok = bool(outside_ok)
     return code, reason, logic_prediction, exec_prediction, format_ok
 
 
@@ -236,6 +230,7 @@ def build_canonical_completion(
     logic_prediction: str,
     exec_prediction: str,
     include_predictions: bool = True,
+    include_reason: bool = True,
 ) -> str:
     reason_body = reasoning.strip()
     if include_predictions:
@@ -248,10 +243,16 @@ def build_canonical_completion(
             f"{exec_prediction.strip()}\n"
             "</EXEC_PREDICTION>"
         ).strip()
+    if include_reason:
+        return (
+            "<REASON>\n"
+            f"{reason_body}\n"
+            "</REASON>\n"
+            "<CODE>\n"
+            f"{code.strip()}\n"
+            "</CODE>"
+        )
     return (
-        "<REASON>\n"
-        f"{reason_body}\n"
-        "</REASON>\n"
         "<CODE>\n"
         f"{code.strip()}\n"
         "</CODE>"

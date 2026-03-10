@@ -14,7 +14,13 @@ from .parser import (
     parse_generation_response,
     parse_logic_response,
 )
-from .prompts import build_exec_prompt, build_frozen_reason_prompt, build_generation_prompt, build_logic_prompt
+from .prompts import (
+    build_exec_prompt,
+    build_frozen_reason_prompt,
+    build_generation_prompt,
+    build_logic_prompt,
+    summarize_generation_history,
+)
 from .types import ExecResult, Node, QuestionRollout, TrainSample
 
 
@@ -926,6 +932,7 @@ class CodeGRPOTreeRunner:
                     audit_indices=audit_indices,
                     round_idx=round_idx,
                     prompt_text_override=rendered_prompt_text,
+                    prompt_text_raw_override=prompt_text,
                     raw_output_override=raw_output,
                 )
                 siblings.append(child)
@@ -960,6 +967,7 @@ class CodeGRPOTreeRunner:
         audit_indices: list[int],
         round_idx: int,
         prompt_text_override: str | None = None,
+        prompt_text_raw_override: str | None = None,
         raw_output_override: str | None = None,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
@@ -967,6 +975,7 @@ class CodeGRPOTreeRunner:
         need_code = not parent.frozen_code
         need_reason = not (parent.frozen_reason and parent.frozen_code)
         can_reuse_reason = parent.frozen_reason and parent.frozen_code
+        prompt_history_debug = summarize_generation_history(context_history)
 
         if prompt_text_override is None:
             prompt_text_raw = build_generation_prompt(
@@ -978,12 +987,12 @@ class CodeGRPOTreeRunner:
             )
             prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
         else:
+            prompt_text_raw = prompt_text_raw_override or prompt_text_override
             prompt_text = prompt_text_override
         raw_output = raw_output_override if raw_output_override is not None else self.backend.generate(prompt_text)
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction, generation_format_ok = (
             parse_generation_response(
                 raw_output,
-                reason_max_chars=self.args.reasoning_max_chars,
                 allow_outside_noise_chars=self.args.format_outside_noise_chars,
             )
         )
@@ -991,7 +1000,7 @@ class CodeGRPOTreeRunner:
         trace_max_lines = max(self.args.error_max_lines * 4, self.args.error_max_lines)
 
         code = parent.code if parent.frozen_code else parsed_code
-        reasoning = parent.reasoning if can_reuse_reason else parsed_reason
+        reasoning = parent.reasoning if can_reuse_reason else ""
         if code is None:
             code = ""
         if reasoning is None:
@@ -1003,6 +1012,7 @@ class CodeGRPOTreeRunner:
             logic_prediction=parsed_logic_prediction,
             exec_prediction=parsed_exec_prediction,
             include_predictions=False,
+            include_reason=False,
         )
         token_ids, _, _ = build_token_masks(self.tokenizer, completion_text)
         code_mask = [1] * len(token_ids)
@@ -1334,6 +1344,17 @@ class CodeGRPOTreeRunner:
                 "R_soft_match_raw": R_soft_match_raw,
                 "R_soft_effective": R_soft_effective,
                 "generation_debug": {
+                    "prompt_preview": summarize_error(prompt_text_raw, trace_max_chars, trace_max_lines),
+                    "latest_feedback_summary": summarize_error(
+                        prompt_history_debug.get("latest_feedback", ""),
+                        trace_max_chars,
+                        trace_max_lines,
+                    ),
+                    "earlier_history_summary": summarize_error(
+                        prompt_history_debug.get("earlier_summary", ""),
+                        trace_max_chars,
+                        trace_max_lines,
+                    ),
                     "raw_output": summarize_error(raw_output, trace_max_chars, trace_max_lines),
                     "parsed_reason": summarize_error(parsed_reason, trace_max_chars, trace_max_lines),
                     "parsed_logic_prediction": _safe_preview(parsed_logic_prediction, max_chars=400),

@@ -20,9 +20,9 @@ lora_dropout: 0.05
 dataset_adapter: default
 datasets:
   - path: json
-    data_files: /root/autodl-tmp/CODE-GRPO/trl/mini_codegrpo_7b_smoke.jsonl
+    data_files: /root/autodl-tmp/CODE-GRPO/trl/mini_codegrpo_final_reason_probe.jsonl
     split: train
-test_split_size: 0.5
+test_split_size: null
 
 codegrpo_mode: train
 backend: vllm
@@ -50,7 +50,7 @@ num_generations: 2
 num_generations_eval: 2
 T_max: 2
 N_max: 4
-M_audit: 1
+M_audit: 2
 M_retry: 1
 context_round_window: 2
 lambda_soft: 0.2
@@ -79,5 +79,5 @@ eval_k_list: [1, 2]
 
 dump_train_traces: true
 debug_trace_dir: traces/rollout
-debug_trace_sample_size: 1
-debug_trace_question_ids: []
+debug_trace_sample_size: 2
+debug_trace_question_ids: ["q_swap_case", "q_reverse_words_trim"]

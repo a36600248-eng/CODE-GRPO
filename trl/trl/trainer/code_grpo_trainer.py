@@ -282,6 +282,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 logic_prediction="",
                 exec_prediction="",
                 include_predictions=False,
+                include_reason=False,
             )
             _, fallback_code_mask, fallback_reason_mask = build_token_masks(self.code_tokenizer, fallback_completion)
             train_samples = [

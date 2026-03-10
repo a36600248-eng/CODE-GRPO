@@ -73,9 +73,11 @@ class Backend:
 必须支持超参：
 
 * `context_round_window = W`：下一轮生成时最多携带最近 W 轮历史
-* 历史内容不只含错误反馈，还应含：
-  * 上一轮（或最近 W 轮）代码片段摘要（用于“在已有代码上修复”而不是每轮重写）
-  * 失败样例摘要（`failed_input / failed_actual`）
+* 当前实现的主生成上下文采用“父代码全文 + 历史压缩反馈”：
+  * 始终保留**当前父节点完整代码**
+  * 最近一轮保留详细反馈：`status / failed_input / failed_actual / error_summary / mismatch_count`
+  * 更早历史压成滚动摘要：状态统计、是否反复编译失败、是否反复命中同类失败输入、逻辑/执行不匹配趋势
+* 历史内容不直接泄露标准答案；主生成阶段只反馈失败输入和实际结果/错误类型，不给 expected output
 * 主生成 prompt 需显式提供“父节点代码”（parent code），指导模型基于旧代码修复
 
 ### 3.2 错误反馈截断/提取
@@ -164,9 +166,6 @@ Node:
 主生成阶段（生成候选代码）输出必须可可靠解析为：
 
 ```text
-<REASON>
-...（简短算法说明）
-</REASON>
 <CODE>
 ...
 </CODE>
@@ -174,6 +173,7 @@ Node:
 
 约束（与实现一致）：
 
+* 主生成阶段只要求输出 `<CODE>`，不再要求 `<REASON>`。
 * 主生成阶段**不要求**输出 `<LOGIC_PREDICTION>` / `<EXEC_PREDICTION>`。
 * 逻辑推理与执行推理在后续审计阶段用**单独 prompt**完成：
   * 逻辑审计：`<REASON> + <LOGIC_PREDICTION>`
@@ -190,7 +190,7 @@ Node:
 
 当前实现的训练分配（与代码一致）：
 
-* 主生成样本（`<REASON> + <CODE>`）：`code_token_mask=全1`，`reason_token_mask=全0`，即 `A_code` 作用于主生成输出的全部 token
+* 主生成样本（`<CODE>`）：`code_token_mask=全1`，`reason_token_mask=全0`，即 `A_code` 作用于主生成输出的全部 token
 * 执行审计样本（`<REASON> + <EXEC_PREDICTION>`）：`code_token_mask=全0`，`reason_token_mask=全1`，该样本的 case-level `advantage` 写入 `A_reason`
 * 逻辑审计样本（`<REASON> + <LOGIC_PREDICTION>`）：`code_token_mask=全0`，`reason_token_mask=全1`，该样本的 case-level `advantage` 写入 `A_reason`
 
@@ -456,7 +456,7 @@ L = - A_code   * sum(logprob(main_generation_tokens))
 
 其中：
 
-* `main_generation_tokens`：主生成阶段输出（`<REASON> + <CODE>`）的全部 token
+* `main_generation_tokens`：主生成阶段输出（`<CODE>`）的全部 token
 * `logic_audit_tokens`：逻辑审计阶段输出（`<REASON> + <LOGIC_PREDICTION>`）的 token
 * `exec_audit_tokens`：执行审计阶段输出（`<REASON> + <EXEC_PREDICTION>`）的 token
 * 不允许把两路奖励混成一个 `A_total` 更新全部 token

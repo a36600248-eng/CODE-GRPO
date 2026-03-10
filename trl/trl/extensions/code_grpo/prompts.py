@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from typing import Any
 
 
@@ -10,9 +11,6 @@ def serialize_value(value: Any) -> str:
 
 
 GENERATION_FEWSHOT = """Format example (follow exactly this structure):
-<REASON>
-Use multiplication by 2.
-</REASON>
 <CODE>
 def solve(x):
     return x * 2
@@ -41,6 +39,64 @@ Answer:
 <EXEC_PREDICTION>SyntaxError</EXEC_PREDICTION>"""
 
 
+def summarize_generation_history(history: list[dict[str, Any]]) -> dict[str, str]:
+    latest_feedback = ""
+    earlier_summary = ""
+    if not history:
+        return {"latest_feedback": latest_feedback, "earlier_summary": earlier_summary}
+
+    latest = history[-1]
+    latest_lines: list[str] = []
+    status = str(latest.get("status_code", "") or "").strip()
+    if status:
+        latest_lines.append(f"- latest_status={status}")
+    status_reason = str(latest.get("status_reason", "") or "").strip()
+    if status_reason:
+        latest_lines.append(f"- latest_reason_status={status_reason}")
+    failed_input = latest.get("failed_input")
+    if failed_input is not None:
+        latest_lines.append(f"- failed_input={serialize_value(failed_input)}")
+    failed_actual = latest.get("failed_actual")
+    if failed_actual is not None:
+        latest_lines.append(f"- actual_result_or_error={serialize_value(failed_actual)}")
+    error_summary = str(latest.get("error_summary", "") or "").strip()
+    if error_summary:
+        latest_lines.append(f"- error_summary={error_summary}")
+    logic_mismatch_count = latest.get("logic_mismatch_count")
+    if logic_mismatch_count not in (None, ""):
+        latest_lines.append(f"- logic_mismatch_count={logic_mismatch_count}")
+    exec_mismatch_count = latest.get("exec_mismatch_count")
+    if exec_mismatch_count not in (None, ""):
+        latest_lines.append(f"- exec_mismatch_count={exec_mismatch_count}")
+    latest_feedback = "\n".join(latest_lines)
+
+    earlier = history[:-1]
+    if earlier:
+        earlier_lines: list[str] = [f"- earlier_rounds={len(earlier)}"]
+        status_counts = Counter(str(item.get("status_code", "") or "").strip() for item in earlier if item.get("status_code"))
+        if status_counts:
+            packed = ", ".join(f"{key}:{status_counts[key]}" for key in sorted(status_counts))
+            earlier_lines.append(f"- status_counts={packed}")
+        repeated_failed_inputs = Counter(
+            serialize_value(item.get("failed_input"))
+            for item in earlier
+            if item.get("failed_input") is not None
+        )
+        if repeated_failed_inputs:
+            top_input, top_count = repeated_failed_inputs.most_common(1)[0]
+            if top_count >= 2:
+                earlier_lines.append(f"- repeated_failure_input={top_input}")
+        if any(float(item.get("compile_score", 0.0) or 0.0) <= 0.0 for item in earlier):
+            earlier_lines.append("- some_earlier_attempts_failed_to_compile")
+        if any(int(item.get("logic_mismatch_count", 0) or 0) > 0 for item in earlier):
+            earlier_lines.append("- earlier_attempts_had_logic_mismatches")
+        if any(int(item.get("exec_mismatch_count", 0) or 0) > 0 for item in earlier):
+            earlier_lines.append("- earlier_attempts_had_execution_mismatches")
+        earlier_summary = "\n".join(earlier_lines)
+
+    return {"latest_feedback": latest_feedback, "earlier_summary": earlier_summary}
+
+
 def build_generation_prompt(
     question_prompt: str,
     history: list[dict[str, Any]],
@@ -48,16 +104,16 @@ def build_generation_prompt(
     need_reason: bool,
     parent_code: str | None = None,
 ) -> str:
+    del need_reason
+    history_summary = summarize_generation_history(history)
     parts = [
         "You solve one Python programming task.",
-        "Return exactly two tags in this order, each exactly once:",
-        "<REASON>...</REASON>",
+        "Return exactly one tag, exactly once:",
         "<CODE>...</CODE>",
         "Rules:",
         "1) No markdown fences.",
-        "2) No text before <REASON> or after </CODE>.",
-        "3) Do NOT output prediction tags in this stage.",
-        "4) <REASON> must be one short sentence describing algorithm intent.",
+        "2) No text before <CODE> or after </CODE>.",
+        "3) Do NOT output any reasoning or prediction tags in this stage.",
         GENERATION_FEWSHOT,
         "Question:",
         question_prompt.strip(),
@@ -71,56 +127,12 @@ def build_generation_prompt(
                 "</PARENT_CODE>",
             ]
         )
-    if history:
-        parts.append("Recent execution and reasoning feedback summaries:")
-        for item in history:
-            entry = (
-                f"- round={item.get('round', '')}, status={item.get('status_code', '')}, "
-                f"error={item.get('error_summary', '')}"
-            )
-            status_reason = item.get("status_reason")
-            if status_reason:
-                entry += f", reason_status={status_reason}"
-            code_preview = (item.get("code_preview") or "").strip()
-            if code_preview:
-                entry += f", code_snippet={code_preview}"
-            logic_mismatch_count = item.get("logic_mismatch_count")
-            if logic_mismatch_count is not None:
-                entry += f", logic_mismatch_count={logic_mismatch_count}"
-            exec_mismatch_count = item.get("exec_mismatch_count")
-            if exec_mismatch_count is not None:
-                entry += f", exec_mismatch_count={exec_mismatch_count}"
-            logic_fmt = item.get("logic_format_ok_rate")
-            if logic_fmt is not None:
-                entry += f", logic_format_ok_rate={logic_fmt}"
-            exec_fmt = item.get("exec_format_ok_rate")
-            if exec_fmt is not None:
-                entry += f", exec_format_ok_rate={exec_fmt}"
-            failed_input = item.get("failed_input")
-            failed_actual = item.get("failed_actual")
-            if failed_input is not None:
-                entry += (
-                    f", failed_input={serialize_value(failed_input)}, "
-                    f"failed_actual={serialize_value(failed_actual)}"
-                )
-            logic_failed_input = item.get("logic_failed_input")
-            if logic_failed_input is not None:
-                entry += (
-                    f", logic_failed_input={serialize_value(logic_failed_input)}, "
-                    f"logic_failed_prediction={serialize_value(item.get('logic_failed_prediction'))}"
-                )
-            exec_failed_input = item.get("exec_failed_input")
-            if exec_failed_input is not None:
-                entry += (
-                    f", exec_failed_input={serialize_value(exec_failed_input)}, "
-                    f"exec_failed_prediction={serialize_value(item.get('exec_failed_prediction'))}, "
-                    f"exec_actual_kind={serialize_value(item.get('exec_actual_kind'))}"
-                )
-            parts.append(entry)
+    if history_summary["latest_feedback"]:
+        parts.extend(["Latest feedback:", history_summary["latest_feedback"]])
+    if history_summary["earlier_summary"]:
+        parts.extend(["Earlier history summary:", history_summary["earlier_summary"]])
     if not need_code:
         parts.append("Code is frozen; keep prior code behavior unchanged.")
-    if not need_reason:
-        parts.append("Reasoning is frozen; keep prior reasoning behavior unchanged.")
     parts.append("Now answer the current question using the exact required tags only.")
     return "\n".join(parts)
 
