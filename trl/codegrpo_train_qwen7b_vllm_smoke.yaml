@@ -71,6 +71,8 @@ unify_reason_when_code_frozen: true
 beta_reason: 1.0
 gamma_shrink: 0.1
 format_outside_noise_chars: 80
+generation_outside_noise_chars: 0
+prefill_generation_code_tag: true
 error_max_chars: 180
 error_max_lines: 6
 code_timeout_seconds: 1.0

@@ -95,6 +95,24 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    generation_outside_noise_chars: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Allowed non-whitespace chars outside the required code block when parsing main-generation "
+                "responses. Use 0 to enforce code-only output."
+            )
+        },
+    )
+    prefill_generation_code_tag: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether the main-generation prompt should prefill the opening <CODE> tag and expect the model "
+                "to continue with code body only."
+            )
+        },
+    )
     use_chat_template_for_codegrpo: bool = field(
         default=True,
         metadata={"help": "Whether to render CodeGRPO prompts with tokenizer chat template before generation."},
@@ -213,6 +231,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("prediction_max_chars must be > 0.")
         if self.format_outside_noise_chars < 0:
             raise ValueError("format_outside_noise_chars must be >= 0.")
+        if self.generation_outside_noise_chars < 0:
+            raise ValueError("generation_outside_noise_chars must be >= 0.")
         if not (0.0 <= self.terminal_logic_backprop_bonus <= 1.0):
             raise ValueError(
                 f"terminal_logic_backprop_bonus must be in [0, 1], got: {self.terminal_logic_backprop_bonus}"

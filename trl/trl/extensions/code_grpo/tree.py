@@ -8,6 +8,7 @@ from .error_utils import summarize_error
 from .executor import execute_batch
 from .matcher import is_match, values_equal
 from .parser import (
+    CODE_CLOSE_TAG,
     build_canonical_completion,
     build_token_masks,
     parse_exec_response,
@@ -945,6 +946,7 @@ class CodeGRPOTreeRunner:
             context_history = history[-self.args.context_round_window :]
             need_code = not parent.frozen_code
             need_reason = not (parent.frozen_reason and parent.frozen_code)
+            prefilled_generation = bool(self.args.prefill_generation_code_tag and need_code)
             prompt_text = build_generation_prompt(
                 question_prompt=prompt,
                 history=context_history,
@@ -954,7 +956,10 @@ class CodeGRPOTreeRunner:
             )
             rendered_prompt_text = self._render_prompt_with_chat_template(prompt_text)
 
-            raw_outputs = self.backend.generate_many([rendered_prompt_text], num_generations=to_generate)
+            generation_cfg = {"num_generations": to_generate}
+            if prefilled_generation:
+                generation_cfg["stop_strings"] = [CODE_CLOSE_TAG]
+            raw_outputs = self.backend.generate_many([rendered_prompt_text], **generation_cfg)
             siblings: list[Node] = []
             for raw_output in raw_outputs:
                 node_serial += 1
@@ -969,6 +974,7 @@ class CodeGRPOTreeRunner:
                     prompt_text_override=rendered_prompt_text,
                     prompt_text_raw_override=prompt_text,
                     raw_output_override=raw_output,
+                    prefilled_generation_override=prefilled_generation,
                 )
                 siblings.append(child)
             produced_total += len(siblings)
@@ -1004,12 +1010,18 @@ class CodeGRPOTreeRunner:
         prompt_text_override: str | None = None,
         prompt_text_raw_override: str | None = None,
         raw_output_override: str | None = None,
+        prefilled_generation_override: bool | None = None,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
         context_history = history[-self.args.context_round_window :]
         need_code = not parent.frozen_code
         need_reason = not (parent.frozen_reason and parent.frozen_code)
         can_reuse_reason = parent.frozen_reason and parent.frozen_code
+        prefilled_generation = bool(
+            self.args.prefill_generation_code_tag and need_code
+            if prefilled_generation_override is None
+            else prefilled_generation_override
+        )
         prompt_history_debug = summarize_generation_history(context_history)
 
         if prompt_text_override is None:
@@ -1024,11 +1036,16 @@ class CodeGRPOTreeRunner:
         else:
             prompt_text_raw = prompt_text_raw_override or prompt_text_override
             prompt_text = prompt_text_override
-        raw_output = raw_output_override if raw_output_override is not None else self.backend.generate(prompt_text)
+        if raw_output_override is not None:
+            raw_output = raw_output_override
+        else:
+            generation_cfg = {"stop_strings": [CODE_CLOSE_TAG]} if prefilled_generation else {}
+            raw_output = self.backend.generate(prompt_text, **generation_cfg)
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction, generation_format_ok = (
             parse_generation_response(
                 raw_output,
-                allow_outside_noise_chars=self.args.format_outside_noise_chars,
+                allow_outside_noise_chars=self.args.generation_outside_noise_chars,
+                prefilled_code=prefilled_generation,
             )
         )
         trace_max_chars = max(self.args.error_max_chars * 4, self.args.error_max_chars)
@@ -1387,6 +1404,7 @@ class CodeGRPOTreeRunner:
                 "R_soft_effective": R_soft_effective,
                 "generation_debug": {
                     "prompt_preview": summarize_error(prompt_text_raw, trace_max_chars, trace_max_lines),
+                    "prefilled_code_tag": prefilled_generation,
                     "latest_feedback_summary": summarize_error(
                         prompt_history_debug.get("latest_feedback", ""),
                         trace_max_chars,

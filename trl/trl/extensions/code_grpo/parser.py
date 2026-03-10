@@ -8,6 +8,7 @@ EXEC_PREDICTION_PATTERN = re.compile(r"<EXEC_PREDICTION>\s*(.*?)\s*</EXEC_PREDIC
 LEGACY_PREDICTION_PATTERN = re.compile(r"<PREDICTION>\s*(.*?)\s*</PREDICTION>", re.DOTALL | re.IGNORECASE)
 CODE_LIKE_PATTERN = re.compile(r"```|<CODE>|def\s+\w+\s*\(|class\s+\w+\s*[:(]", re.IGNORECASE)
 FENCED_BLOCK_PATTERN = re.compile(r"^\s*```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```\s*$", re.DOTALL)
+CODE_CLOSE_TAG = "</CODE>"
 
 
 def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
@@ -52,10 +53,31 @@ def parse_generation_output(text: str) -> tuple[str, str, str, str]:
     return code, reason, logic_prediction, exec_prediction
 
 
+def _canonicalize_generation_text(text: str, *, prefilled_code: bool) -> str:
+    normalized = _normalize_response_text(text)
+    if not normalized:
+        return ""
+
+    code_matches = list(CODE_PATTERN.finditer(normalized))
+    if code_matches:
+        code = code_matches[0].group(1).strip()
+        return f"<CODE>\n{code}\n</CODE>"
+
+    if not prefilled_code:
+        return normalized
+
+    lowered = normalized.lower()
+    close_idx = lowered.find(CODE_CLOSE_TAG.lower())
+    body = normalized[:close_idx] if close_idx >= 0 else normalized
+    body = body.strip()
+    return f"<CODE>\n{body}\n</CODE>"
+
+
 def parse_generation_response(
     text: str,
     *,
     allow_outside_noise_chars: int = 0,
+    prefilled_code: bool = False,
 ) -> tuple[str, str, str, str, bool]:
     """
     Parse generation response and return:
@@ -66,11 +88,20 @@ def parse_generation_response(
     - outside-tag non-whitespace chars <= allow_outside_noise_chars
     """
     normalized = _normalize_response_text(text)
-    code_match = _last_match(CODE_PATTERN, normalized)
-    code, reason, logic_prediction, exec_prediction = parse_generation_output(normalized)
+    canonical = _canonicalize_generation_text(normalized, prefilled_code=prefilled_code)
+    code_matches = list(CODE_PATTERN.finditer(normalized))
+    code_match = code_matches[0] if len(code_matches) == 1 else None
+    code, reason, logic_prediction, exec_prediction = parse_generation_output(canonical)
 
     format_ok = False
-    if code_match is not None:
+    if prefilled_code and not code_matches:
+        lowered = normalized.lower()
+        close_idx = lowered.find(CODE_CLOSE_TAG.lower())
+        if close_idx >= 0:
+            tail_start = close_idx + len(CODE_CLOSE_TAG)
+            outside_noise = len(re.sub(r"\s+", "", normalized[tail_start:]))
+            format_ok = outside_noise <= max(0, int(allow_outside_noise_chars))
+    elif code_match is not None:
         outside_noise = _outside_non_ws_length(normalized, [code_match.span()])
         outside_ok = outside_noise <= max(0, int(allow_outside_noise_chars))
         format_ok = bool(outside_ok)

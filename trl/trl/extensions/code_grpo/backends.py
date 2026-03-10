@@ -3,6 +3,21 @@ from abc import ABC, abstractmethod
 import torch
 
 
+def _truncate_at_stop_strings(text: str, stop_strings: list[str] | tuple[str, ...] | None) -> str:
+    if not text or not stop_strings:
+        return text
+    best_end = None
+    for stop in stop_strings:
+        if not stop:
+            continue
+        idx = text.find(stop)
+        if idx < 0:
+            continue
+        end = idx + len(stop)
+        best_end = end if best_end is None else min(best_end, end)
+    return text[:best_end] if best_end is not None else text
+
+
 class Backend(ABC):
     @abstractmethod
     def generate(self, prompt: str, **gen_cfg) -> str:
@@ -32,17 +47,20 @@ class HFBackend(Backend):
 
     def generate(self, prompt: str, **gen_cfg) -> str:
         cfg = {**self.generation_defaults, **gen_cfg}
+        stop_strings = cfg.pop("stop_strings", None)
         encoded = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
         encoded = {k: v.to(self.device) for k, v in encoded.items()}
         with torch.no_grad():
             output_ids = self.model.generate(**encoded, **cfg)
         completion_ids = output_ids[:, encoded["input_ids"].shape[1] :]
-        return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
+        decoded = self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
+        return _truncate_at_stop_strings(decoded, stop_strings)
 
     def generate_many(self, prompts: list[str], **gen_cfg) -> list[str]:
         if not prompts:
             return []
         cfg = {**self.generation_defaults, **gen_cfg}
+        stop_strings = cfg.pop("stop_strings", None)
         num_generations = int(cfg.pop("num_generations", 1) or 1)
         expanded_prompts: list[str] = []
         for prompt in prompts:
@@ -53,7 +71,10 @@ class HFBackend(Backend):
         with torch.no_grad():
             output_ids = self.model.generate(**encoded, **cfg)
         completion_ids = output_ids[:, prompt_width:]
-        return [self.tokenizer.decode(row, skip_special_tokens=True) for row in completion_ids]
+        return [
+            _truncate_at_stop_strings(self.tokenizer.decode(row, skip_special_tokens=True), stop_strings)
+            for row in completion_ids
+        ]
 
     def logprob(self, prompt: str, target_text: str, **cfg) -> float:
         del cfg
@@ -86,26 +107,32 @@ class VLLMBackend(Backend):
         self.hf_fallback = hf_fallback
 
     def generate(self, prompt: str, **gen_cfg) -> str:
+        stop_strings = gen_cfg.pop("stop_strings", None)
         del gen_cfg
         prompt_ids, completion_ids, _, _, _ = self.vllm_generation.generate([prompt], num_generations=1)
         if not completion_ids:
             return ""
-        return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
+        decoded = self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
+        return _truncate_at_stop_strings(decoded, stop_strings)
 
     def generate_many(self, prompts: list[str], **gen_cfg) -> list[str]:
         if not prompts:
             return []
+        stop_strings = gen_cfg.pop("stop_strings", None)
         num_generations = int(gen_cfg.pop("num_generations", 1) or 1)
         if gen_cfg:
             # vLLM wrapper is configured at initialization time; for per-call overrides, fallback to HF path.
             expanded_prompts: list[str] = []
             for prompt in prompts:
                 expanded_prompts.extend([prompt] * num_generations)
-            return [self.hf_fallback.generate(prompt, **gen_cfg) for prompt in expanded_prompts]
+            return [self.hf_fallback.generate(prompt, stop_strings=stop_strings, **gen_cfg) for prompt in expanded_prompts]
         _, completion_ids, _, _, _ = self.vllm_generation.generate(prompts, num_generations=num_generations)
         if not completion_ids:
             return ["" for _ in range(len(prompts) * num_generations)]
-        decoded = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in completion_ids]
+        decoded = [
+            _truncate_at_stop_strings(self.tokenizer.decode(ids, skip_special_tokens=True), stop_strings)
+            for ids in completion_ids
+        ]
         expected = len(prompts) * num_generations
         if len(decoded) < expected:
             decoded.extend(["" for _ in range(expected - len(decoded))])

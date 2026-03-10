@@ -373,3 +373,104 @@ Keep the current best reward balance and test whether a longer run improves cove
 4. `final_reason_node_count`
 5. `generation_format_ok_rate`
 6. Whether late-stage metrics are more stable than in the 50-step runs
+
+### Representative run
+
+- `20260310_234414__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. The 100-step run did not collapse; it continued to improve in the second half.
+   - Overall:
+     - `mean_pass_rate ≈ 0.2033`
+     - `best_pass_rate_overall ≈ 0.4433`
+     - `logic_confirmed_rate ≈ 0.1242`
+     - `final_reason_node_count ≈ 0.25`
+   - These are very close to the 50-step Group D results, which means the configuration remains stable.
+
+2. The second half is better than the first half.
+   - First 50 steps:
+     - `mean_pass_rate ≈ 0.1717`
+     - `best_pass_rate_overall ≈ 0.3867`
+     - `logic_confirmed_rate ≈ 0.0917`
+     - `final_reason_node_count ≈ 0.20`
+     - `generation_format_ok_rate ≈ 0.40`
+   - Second 50 steps:
+     - `mean_pass_rate ≈ 0.235`
+     - `best_pass_rate_overall ≈ 0.50`
+     - `logic_confirmed_rate ≈ 0.1567`
+     - `final_reason_node_count ≈ 0.30`
+     - `generation_format_ok_rate ≈ 0.465`
+
+3. This means longer training is useful at the current setting.
+   - The run is not just oscillating around the same behavior.
+   - Coverage and confirmation both improve later in training.
+
+4. Main generation format is still not fully solved, but it improves slightly over time.
+   - It remains the weakest major metric.
+   - However, it is better in the second half than in the first half.
+
+5. The remaining main issue is still soft-reward optimism on some unsolved cases.
+   - Late-stage examples still appear where:
+     - `mean_pass_rate = 0`
+     - `mean_R_soft_raw` is still high
+   - This means the issue is reduced but not gone.
+
+6. Execution audit remains strong and stable.
+   - `exec_format_ok_rate ≈ 0.97`
+   - This is still the most reliable branch in the current system.
+
+### Interpretation
+
+Group D+ confirms that:
+
+- Group D is not just a short-run artifact.
+- The current reward balance is usable over a longer run.
+- Training longer is currently more valuable than rewriting reward terms again.
+
+### Current recommendation
+
+Keep Group D reward settings as the default baseline.
+
+If the next step is a parameter change, it should be small and targeted:
+
+- preferably focus on main-generation formatting
+- not on another major reward rebalance
+
+If the next step is a training-scale change, it is now reasonable to:
+
+- keep the same reward settings
+- try a modest dataset-size increase or a modest additional training-length increase
+
+Reason:
+
+- The current setup is finally showing sustained improvement over time.
+- The main remaining weakness is not catastrophic reward balance; it is formatting and residual soft-reward optimism on a subset of hard unsolved cases.
+
+## Code update before next run
+
+### Goal
+
+Harden main-generation formatting without touching reward balance.
+
+### Code changes
+
+1. Main generation now uses an opening `<CODE>` prefill at the end of the prompt.
+   - The model is instructed to continue with code body directly and close with `</CODE>` once.
+
+2. Main generation parsing is now separated from audit parsing.
+   - `generation_outside_noise_chars` is used only for main code generation.
+   - `format_outside_noise_chars` remains for logic / execution audit parsing.
+
+3. Main generation output is truncated at the first `</CODE>` before parsing.
+   - This reduces trailing prose contamination.
+
+4. Main generation format check is stricter.
+   - It now expects a single code block or a valid prefilled close-tag completion.
+
+### What to check after the next run
+
+1. `generation_format_ok_rate`
+2. `mean_pass_rate`
+3. Whether `exec_format_ok_rate` / `logic_confirmed_rate` stay stable
+4. Whether code outputs stop carrying extra prose in traces

@@ -175,6 +175,9 @@ Node:
 
 * 主生成阶段只要求输出 `<CODE>`，不再要求 `<REASON>`。
 * 主生成阶段**不要求**输出 `<LOGIC_PREDICTION>` / `<EXEC_PREDICTION>`。
+* 主生成 prompt 会在末尾预填一个打开的 `<CODE>` 标签，要求模型**直接续写代码正文**，最后只补一个 `</CODE>`。
+* 主生成解析使用单独的严格阈值 `generation_outside_noise_chars`；默认主生成不允许标签外废话，而逻辑/执行审计仍可沿用单独的 `format_outside_noise_chars`。
+* 主生成解码时会在首个 `</CODE>` 处截断，再做格式校验与代码提取，减少尾部解释性废话污染。
 * 逻辑推理与执行推理在后续审计阶段用**单独 prompt**完成：
   * 逻辑审计：`<REASON> + <LOGIC_PREDICTION>`
   * 执行审计：`<REASON> + <EXEC_PREDICTION>`
