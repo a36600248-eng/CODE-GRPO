@@ -183,3 +183,101 @@ Further reduce optimistic soft-reward lift on unsolved code while preserving the
 3. Whether `logic_confirmed_rate` stays at least stable
 4. Whether `final_reason_node_count` remains non-trivial
 5. Whether `mean_pass_rate` drops too much
+
+### Representative run
+
+- `20260310_164541__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. The optimistic soft-reward lift was reduced.
+   - `mean_R_soft_raw` dropped from about `0.5221` to about `0.3922`.
+   - Typical wrong-code `R_code` values on high-soft cases also dropped.
+   - Example:
+     - `mbpp_train_611` still had strong raw logic hits on some audit cases, but wrong-code nodes now stayed around `R_code ≈ 0.116 ~ 0.275`, instead of earlier runs where similar cases could climb much higher.
+
+2. The cost was large: pass-related metrics fell noticeably.
+   - `mean_pass_rate` dropped from about `0.2283` to about `0.1133`.
+   - `best_pass_rate_overall` mean dropped from about `0.4733` to about `0.2733`.
+   - `pass_hits` dropped from `26/50` to `18/50`.
+
+3. Confirmed logic and final-reason coverage also fell.
+   - `logic_confirmed_rate` mean dropped from about `0.1283` to about `0.0633`.
+   - `final_reason_node_count` mean dropped from about `0.28` to about `0.12`.
+   - `final_reason_hits` dropped from `14/50` to `6/50`.
+
+4. Main generation format did not meaningfully improve, but it also did not collapse.
+   - `generation_format_ok_rate` moved from about `0.425` to about `0.44`.
+   - This is basically flat; Group C did not solve the main-generation formatting issue.
+
+5. Execution audit remained the strongest signal.
+   - `exec_format_ok_rate` remained high at about `0.9517`.
+   - However, some weaker late steps showed that execution quality can also soften if code quality drops too much.
+
+### Interpretation
+
+Group C over-corrected.
+
+- Good:
+  - It reduced the soft-reward optimism problem.
+  - Wrong code is less likely to be lifted by raw logic agreement alone.
+
+- Bad:
+  - It also suppressed useful exploration too much.
+  - Fewer questions reached strong code states.
+  - Fewer questions reached `final_reason`.
+  - Confirmed logic training became even sparser.
+
+### Recommendation after Group C
+
+Do **not** keep tightening soft reward.
+
+The better next move is:
+
+- revert `lambda_soft` upward slightly, but not back to Group B
+- keep `M_audit = 3`
+- keep tree size unchanged
+
+Most reasonable next target:
+
+- `lambda_soft: 0.08 -> 0.10`
+- keep `soft_reward_ineligible_scale = 0.2`
+
+Reason:
+
+- Group B was too optimistic.
+- Group C was too conservative.
+- The current evidence suggests the useful region is probably between them.
+
+## Group D
+
+### Goal
+
+Test the midpoint between Group B and Group C without changing the tree or audit structure.
+
+### Parameter changes
+
+- `lambda_soft: 0.08 -> 0.10`
+- keep `M_audit = 3`
+- keep `soft_reward_ineligible_scale = 0.2`
+- keep tree/search settings unchanged
+
+### Why this group
+
+1. Group B was strong on pass metrics, but soft reward still looked too optimistic.
+2. Group C reduced optimism, but harmed pass rate and final-reason coverage too much.
+3. The most defensible next step is to test the midpoint rather than keep tightening or fully reverting.
+
+### What to check after Group D
+
+1. `mean_pass_rate`
+2. `best_pass_rate_overall`
+3. `mean_R_soft_raw`
+4. `logic_confirmed_rate`
+5. `final_reason_node_count`
+
+### Desired outcome
+
+- Better pass metrics than Group C
+- Less soft-reward optimism than Group B
+- Final-reason coverage remains active
