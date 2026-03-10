@@ -549,3 +549,102 @@ Align the main-generation format with the model's observed prior instead of forc
 1. `generation_format_ok_rate` should recover materially from the failed strict-`<CODE>` attempt.
 2. `mean_pass_rate` should at least return toward the earlier Group D+ baseline.
 3. Traces should show fenced code without extra prose outside the block.
+
+### Representative run
+
+- `20260311_014047__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. The fenced-code switch fixed the main-generation format collapse.
+   - `generation_format_ok_rate` recovered to about `0.4575`.
+   - This is not only far above the failed strict-`<CODE>` run (`~0.1525`), it is also slightly above the earlier Group D+ baseline (`~0.4325`).
+
+2. Pass-related metrics also recovered and improved.
+   - `mean_pass_rate` rose to about `0.2354`.
+   - `best_pass_rate_overall` rose to about `0.5058`.
+   - Both are better than the earlier Group D+ baseline.
+
+3. The second half is again healthier than the first half.
+   - First 50 steps:
+     - `mean_pass_rate ~ 0.2267`
+     - `best_pass_rate_overall ~ 0.48`
+     - `generation_format_ok_rate ~ 0.44`
+   - Second 50 steps:
+     - `mean_pass_rate ~ 0.2442`
+     - `best_pass_rate_overall ~ 0.5317`
+     - `generation_format_ok_rate ~ 0.475`
+   - This restores the "later training is better" pattern that was lost in the failed strict-`<CODE>` run.
+
+4. Traces confirm that the new main-generation format matches the model prior.
+   - Representative traces:
+     - `mbpp_train_618_rank0_000077`
+     - `mbpp_train_725_rank0_000069`
+   - Their successful main-generation outputs are clean fenced Python blocks with no extra prose.
+
+5. Remaining generation-format failures are now a more meaningful failure mode.
+   - Example:
+     - `mbpp_train_733_rank0_000038`
+   - Here the output is still fenced Python, but the block is cut off before completion.
+   - So the current failures are no longer mainly "wrong wrapper format"; they are more often incomplete generations or empty outputs.
+
+6. Soft-reward optimism is still present on some unsolved cases, but it is not the dominant blocker.
+   - Examples still include:
+     - `mbpp_train_733`
+     - `mbpp_train_605`
+     - `mbpp_train_611`
+     - `mbpp_train_640`
+   - However, the overall system is now back in a healthy operating region.
+
+### Interpretation
+
+The fenced-code change should be kept.
+
+This run shows:
+
+- The earlier main-generation formatting problem was primarily a format-protocol mismatch with the model prior.
+- Using fenced Python for main generation is materially better than forcing `<CODE>`.
+- The main-generation bottleneck has shifted from "wrapper mismatch" to "incomplete / empty generations" on a subset of cases.
+
+### Current recommendation
+
+Keep the current fenced-code main-generation protocol as the new baseline.
+
+Do not change reward balance yet.
+
+If the next change is needed, it should target one of these:
+
+1. incomplete fenced-code generations on hard cases
+2. empty-output generations
+3. residual soft-reward optimism on a few stubborn unsolved samples
+
+## Next run setup
+
+### Parameter change
+
+- `max_completion_length: 80 -> 96`
+- `max_steps: 100 -> 60`
+
+### Why
+
+Representative failed traces now show a different failure mode than before:
+
+- the model often uses the correct fenced-Python wrapper,
+- but some hard cases produce incomplete code blocks or empty outputs,
+- e.g. truncated binary-search style code in `mbpp_train_733`.
+
+The current implementation still uses a shared generation length budget across main generation and audit generation in the colocated vLLM path, so this is a conservative global bump rather than a split-length backend change.
+
+### What to check after the next run
+
+1. whether incomplete fenced-code failures reduce
+2. whether `generation_format_ok_rate` improves further
+3. whether `mean_pass_rate` and `best_pass_rate_overall` continue to improve
+4. whether memory stays stable on the current A800 run
+
+### Runtime note
+
+This run is intentionally shortened to 60 steps because the current objective is targeted diagnosis:
+
+- check whether longer completions reduce truncated fenced-code generations,
+- without paying the full 100-step cost before the trend is clear.
