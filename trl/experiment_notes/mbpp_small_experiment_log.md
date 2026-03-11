@@ -1200,3 +1200,217 @@ The window metrics are:
 - `window/end_step`
 
 This does not change optimization. It only adds a lower-variance train-side reward summary to complement eval.
+
+## Group H: first valid code-only eval + reward-window run
+
+Representative run:
+- `20260311_165502__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### What this run validates
+
+1. The new eval path is now correct.
+   - Eval no longer reports audit-branch metrics such as `eval_logic_format_ok_rate` or `eval_exec_format_ok_rate`.
+   - Eval now reports only code-centric metrics:
+     - `eval_pass_at_1_round_1`
+     - `eval_pass_at_1_round_2`
+     - `eval_pass_at_1`
+     - `eval_generation_format_ok_rate`
+     - `eval_best_pass_rate_overall`
+   - This is the first run that should be treated as the new primary comparable eval baseline.
+
+2. Window reward logging is working.
+   - Every `20` train steps, TensorBoard/logs now emit:
+     - `window/mean_R_code`
+     - `window/mean_R_reason`
+     - `window/mean_R_soft_effective`
+     - `window/steps`
+     - `window/end_step`
+   - This provides a lower-variance train-side trend summary than raw per-step reward.
+
+### Eval findings
+
+Fixed code-only eval checkpoints:
+
+- step 20:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.875`
+  - `eval_pass_at_1 ~ 0.5`
+- step 40:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.8125`
+  - `eval_pass_at_1 ~ 0.5`
+- step 60:
+  - `eval_mean_pass_rate ~ 0.4167`
+  - `eval_best_pass_rate_overall ~ 0.4583`
+  - `eval_generation_format_ok_rate ~ 0.875`
+  - `eval_pass_at_1 ~ 0.375`
+- step 80:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.875`
+  - `eval_pass_at_1 ~ 0.5`
+- step 100:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.75`
+  - `eval_pass_at_1 ~ 0.5`
+- step 120:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.875`
+  - `eval_pass_at_1 ~ 0.5`
+- step 140:
+  - `eval_mean_pass_rate ~ 0.7083`
+  - `eval_best_pass_rate_overall ~ 0.7083`
+  - `eval_generation_format_ok_rate ~ 0.9375`
+  - `eval_pass_at_1 ~ 0.625`
+- step 160:
+  - `eval_mean_pass_rate ~ 0.4583`
+  - `eval_best_pass_rate_overall ~ 0.4583`
+  - `eval_generation_format_ok_rate ~ 0.8125`
+  - `eval_pass_at_1 ~ 0.375`
+- step 180:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.9375`
+  - `eval_pass_at_1 ~ 0.5`
+- step 200:
+  - `eval_mean_pass_rate ~ 0.5833`
+  - `eval_best_pass_rate_overall ~ 0.5833`
+  - `eval_generation_format_ok_rate ~ 0.875`
+  - `eval_pass_at_1 ~ 0.5`
+
+Interpretation:
+
+1. Eval is now much easier to interpret than the old full-rollout eval.
+   - It is directly reporting code solve probability, not audit-branch behavior.
+
+2. There is still substantial variance.
+   - The best checkpoint in this run is around step `140`, not the final step.
+   - Final-step eval is respectable, but not the peak.
+
+3. `eval_pass_at_1_round_1` and `eval_pass_at_1_round_2` are equal throughout this run.
+   - This means the second repair round did not increase strict solve probability on the fixed eval split in this run.
+   - So the current eval improvement is still coming mainly from first-round code quality, not from extra repair-round wins on the held-out set.
+
+### Window reward findings
+
+Windowed train rewards:
+
+- step 20:
+  - `window/mean_R_code ~ 0.8171`
+  - `window/mean_R_reason ~ 0.5917`
+  - `window/mean_R_soft_effective ~ 0.7581`
+- step 40:
+  - `window/mean_R_code ~ 0.5639`
+  - `window/mean_R_reason ~ 0.4885`
+  - `window/mean_R_soft_effective ~ 0.3403`
+- step 60:
+  - `window/mean_R_code ~ 0.6035`
+  - `window/mean_R_reason ~ 0.4948`
+  - `window/mean_R_soft_effective ~ 0.4890`
+- step 80:
+  - `window/mean_R_code ~ 0.6373`
+  - `window/mean_R_reason ~ 0.5167`
+  - `window/mean_R_soft_effective ~ 0.6542`
+- step 100:
+  - `window/mean_R_code ~ 0.4336`
+  - `window/mean_R_reason ~ 0.5037`
+  - `window/mean_R_soft_effective ~ 0.4008`
+- step 120:
+  - `window/mean_R_code ~ 0.4245`
+  - `window/mean_R_reason ~ 0.5600`
+  - `window/mean_R_soft_effective ~ 0.4577`
+- step 140:
+  - `window/mean_R_code ~ 0.7994`
+  - `window/mean_R_reason ~ 0.5560`
+  - `window/mean_R_soft_effective ~ 0.5998`
+- step 160:
+  - `window/mean_R_code ~ 0.5552`
+  - `window/mean_R_reason ~ 0.5256`
+  - `window/mean_R_soft_effective ~ 0.5174`
+- step 180:
+  - `window/mean_R_code ~ 0.7336`
+  - `window/mean_R_reason ~ 0.6117`
+  - `window/mean_R_soft_effective ~ 0.5855`
+- step 200:
+  - `window/mean_R_code ~ 0.5921`
+  - `window/mean_R_reason ~ 0.3850`
+  - `window/mean_R_soft_effective ~ 0.4615`
+
+Interpretation:
+
+1. Windowed reward logs are useful and should be kept.
+   - They expose trend changes much more cleanly than raw per-step reward.
+
+2. `R_code` and `R_soft_effective` still move together strongly.
+   - This is consistent with residual soft-reward influence on code reward.
+
+3. Residual soft-reward optimism is still visible late in training.
+   - Representative late train steps still show:
+     - `mean_pass_rate = 0`
+     - `mean_R_soft_effective ~ 0.84`
+   - So even with cleaner eval, the underlying optimism issue has not disappeared.
+
+### Current interpretation
+
+- This run successfully validates the new eval design and the new reward-window logging.
+- The code-only eval is a better primary comparison target than the old full-rollout eval.
+- The current 7B setup is trainable and can reach `eval_pass_at_1 ~ 0.625` at its best checkpoint in this run.
+- However, final-step performance is not yet stable enough to assume monotonic improvement.
+- The main remaining issues are:
+  - residual soft-reward optimism on some zero-pass train questions;
+  - second repair round not yet improving held-out cumulative solve rate.
+
+### Practical recommendation
+
+For future tuning:
+
+1. Use code-only eval as the main decision metric.
+2. Keep reward-window logging enabled.
+3. Compare checkpoints by peak eval around the training horizon, not only final-step eval.
+4. Do not conclude that `T_max = 2` repair is helping eval until `eval_pass_at_1_round_2` rises above `eval_pass_at_1_round_1`.
+
+## Dataset-and-horizon reset
+
+The previous MBPP-small runs were still too small to draw stable trend conclusions:
+
+- train was effectively only about `56` examples after the tiny split;
+- eval was only about `8` examples;
+- `eval_pass_at_1` therefore moved in large `12.5%` increments.
+
+This makes both:
+- train-half vs train-half comparisons,
+- and fixed-eval checkpoint comparisons,
+
+too noisy for confident tuning decisions.
+
+### New baseline decision
+
+Switch the working configuration to:
+
+- train set: `mbpp_sanitized_codegrpo_train.jsonl` (`120` examples)
+- eval set: `mbpp_sanitized_codegrpo_validation.jsonl` (`43` examples)
+- `max_steps = 300`
+- `eval_steps = 50`
+
+Tree/search hyperparameters remain unchanged for now:
+
+- `T_max = 2`
+- `N_max = 4`
+- `K = 2`
+- `K_reason = 1`
+
+### Rationale
+
+1. The next bottleneck is statistical stability, not search depth.
+2. `T_max = 2` should not be increased yet, because current code-only eval still shows:
+   - `eval_pass_at_1_round_2 == eval_pass_at_1_round_1`
+   - so the second repair round is not yet buying additional held-out solves.
+3. Increasing train/eval size and horizon should make:
+   - reward windows,
+   - code-only eval checkpoints,
+   - and trend comparisons
+   meaningfully more reliable.

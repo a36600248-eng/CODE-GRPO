@@ -445,6 +445,7 @@ def get_dataset(mixture_config: DatasetMixtureConfig) -> DatasetDict:
     """
     logger.info(f"Creating dataset mixture with {len(mixture_config.datasets)} datasets")
     datasets_list = []
+    dataset_dict_splits: dict[str, list[datasets.Dataset]] = {}
     for dataset_config in mixture_config.datasets:
         logger.info(f"Loading dataset for mixture: {dataset_config.path} (config name: {dataset_config.name})")
         dataset = datasets.load_dataset(
@@ -455,9 +456,30 @@ def get_dataset(mixture_config: DatasetMixtureConfig) -> DatasetDict:
             split=dataset_config.split,
             streaming=mixture_config.streaming,
         )
+        if isinstance(dataset, DatasetDict):
+            if mixture_config.test_split_size is not None:
+                raise ValueError("`test_split_size` cannot be used when a dataset config already returns explicit splits.")
+            for split_name, split_dataset in dataset.items():
+                if dataset_config.columns is not None:
+                    split_dataset = split_dataset.select_columns(dataset_config.columns)
+                dataset_dict_splits.setdefault(split_name, []).append(split_dataset)
+            continue
+
         if dataset_config.columns is not None:
             dataset = dataset.select_columns(dataset_config.columns)
         datasets_list.append(dataset)
+
+    if dataset_dict_splits:
+        if datasets_list:
+            raise ValueError("Mixing explicit split datasets with flat datasets is not supported in one mixture.")
+        combined_splits = {}
+        for split_name, split_datasets in dataset_dict_splits.items():
+            combined_split = (
+                concatenate_datasets(split_datasets) if len(split_datasets) > 1 else split_datasets[0]
+            )
+            logger.info(f"Created dataset split '{split_name}' with {len(combined_split)} examples")
+            combined_splits[split_name] = combined_split
+        return DatasetDict(combined_splits)
 
     if datasets_list:
         combined_dataset = concatenate_datasets(datasets_list)
