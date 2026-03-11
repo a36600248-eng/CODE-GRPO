@@ -20,6 +20,7 @@ import os
 import random
 import re
 import shutil
+import gc
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -300,6 +301,7 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
         "trainer_state.json",
         "train_results.json",
         "eval_results.json",
+        "baseline_eval_results.json",
         "test_results.json",
         "all_results.json",
     ):
@@ -423,6 +425,27 @@ def main(script_args, training_args, model_args, dataset_args):
         peft_config=get_peft_config(model_args),
         callbacks=[TextMetricsCallback(trainer_text_log_path, trainer_jsonl_path)],
     )
+
+    if (
+        training_args.codegrpo_mode == "train"
+        and eval_dataset is not None
+        and getattr(training_args, "run_base_model_baseline_eval", False)
+    ):
+        baseline_trainer = CodeGRPOTrainer(
+            model=model_args.model_name_or_path,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            peft_config=None,
+            callbacks=[TextMetricsCallback(trainer_text_log_path, trainer_jsonl_path)],
+        )
+        baseline_metrics = baseline_trainer.evaluate(eval_dataset=eval_dataset)
+        baseline_trainer.log_metrics("baseline_eval", baseline_metrics)
+        baseline_trainer.save_metrics("baseline_eval", baseline_metrics)
+        del baseline_trainer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if training_args.codegrpo_mode == "test":
         test_dataset = eval_dataset if eval_dataset is not None else train_dataset

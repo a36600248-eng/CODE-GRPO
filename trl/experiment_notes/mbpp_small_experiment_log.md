@@ -1414,3 +1414,292 @@ Tree/search hyperparameters remain unchanged for now:
    - code-only eval checkpoints,
    - and trend comparisons
    meaningfully more reliable.
+
+## Run: 20260311_222240 (train120 / eval43 / 300 steps / code-only eval)
+
+This is the first larger-train, larger-eval run with the new code-only eval protocol that is large enough to judge trend quality with less noise.
+
+### Main results
+
+Fixed eval checkpoints:
+
+- step 50:
+  - `eval_pass_at_1_round_1 = 0.5116`
+  - `eval_pass_at_1_round_2 = 0.5116`
+  - `eval_pass_at_1 = 0.5116`
+  - `eval_generation_format_ok_rate = 0.8605`
+- step 100:
+  - `eval_pass_at_1_round_1 = 0.5581`
+  - `eval_pass_at_1_round_2 = 0.5814`
+  - `eval_pass_at_1 = 0.5814`
+  - `eval_generation_format_ok_rate = 0.8488`
+- step 150:
+  - `eval_pass_at_1_round_1 = 0.5349`
+  - `eval_pass_at_1_round_2 = 0.5349`
+  - `eval_pass_at_1 = 0.5349`
+  - `eval_generation_format_ok_rate = 0.8140`
+- step 200:
+  - `eval_pass_at_1_round_1 = 0.5581`
+  - `eval_pass_at_1_round_2 = 0.5581`
+  - `eval_pass_at_1 = 0.5581`
+  - `eval_generation_format_ok_rate = 0.8023`
+- step 250:
+  - `eval_pass_at_1_round_1 = 0.5349`
+  - `eval_pass_at_1_round_2 = 0.5349`
+  - `eval_pass_at_1 = 0.5349`
+  - `eval_generation_format_ok_rate = 0.8140`
+- step 300:
+  - `eval_pass_at_1_round_1 = 0.5349`
+  - `eval_pass_at_1_round_2 = 0.5349`
+  - `eval_pass_at_1 = 0.5349`
+  - `eval_generation_format_ok_rate = 0.8256`
+
+Window reward snapshots (`reward_window_bins = 10`, so each window is `30` steps):
+
+- step 30:
+  - `window/mean_R_code ~ 0.6489`
+  - `window/mean_R_reason ~ 0.4532`
+  - `window/mean_R_soft_effective ~ 0.5061`
+- step 60:
+  - `window/mean_R_code ~ 0.6921`
+  - `window/mean_R_reason ~ 0.5612`
+  - `window/mean_R_soft_effective ~ 0.6558`
+- step 90:
+  - `window/mean_R_code ~ 0.6737`
+  - `window/mean_R_reason ~ 0.4304`
+  - `window/mean_R_soft_effective ~ 0.4565`
+- step 120:
+  - `window/mean_R_code ~ 0.4632`
+  - `window/mean_R_reason ~ 0.4104`
+  - `window/mean_R_soft_effective ~ 0.4782`
+- step 150:
+  - `window/mean_R_code ~ 0.6371`
+  - `window/mean_R_reason ~ 0.5287`
+  - `window/mean_R_soft_effective ~ 0.5800`
+- step 180:
+  - `window/mean_R_code ~ 0.5640`
+  - `window/mean_R_reason ~ 0.5860`
+  - `window/mean_R_soft_effective ~ 0.4618`
+- step 210:
+  - `window/mean_R_code ~ 0.6640`
+  - `window/mean_R_reason ~ 0.6418`
+  - `window/mean_R_soft_effective ~ 0.6359`
+- step 240:
+  - `window/mean_R_code ~ 0.7354`
+  - `window/mean_R_reason ~ 0.5189`
+  - `window/mean_R_soft_effective ~ 0.3819`
+- step 270:
+  - `window/mean_R_code ~ 0.7622`
+  - `window/mean_R_reason ~ 0.4901`
+  - `window/mean_R_soft_effective ~ 0.4919`
+- step 300:
+  - `window/mean_R_code ~ 0.5650`
+  - `window/mean_R_reason ~ 0.4815`
+  - `window/mean_R_soft_effective ~ 0.3918`
+
+### Interpretation
+
+1. The larger `eval` split is already more useful than the old `8`-example holdout.
+   - The curve still moves, but it no longer jumps in meaningless `12.5%` increments.
+
+2. Best held-out checkpoint in this run is step `100`.
+   - `eval_pass_at_1 = 0.5814`
+   - later checkpoints do not improve on that.
+   - This confirms that selecting by best eval checkpoint is necessary; final-step eval is not a safe proxy.
+
+3. The second repair round now shows a small but real gain at least at one checkpoint.
+   - step `100` has:
+     - `eval_pass_at_1_round_1 = 0.5581`
+     - `eval_pass_at_1_round_2 = 0.5814`
+   - This is the first meaningful sign that the second code-repair round can add held-out solves.
+   - However, the effect is not yet stable across later checkpoints.
+
+4. Code generation format is acceptable but still not fully stable.
+   - `eval_generation_format_ok_rate` stays in about the `0.80 ~ 0.86` range.
+   - So the main-generation formatting problem is much improved, but not completely solved.
+
+5. Residual soft-reward optimism remains.
+   - Representative zero-pass but high-soft examples still appear:
+     - `mbpp_train_733`
+     - `mbpp_train_788`
+     - `mbpp_train_623`
+     - `mbpp_train_743`
+     - `mbpp_train_786`
+   - Typical pattern:
+     - `mean_pass_rate = 0`
+     - `mean_R_soft_effective >= 0.92`
+     - `R_code` still lifted into roughly `0.20 ~ 0.32`
+
+6. Reward windows are useful but still too noisy to replace fixed eval.
+   - They show phases and oscillation clearly.
+   - They should remain diagnostic signals, not the primary model-selection metric.
+
+### Current recommendation
+
+1. Keep code-only eval as the primary decision metric.
+2. Keep reward-window logging enabled.
+3. Select checkpoints by peak `eval_pass_at_1`, not final-step eval.
+4. Do not yet increase search depth.
+   - The second round has shown only a small, unstable benefit.
+5. The next tuning target, if any, should still be residual soft-reward optimism rather than audit formatting.
+
+## Schedule switch: step-driven -> epoch-driven
+
+The training schedule is now switched to an explicit epoch form:
+
+- `shuffle_dataset = true` remains enabled
+- each epoch traverses the training questions once in shuffled order
+- training control is now:
+  - `num_train_epochs = 2`
+  - `max_steps = -1`
+- eval control is now:
+  - `eval_strategy = "epoch"`
+
+Rationale:
+
+1. This matches the intended interpretation better than truncating by raw global step count.
+2. It guarantees that each epoch covers the full train set once before reshuffling for the next epoch.
+3. It makes later comparisons cleaner:
+   - epoch 1 vs epoch 2
+   - eval after epoch 1 vs eval after epoch 2
+
+Important note:
+
+- The GRPO trainer still uses its internal prompt repetition/reuse mechanism for generation caching across steps.
+- So optimizer-step accounting is still more complex than plain SFT.
+- But at the dataset traversal level, the schedule is now epoch-driven rather than max-step-driven.
+
+## Baseline-and-repeat eval addition
+
+The config now adds two evaluation-oriented controls:
+
+- `run_base_model_baseline_eval = true`
+- `eval_repeat_count = 3`
+
+Meaning:
+
+1. Before PEFT/RL training starts, the raw base model is evaluated once on the eval split using the same code-only eval harness.
+   - Metrics are saved as `baseline_eval_results.json`.
+
+2. Each code-only eval now repeats every validation question multiple times with different eval seeds and averages the resulting metrics.
+   - This is intended to reduce evaluation variance from stochastic sampling.
+
+Rationale:
+
+1. We need a fair baseline under the exact same local harness before comparing RL checkpoints.
+2. External MBPP pass@1 numbers are not directly comparable unless prompt, decoding, and harness match.
+3. Repeated eval is a cleaner way to reduce noise than trying to over-interpret single noisy eval passes.
+
+## Eval cadence adjustment
+
+The train loop remains epoch-driven, but eval is switched back to step-based checkpoints.
+
+Current schedule:
+
+- `num_train_epochs = 3`
+- `max_steps = -1`
+- `eval_strategy = "steps"`
+- `eval_steps = 60`
+
+Rationale:
+
+1. Epoch-driven training is still useful because it guarantees full train-set coverage before reshuffling.
+2. But epoch-only eval is too sparse when the total epoch count is small.
+   - With only `3` epochs, we would only get `3` validation points.
+3. Step-based eval gives a denser trend line while keeping the underlying train schedule epoch-based.
+4. `eval_steps = 60` is a compromise:
+   - frequent enough to observe trend changes,
+   - not so frequent that eval dominates runtime.
+
+## Dataset expansion: train163 / eval241
+
+The working dataset split is now expanded to:
+
+- train: `mbpp_sanitized_codegrpo_trainval.jsonl` (`163` examples)
+- eval: `mbpp_sanitized_codegrpo_test.jsonl` (`241` examples)
+
+Rationale:
+
+1. The previous `train=120 / eval=43` setup was still small enough that held-out trends could remain noisy.
+2. A larger eval set should make:
+   - `eval_pass_at_1_round_1`
+   - `eval_pass_at_1_round_2`
+   - `eval_pass_at_1`
+   more statistically meaningful.
+3. The user explicitly prefers the larger `241`-example eval despite the added runtime cost, because the main bottleneck is still training rather than validation throughput.
+
+Expected tradeoff:
+
+- eval will be noticeably slower than before;
+- but the resulting curve should be much more trustworthy than the smaller `43`-example eval.
+
+## Follow-up interpretation after the 300-step larger-split run
+
+### Code-only eval checkpoints every 50 steps
+
+From the step-driven run on train `120` / eval `43`, the fixed code-only eval changed as follows:
+
+- step 50:
+  - `eval_pass_at_1_round_1 = 0.5116`
+  - `eval_pass_at_1_round_2 = 0.5116`
+  - `eval_pass_at_1 = 0.5116`
+- step 100:
+  - `eval_pass_at_1_round_1 = 0.5581`
+  - `eval_pass_at_1_round_2 = 0.5814`
+  - `eval_pass_at_1 = 0.5814`
+- step 150:
+  - `eval_pass_at_1_round_1 = 0.5349`
+  - `eval_pass_at_1_round_2 = 0.5349`
+  - `eval_pass_at_1 = 0.5349`
+- step 200:
+  - `eval_pass_at_1_round_1 = 0.5581`
+  - `eval_pass_at_1_round_2 = 0.5581`
+  - `eval_pass_at_1 = 0.5581`
+- step 250:
+  - `eval_pass_at_1_round_1 = 0.5349`
+  - `eval_pass_at_1_round_2 = 0.5349`
+  - `eval_pass_at_1 = 0.5349`
+- step 300:
+  - `eval_pass_at_1_round_1 = 0.5349`
+  - `eval_pass_at_1_round_2 = 0.5349`
+  - `eval_pass_at_1 = 0.5349`
+
+### Current bottlenecks
+
+1. First-round solve rate is still below the rough external target that has been informally cited (`~0.61` for MBPP pass@1).
+   - In our own code-only eval, the best first-round point observed so far is only about `0.5581`.
+   - So first-round code quality is still the main gap.
+
+2. Second-round repair is only weakly helpful.
+   - It gave a real but small gain at step `100`:
+     - `0.5581 -> 0.5814`
+   - But that gain did not remain stable at later checkpoints.
+   - This means repair is not useless, but it is not yet a strong source of improvement.
+
+3. Residual soft-reward optimism still exists.
+   - Some train questions still show:
+     - `pass_rate = 0`
+     - but `mean_R_soft_effective` remains very high.
+   - So the soft reward is still able to lift bad code more than desired on some examples.
+
+4. The main-generation formatting problem is no longer the dominant issue.
+   - Formatting is now much healthier than before.
+   - The bigger remaining issue is code quality, not parser compliance.
+
+### Recommended next direction
+
+1. Do not increase search depth yet.
+   - `T_max = 2` is not the clear bottleneck yet.
+   - First-round generation quality is the bigger problem.
+
+2. Do not aggressively retune the reward again yet.
+   - The reward is imperfect, but it is no longer the first thing blocking progress.
+
+3. If comparing against an external MBPP first-round pass@1 number, the next clean experiment should be:
+   - evaluate the raw base model under this exact same code-only eval harness,
+   - then compare the best RL checkpoint to that baseline.
+   - Without that, we still do not know how much of the current number comes from the base model itself.
+
+4. Training can remain epoch-driven, but eval should preferably stay step-based if trend visibility is important.
+   - Epoch-driven train coverage is cleaner.
+   - But eval only once per epoch gives too few checkpoints for diagnosis.

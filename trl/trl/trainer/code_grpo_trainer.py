@@ -323,17 +323,21 @@ class CodeGRPOTrainer(GRPOTrainer):
         for _idx, example in enumerate(examples):
             rollout_seed = base_rng.randint(0, 2**31 - 1)
             if mode == "eval" and getattr(self.args, "eval_code_only_single_trajectory", True):
-                rollout = self.tree_runner.run_question_eval_code_only(
-                    example,
-                    rng=random.Random(rollout_seed),
-                )
+                repeat_count = max(1, int(getattr(self.args, "eval_repeat_count", 1)))
+                for repeat_idx in range(repeat_count):
+                    repeat_seed = rollout_seed + repeat_idx * 9973
+                    rollout = self.tree_runner.run_question_eval_code_only(
+                        example,
+                        rng=random.Random(repeat_seed),
+                    )
+                    rollouts.append(rollout)
             else:
                 rollout = self.tree_runner.run_question(
                     example,
                     rng=random.Random(rollout_seed),
                     update_exec_baseline=(mode == "train"),
                 )
-            rollouts.append(rollout)
+                rollouts.append(rollout)
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
 
         train_samples = [sample for rollout in rollouts for sample in rollout.train_samples]

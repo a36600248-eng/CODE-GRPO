@@ -205,6 +205,24 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    eval_repeat_count: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Repeat each code-only eval trajectory this many times with different seeds and average metrics "
+                "across repeats."
+            )
+        },
+    )
+    run_base_model_baseline_eval: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Before training, run one eval pass with the raw base model (no PEFT adapter) on the eval split "
+                "and save metrics as baseline_eval."
+            )
+        },
+    )
     reward_window_bins: int = field(
         default=10,
         metadata={
@@ -246,6 +264,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError(
                 f"K ({self.K}) must equal num_generations ({self.num_generations}) to keep sibling grouping consistent."
             )
+        if self.eval_repeat_count < 1:
+            raise ValueError("eval_repeat_count must be >= 1.")
         if self.M_audit < 0 or self.M_retry < 0:
             raise ValueError("M_audit and M_retry must be non-negative.")
         if not (0.0 <= self.lambda_soft <= 1.0):

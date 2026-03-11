@@ -4,10 +4,12 @@ logging_steps: 1
 save_strategy: "no"
 save_total_limit: 0
 eval_strategy: "steps"
-eval_steps: 50
+eval_steps: 60
 push_to_hub: false
 seed: 42
 data_seed: 42
+run_base_model_baseline_eval: true
+eval_repeat_count: 3
 
 use_cpu: false
 bf16: true
@@ -24,8 +26,8 @@ dataset_adapter: default
 datasets:
   - path: json
     data_files:
-      train: /root/autodl-tmp/CODE-GRPO/trl/data/mbpp_sanitized_codegrpo_train.jsonl
-      test: /root/autodl-tmp/CODE-GRPO/trl/data/mbpp_sanitized_codegrpo_validation.jsonl
+      train: /root/autodl-tmp/CODE-GRPO/trl/data/mbpp_sanitized_codegrpo_trainval.jsonl
+      test: /root/autodl-tmp/CODE-GRPO/trl/data/mbpp_sanitized_codegrpo_test.jsonl
 
 codegrpo_mode: train
 backend: vllm
@@ -34,8 +36,8 @@ vllm_mode: colocate
 vllm_tensor_parallel_size: 1
 vllm_gpu_memory_utilization: 0.35
 
-num_train_epochs: 1
-max_steps: 300
+num_train_epochs: 3
+max_steps: -1
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
