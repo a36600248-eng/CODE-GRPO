@@ -192,6 +192,35 @@ class CodeGRPOTreeRunner:
     def _audit_completion_length(self) -> int:
         return int(getattr(self.args, "max_completion_length_audit", None) or self.args.max_completion_length)
 
+    def _code_generation_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"max_new_tokens": self._code_completion_length()}
+        min_new_tokens = int(getattr(self.args, "generation_min_new_tokens_code", 0) or 0)
+        if min_new_tokens > 0:
+            kwargs["min_new_tokens"] = min_new_tokens
+        temperature = getattr(self.args, "generation_temperature_code", None)
+        if temperature is not None:
+            kwargs["temperature"] = float(temperature)
+        top_p = getattr(self.args, "generation_top_p_code", None)
+        if top_p is not None:
+            kwargs["top_p"] = float(top_p)
+        return kwargs
+
+    def _retry_empty_generation_outputs(self, prompt_text: str, raw_outputs: list[str]) -> list[str]:
+        retry_count = int(getattr(self.args, "generation_empty_retry_count", 0) or 0)
+        if retry_count <= 0 or not raw_outputs:
+            return raw_outputs
+        fixed = list(raw_outputs)
+        gen_kwargs = self._code_generation_kwargs()
+        for idx, raw_output in enumerate(fixed):
+            if (raw_output or "").strip():
+                continue
+            for _ in range(retry_count):
+                retried = self.backend.generate(prompt_text, **gen_kwargs)
+                if (retried or "").strip():
+                    fixed[idx] = retried
+                    break
+        return fixed
+
     def _apply_terminal_logic_backprop(self, nodes: list[Node], node_by_id: dict[str, Node]) -> None:
         solved_nodes = [node for node in nodes if node.pass_rate == 1.0]
         if not solved_nodes or self.args.terminal_logic_backprop_bonus <= 0.0:
@@ -966,8 +995,9 @@ class CodeGRPOTreeRunner:
             raw_outputs = self.backend.generate_many(
                 [rendered_prompt_text],
                 num_generations=to_generate,
-                max_new_tokens=self._code_completion_length(),
+                **self._code_generation_kwargs(),
             )
+            raw_outputs = self._retry_empty_generation_outputs(rendered_prompt_text, raw_outputs)
             siblings: list[Node] = []
             for raw_output in raw_outputs:
                 node_serial += 1
@@ -1040,8 +1070,11 @@ class CodeGRPOTreeRunner:
         raw_output = (
             raw_output_override
             if raw_output_override is not None
-            else self.backend.generate(prompt_text, max_new_tokens=self._code_completion_length())
+            else self.backend.generate(prompt_text, **self._code_generation_kwargs())
         )
+        if raw_output_override is None and not (raw_output or "").strip():
+            retried_outputs = self._retry_empty_generation_outputs(prompt_text, [raw_output])
+            raw_output = retried_outputs[0] if retried_outputs else raw_output
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction, generation_format_ok = (
             parse_generation_response(
                 raw_output,

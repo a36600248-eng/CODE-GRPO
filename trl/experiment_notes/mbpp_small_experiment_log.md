@@ -731,3 +731,94 @@ If the next change is needed, it should probably not be another blind length inc
 2. whether `generation_format_ok_rate` improves without hurting audit format rates
 3. whether `mean_pass_rate` and `best_pass_rate_overall` improve over the current fenced-code baseline
 4. whether memory remains stable under code `128` / audit `64`
+
+### Representative run
+
+- `20260311_092615__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. The split `128 / 64 / 100` setup did not improve the main generation bottleneck.
+   - `mean_pass_rate ~ 0.2242`
+   - `best_pass_rate_overall ~ 0.4867`
+   - `generation_format_ok_rate ~ 0.4800`
+   - Relative to the stronger fenced-code baseline, these numbers are flat to slightly worse.
+
+2. The systematic "one sibling is usable, one sibling is empty" pattern still remains.
+   - Representative traces:
+     - `mbpp_train_616_rank0_000003`
+     - `mbpp_train_733_rank0_000047`
+     - `mbpp_train_737_rank0_000008`
+   - In these traces, one node often has a valid fenced Python block while the sibling has `raw_output = ""` and `generation_format_ok = false`.
+   - This keeps `generation_format_ok_rate` pinned near `0.5` on many questions.
+
+3. Audit quality regressed under `max_completion_length_audit = 64`.
+   - `logic_format_ok_rate ~ 0.8258`
+   - `exec_format_ok_rate ~ 0.9000`
+   - These are clearly below the earlier fenced-code runs, where logic / execution audit format rates were both materially higher.
+
+4. The run got weaker in the second half rather than stronger.
+   - First half:
+     - `mean_pass_rate ~ 0.2667`
+     - `best_pass_rate_overall ~ 0.5800`
+     - `logic_confirmed_rate ~ 0.1650`
+   - Second half:
+     - `mean_pass_rate ~ 0.1817`
+     - `best_pass_rate_overall ~ 0.3933`
+     - `logic_confirmed_rate ~ 0.0950`
+   - This is a negative trend compared with the more stable Group D fenced-code baseline.
+
+5. Soft-reward optimism is still present on several zero-pass samples.
+   - Representative hard samples:
+     - `mbpp_train_733`
+     - `mbpp_train_611`
+     - `mbpp_train_640`
+   - These still show `pass_rate = 0` with relatively high `mean_R_soft_raw`.
+
+6. `final_reason` remains functional.
+   - `final_reason_node_count ~ 0.31`
+   - So this run did not break the main workflow; it simply failed to improve the core main-generation bottleneck.
+
+### Interpretation
+
+The split-length idea in this specific form is not a win.
+
+- Giving code generation `128` tokens did not remove the empty-sibling pattern.
+- Giving audit only `64` tokens made logic / execution audit worse.
+- The main-generation problem now looks less like pure length pressure and more like a sampling / generation-path issue that still produces empty siblings.
+
+### Current recommendation
+
+Do not keep the current `128 / 64 / 100` setup as the new baseline.
+
+The next change should likely be:
+
+1. restore audit length to the stronger previous range, and
+2. investigate the empty-output sibling behavior directly rather than only giving code generation more tokens.
+
+## Group F plan: restore audit budget and stabilize main generation
+
+### Planned change
+
+- keep `max_completion_length_code = 128`
+- restore `max_completion_length_audit: 64 -> 96`
+- add code-only sampling overrides:
+  - `generation_temperature_code = 0.7`
+  - `generation_top_p_code = 0.95`
+  - `generation_min_new_tokens_code = 16`
+- retry empty main-generation outputs once:
+  - `generation_empty_retry_count = 1`
+
+### Why this is the current best next experiment
+
+1. The latest `128 / 64 / 100` run showed that audit quality regressed under the shorter audit budget.
+2. The main-generation bottleneck is no longer best explained by pure length pressure; many failures are empty sibling outputs.
+3. Empty `raw_output` means the issue is upstream of the parser, so reward changes are not the right next move.
+4. A small main-generation sampling stabilization is a narrower, more justified intervention than another reward change.
+
+### What to check after the next run
+
+1. whether the repeated `generation_format_ok_rate ~ 0.5` pattern improves
+2. whether empty-sibling traces become less common
+3. whether logic / execution audit format rates recover after restoring audit length
+4. whether `mean_pass_rate` and `best_pass_rate_overall` return to or exceed the stronger fenced-code baseline

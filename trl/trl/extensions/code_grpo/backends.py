@@ -2,7 +2,15 @@ from abc import ABC, abstractmethod
 
 import torch
 
-_SUPPORTED_VLLM_OVERRIDES = {"max_new_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty"}
+_SUPPORTED_VLLM_OVERRIDES = {
+    "max_new_tokens",
+    "min_new_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+}
 
 
 def _truncate_at_stop_strings(text: str, stop_strings: list[str] | tuple[str, ...] | None) -> str:
@@ -116,6 +124,8 @@ class VLLMBackend(Backend):
             if key in _SUPPORTED_VLLM_OVERRIDES:
                 if key == "max_new_tokens":
                     overrides["max_completion_length"] = int(value)
+                elif key == "min_new_tokens":
+                    overrides["min_tokens"] = int(value)
                 else:
                     overrides[key] = value
             else:

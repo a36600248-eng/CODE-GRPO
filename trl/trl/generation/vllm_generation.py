@@ -592,6 +592,7 @@ class VLLMGeneration:
         top_p = generation_overrides.get("top_p", top_p)
         top_k = generation_overrides.get("top_k", top_k)
         min_p = generation_overrides.get("min_p", min_p)
+        min_tokens = int(generation_overrides.get("min_tokens", 0) or 0)
         max_completion_length = int(generation_overrides.get("max_completion_length", max_completion_length))
 
         # Wake up colocated vLLM weights if needed (idempotent if already awake from sync_weights)
@@ -635,6 +636,7 @@ class VLLMGeneration:
                     "top_p": top_p,
                     "top_k": top_k,
                     "min_p": 0.0 if min_p is None else min_p,
+                    "min_tokens": min_tokens,
                     "max_tokens": max_completion_length,
                     "logprobs": self.logprobs,
                     "structured_outputs_regex": self.structured_outputs_regex,
@@ -727,6 +729,7 @@ class VLLMGeneration:
                     "top_p": top_p,
                     "top_k": top_k,
                     "min_p": 0.0 if min_p is None else min_p,
+                    "min_tokens": min_tokens,
                     "max_tokens": max_completion_length,
                     "logprobs": self.logprobs,
                 }
