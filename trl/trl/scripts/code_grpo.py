@@ -40,6 +40,7 @@ from trl import (
     get_peft_config,
     get_quantization_config,
 )
+from trl.trainer.utils import use_adapter
 from trl.extensions.code_grpo.adapters import load_dataset_adapter
 from trl.trainer.code_grpo_config import CodeGRPOConfig
 from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
@@ -431,18 +432,15 @@ def main(script_args, training_args, model_args, dataset_args):
         and eval_dataset is not None
         and getattr(training_args, "run_base_model_baseline_eval", False)
     ):
-        baseline_trainer = CodeGRPOTrainer(
-            model=model_args.model_name_or_path,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            peft_config=None,
-            callbacks=[TextMetricsCallback(trainer_text_log_path, trainer_jsonl_path)],
-        )
-        baseline_metrics = baseline_trainer.evaluate(eval_dataset=eval_dataset)
-        baseline_trainer.log_metrics("baseline_eval", baseline_metrics)
-        baseline_trainer.save_metrics("baseline_eval", baseline_metrics)
-        del baseline_trainer
+        unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
+        if hasattr(unwrapped_model, "disable_adapter"):
+            with use_adapter(unwrapped_model, adapter_name=None):
+                baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
+        else:
+            logger.warning("run_base_model_baseline_eval requested, but trainer model has no PEFT adapter to disable.")
+            baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
+        trainer.log_metrics("baseline_eval", baseline_metrics)
+        trainer.save_metrics("baseline_eval", baseline_metrics)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
