@@ -448,12 +448,18 @@ def get_dataset(mixture_config: DatasetMixtureConfig) -> DatasetDict:
     dataset_dict_splits: dict[str, list[datasets.Dataset]] = {}
     for dataset_config in mixture_config.datasets:
         logger.info(f"Loading dataset for mixture: {dataset_config.path} (config name: {dataset_config.name})")
+        split_arg = dataset_config.split
+        if isinstance(dataset_config.data_files, dict) and len(dataset_config.data_files) > 1 and split_arg == "train":
+            # For explicit train/test data_files mappings, default to loading the full DatasetDict
+            # unless the user explicitly asked for a split.
+            split_arg = None
+
         dataset = datasets.load_dataset(
             path=dataset_config.path,
             name=dataset_config.name,
             data_dir=dataset_config.data_dir,
             data_files=dataset_config.data_files,
-            split=dataset_config.split,
+            split=split_arg,
             streaming=mixture_config.streaming,
         )
         if isinstance(dataset, DatasetDict):
