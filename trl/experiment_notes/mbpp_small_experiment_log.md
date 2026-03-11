@@ -822,3 +822,76 @@ The next change should likely be:
 2. whether empty-sibling traces become less common
 3. whether logic / execution audit format rates recover after restoring audit length
 4. whether `mean_pass_rate` and `best_pass_rate_overall` return to or exceed the stronger fenced-code baseline
+
+### Representative run
+
+- `20260311_102038__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. This is a real improvement over the previous `128 / 64 / 100` run.
+   - `mean_pass_rate ~ 0.4525`
+   - `best_pass_rate_overall ~ 0.5533`
+   - `generation_format_ok_rate ~ 0.8900`
+   - `logic_format_ok_rate ~ 0.9867`
+   - `exec_format_ok_rate ~ 0.9800`
+   - `logic_confirmed_rate ~ 0.2608`
+   - `final_reason_node_count ~ 0.55`
+
+2. The repeated empty-sibling pattern is no longer the dominant failure mode.
+   - Main-generation format rate is now far above the old `~0.5` ceiling.
+   - The code-only sampling overrides plus one-shot empty-output retry appear to have worked.
+
+3. Audit quality recovered after restoring audit length.
+   - `logic_format_ok_rate` and `exec_format_ok_rate` both returned to the stronger earlier range.
+   - This confirms that `max_completion_length_audit = 64` was too aggressive for this setup.
+
+4. The run improves in the second half instead of degrading.
+   - First half:
+     - `mean_pass_rate ~ 0.3933`
+     - `best_pass_rate_overall ~ 0.5200`
+     - `logic_confirmed_rate ~ 0.2250`
+     - `final_reason_node_count ~ 0.50`
+   - Second half:
+     - `mean_pass_rate ~ 0.5117`
+     - `best_pass_rate_overall ~ 0.5867`
+     - `logic_confirmed_rate ~ 0.2967`
+     - `final_reason_node_count ~ 0.60`
+
+5. A new residual issue appeared in some fenced-code generations: duplicated fence fragments.
+   - Representative trace:
+     - `mbpp_train_635_rank0_000005`
+   - Example raw output:
+     - ````python ... ```python ````
+   - These cases are currently marked as generation-format-valid but become `SYNTAX_ERROR` after code extraction, so the parser/stop logic is still too permissive for this failure mode.
+
+6. Soft-reward optimism still exists on a few hard zero-pass samples.
+   - Representative cases:
+     - `mbpp_train_624`
+     - `mbpp_train_608`
+     - `mbpp_train_743`
+     - `mbpp_train_611`
+   - These still show high `mean_R_soft_raw` even when `pass_rate = 0`.
+   - However, this is no longer the main blocker in the current setup.
+
+### Interpretation
+
+This run is the strongest MBPP-small result so far.
+
+The current combination appears substantially better:
+
+- code length `128`
+- audit length restored to `96`
+- stabilized main-generation sampling
+- one retry for empty main-generation outputs
+
+The next highest-value fix is no longer about empty siblings. It is about sanitizing malformed duplicated fenced-code suffixes so they do not slip through as generation-format-valid syntax errors.
+
+### Current recommendation
+
+Keep this configuration as the working baseline for now.
+
+If the next code change is needed, it should focus on:
+
+1. stricter/smarter fenced-code parsing or stopping for duplicated fence fragments, and
+2. only after that, revisiting the remaining soft-reward optimism on a few stubborn zero-pass questions.
