@@ -35,7 +35,7 @@ vllm_tensor_parallel_size: 1
 vllm_gpu_memory_utilization: 0.35
 
 num_train_epochs: 1
-max_steps: 100
+max_steps: 200
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
@@ -44,7 +44,7 @@ gradient_checkpointing: true
 gradient_accumulation_steps: 1
 generation_batch_size: 2
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 2
+per_device_eval_batch_size: 1
 max_completion_length: 128
 max_completion_length_code: 128
 max_completion_length_audit: 96
@@ -56,7 +56,9 @@ generation_empty_retry_count: 1
 K: 2
 K_reason: 1
 num_generations: 2
-num_generations_eval: 2
+num_generations_eval: 1
+eval_code_only_single_trajectory: true
+reward_window_bins: 10
 T_max: 2
 N_max: 4
 M_audit: 3

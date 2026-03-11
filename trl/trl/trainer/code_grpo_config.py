@@ -9,7 +9,10 @@ class CodeGRPOConfig(GRPOConfig):
 
     # Keep sibling size aligned with GRPO grouping.
     num_generations: int | None = field(default=2, metadata={"help": "Number of sibling candidates (K)."})
-    num_generations_eval: int | None = field(default=2, metadata={"help": "Eval sibling candidates (defaults to K)."})
+    num_generations_eval: int | None = field(
+        default=1,
+        metadata={"help": "Eval generations. For code-only single-trajectory eval this should stay at 1."},
+    )
 
     codegrpo_mode: str = field(default="train", metadata={"help": "Pipeline mode: train or test."})
     backend: str = field(default="hf", metadata={"help": "Generation backend: hf or vllm."})
@@ -193,6 +196,24 @@ class CodeGRPOConfig(GRPOConfig):
 
     eval_round_n: int = field(default=1, metadata={"help": "Round index used by pass@k@round=n metrics."})
     eval_k_list: list[int] = field(default_factory=lambda: [1, 3, 5], metadata={"help": "k values for pass@k metrics."})
+    eval_code_only_single_trajectory: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Use code-only eval with a single repair trajectory. "
+                "No logic/exec audit is run during eval; metrics report cumulative pass@1 within <= round r."
+            )
+        },
+    )
+    reward_window_bins: int = field(
+        default=10,
+        metadata={
+            "help": (
+                "Split total training steps into N bins and log rolling reward means over each bin. "
+                "For example, max_steps=200 and reward_window_bins=10 logs one reward window every 20 steps."
+            )
+        },
+    )
 
     debug_trace_dir: str = field(
         default="traces/rollout",

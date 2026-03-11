@@ -956,6 +956,96 @@ class CodeGRPOTreeRunner:
             eval_metrics=eval_metrics,
         )
 
+    def run_question_eval_code_only(self, sample: dict[str, Any], rng: random.Random) -> QuestionRollout:
+        question_id = str(sample["question_id"])
+        prompt = str(sample["prompt"])
+        test_cases = list(sample["test_cases"])
+
+        root = Node(node_id="root", parent_id=None, round_idx=0, code=None, reasoning=None, exec_summary={"history": []})
+        parent = root
+        rounds: list[dict[str, Any]] = []
+        collected_nodes: list[Node] = []
+        node_count = 0
+        node_serial = 0
+
+        for round_idx in range(1, self.args.T_max + 1):
+            node_serial += 1
+            child = self._generate_node(
+                question_id=question_id,
+                node_id=f"n{node_serial}",
+                parent=parent,
+                prompt=prompt,
+                test_cases=test_cases,
+                audit_indices=[],
+                round_idx=round_idx,
+            )
+            collected_nodes.append(child)
+            rounds.append(self._build_round_record(round_idx, [child], stage="search"))
+            node_count += 1
+            parent = child
+            if child.pass_rate == 1.0:
+                break
+
+        train_samples: list[TrainSample] = []
+        for node in collected_nodes:
+            if not node.completion_text:
+                continue
+            train_samples.append(
+                TrainSample(
+                    question_id=question_id,
+                    prompt_text=node.prompt_text,
+                    completion_text=node.completion_text,
+                    code_token_mask=node.code_token_mask,
+                    reason_token_mask=node.reason_token_mask,
+                    A_code=0.0,
+                    A_reason=0.0,
+                    R_code=node.R_code,
+                    pass_rate=node.pass_rate,
+                )
+            )
+
+        metric_nodes = collected_nodes
+        r_code = [node.R_code for node in metric_nodes]
+        r_reason = [node.R_reason for node in metric_nodes]
+        pass_rates = [node.pass_rate for node in metric_nodes]
+        eval_metrics = self._compute_code_only_eval_metrics(rounds)
+        if collected_nodes:
+            eval_metrics.update(
+                {
+                    "search_node_count": float(len(metric_nodes)),
+                    "generation_format_ok_rate": _mean(
+                        [float(node.exec_summary.get("generation_format_ok", 0.0)) for node in metric_nodes if node.completion_text]
+                    ),
+                    "compile_ok_rate": _mean([float(node.exec_summary.get("compile_score", 0.0)) for node in metric_nodes]),
+                    "syntax_error_rate": _mean([1.0 if node.status_code == "SYNTAX_ERROR" else 0.0 for node in metric_nodes]),
+                    "timeout_rate": _mean([1.0 if node.status_code == "TIMEOUT" else 0.0 for node in metric_nodes]),
+                    "main_sample_count": float(sum(1 for node in metric_nodes if node.completion_text)),
+                }
+            )
+
+        self.logger.info(
+            "[EVAL_TREE] question_id=%s rounds=%d node_count=%d solved=%s",
+            question_id,
+            len(rounds),
+            node_count,
+            any(node.pass_rate == 1.0 for node in collected_nodes),
+        )
+
+        return QuestionRollout(
+            question_id=question_id,
+            audit_indices=[],
+            rounds=rounds,
+            node_count=node_count,
+            resample_count=0,
+            train_samples=train_samples,
+            mean_R_code=_mean(r_code),
+            mean_R_reason=_mean(r_reason),
+            mean_pass_rate=_mean(pass_rates),
+            std_R_code=_std(r_code),
+            std_R_reason=_std(r_reason),
+            eval_metrics=eval_metrics,
+        )
+
     def _expand_parent(
         self,
         question_id: str,
@@ -1672,4 +1762,27 @@ class CodeGRPOTreeRunner:
 
         metrics["best_pass_rate_overall"] = max((node["pass_rate"] for node in flat_nodes), default=0.0)
         metrics[f"best_pass_rate_round_{round_n}"] = max((node["pass_rate"] for node in round_nodes), default=0.0)
+        return metrics
+
+    def _compute_code_only_eval_metrics(self, rounds: list[dict[str, Any]]) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        search_rounds = [round_item for round_item in rounds if str(round_item.get("stage", "search")) == "search"]
+        eval_rounds = search_rounds if search_rounds else rounds
+        flat_nodes = [round_item["nodes"][0] for round_item in eval_rounds if round_item.get("nodes")]
+        cumulative_solved = False
+        cumulative_best = 0.0
+        max_rounds = max(int(self.args.T_max), len(flat_nodes))
+
+        for round_idx in range(1, max_rounds + 1):
+            if round_idx <= len(flat_nodes):
+                node = flat_nodes[round_idx - 1]
+                cumulative_solved = cumulative_solved or (float(node.get("pass_rate", 0.0)) == 1.0)
+                cumulative_best = max(cumulative_best, float(node.get("pass_rate", 0.0)))
+            metrics[f"pass_at_1_round_{round_idx}"] = 1.0 if cumulative_solved else 0.0
+            metrics[f"best_pass_rate_round_{round_idx}"] = cumulative_best
+
+        metrics["pass_at_1"] = metrics.get(f"pass_at_1_round_{max_rounds}", 0.0)
+        eval_round_n = min(max(1, int(self.args.eval_round_n)), max_rounds)
+        metrics["pass_at_k_round_n"] = metrics.get(f"pass_at_1_round_{eval_round_n}", 0.0)
+        metrics["best_pass_rate_overall"] = max((float(node["pass_rate"]) for node in flat_nodes), default=0.0)
         return metrics

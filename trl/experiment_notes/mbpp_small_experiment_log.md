@@ -961,3 +961,242 @@ Implementation note:
 
 - after enabling step-based eval, `per_device_eval_batch_size` must be divisible by `num_generations_eval`;
 - the config was adjusted from `per_device_eval_batch_size = 1` to `2` to satisfy the GRPO eval batching constraint.
+
+## Fixed-eval validation run
+
+### Representative run
+
+- `20260311_152858__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Train-side summary
+
+1. The training run completed successfully and remained broadly healthy.
+   - `mean_pass_rate ~ 0.3768`
+   - `best_pass_rate_overall ~ 0.4619`
+   - `generation_format_ok_rate ~ 0.8929`
+   - `logic_format_ok_rate ~ 0.9815`
+   - `exec_format_ok_rate ~ 0.9792`
+   - `logic_confirmed_rate ~ 0.1893`
+   - `final_reason_node_count ~ 0.4429`
+
+2. Train-side performance is somewhat weaker than the strongest previous baseline run.
+   - This is not a framework regression.
+   - It is consistent with training variance plus the fact that train-rollout statistics depend on sampled questions and audit cases.
+
+3. The old soft-reward optimism pattern still appears on some hard zero-pass problems.
+   - Representative cases:
+     - `mbpp_train_733`
+     - `mbpp_train_623`
+     - `mbpp_train_644`
+     - `mbpp_train_743`
+     - `mbpp_train_608`
+
+### Fixed eval observations
+
+The main value of this run is that fixed-step eval is now confirmed to work.
+
+Observed eval checkpoints:
+
+- step 20:
+  - `eval_mean_pass_rate ~ 0.1771`
+  - `eval_best_pass_rate_overall ~ 0.3333`
+  - `eval_generation_format_ok_rate ~ 0.8125`
+  - `eval_pass_at_2 ~ 0.25`
+
+- step 40:
+  - `eval_mean_pass_rate ~ 0.1354`
+  - `eval_best_pass_rate_overall ~ 0.2083`
+  - `eval_generation_format_ok_rate ~ 0.9063`
+  - `eval_pass_at_1 ~ 0.125`
+  - `eval_pass_at_2 ~ 0.125`
+
+- step 60:
+  - `eval_mean_pass_rate ~ 0.1667`
+  - `eval_best_pass_rate_overall ~ 0.3333`
+  - `eval_generation_format_ok_rate ~ 0.8438`
+  - `eval_pass_at_1 ~ 0.125`
+  - `eval_pass_at_2 ~ 0.125`
+
+- step 80:
+  - `eval_mean_pass_rate ~ 0.0729`
+  - `eval_best_pass_rate_overall ~ 0.0833`
+  - `eval_generation_format_ok_rate ~ 0.8438`
+  - `eval_pass_at_1 ~ 0.0`
+  - `eval_pass_at_2 ~ 0.0`
+
+- step 100:
+  - `eval_mean_pass_rate ~ 0.1667`
+  - `eval_best_pass_rate_overall ~ 0.2917`
+  - `eval_generation_format_ok_rate ~ 0.7813`
+  - `eval_pass_at_1 ~ 0.0`
+  - `eval_pass_at_2 ~ 0.25`
+
+### Interpretation
+
+1. Fixed eval confirms that the current setup is still noisy.
+   - The eval curve is not monotonic.
+   - Step 80 is a clear trough, followed by partial recovery at step 100.
+
+2. The new eval path is still much more trustworthy than comparing “first half vs second half” of train-rollout logs.
+   - Future model-quality comparisons should be based on fixed eval checkpoints first.
+
+3. The current run should not be treated as a definitive improvement or collapse.
+   - It is a usable reference run for eval-enabled analysis.
+   - It shows that current variance is still high enough that single-run conclusions must be made cautiously.
+
+### Artifact note
+
+- eval metrics are present in `trainer_events_rank0.txt`.
+- the bundle did not include a separate `eval_results.json`, so the current source of truth for step-based eval remains the trainer text log.
+
+## Re-read of latest fixed-eval run
+
+### Representative run
+
+- `20260311_152858__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Consolidated findings
+
+1. Train-side behavior still looks healthy, but train metrics are materially more optimistic than fixed eval.
+   - Train aggregate remains decent:
+     - `mean_pass_rate ~ 0.3768`
+     - `best_pass_rate_overall ~ 0.4619`
+     - `generation_format_ok_rate ~ 0.8929`
+   - However fixed eval at step 100 is much weaker:
+     - `eval_mean_pass_rate ~ 0.1667`
+     - `eval_best_pass_rate_overall ~ 0.2917`
+     - `eval_generation_format_ok_rate ~ 0.7813`
+
+2. Fixed eval confirms that current variance is still high.
+   - Eval checkpoints across the same run:
+     - step 20: `eval_mean_pass_rate ~ 0.1771`
+     - step 40: `eval_mean_pass_rate ~ 0.1354`
+     - step 60: `eval_mean_pass_rate ~ 0.1667`
+     - step 80: `eval_mean_pass_rate ~ 0.0729`
+     - step 100: `eval_mean_pass_rate ~ 0.1667`
+   - This is not a monotonic improvement curve.
+   - Step 80 is a clear trough; step 100 partially recovers but does not establish a strong upward trend.
+
+3. Logic / execution audit still look technically sound.
+   - On fixed eval:
+     - `eval_logic_format_ok_rate` stays around `1.0`
+     - `eval_exec_format_ok_rate` stays around `1.0`
+   - The remaining weakness is not parser failure on audit branches.
+   - The main weakness remains code search / code generation quality on held-out samples.
+
+4. Soft-reward optimism remains visible on held-out zero-pass problems.
+   - Representative fixed-eval items:
+     - `mbpp_train_728`
+     - `mbpp_train_623`
+     - `mbpp_train_644`
+     - `mbpp_train_746`
+   - These can still show `pass_rate = 0` with non-trivial `mean_R_soft_raw`, confirming that soft reward is still helping some wrong code branches too much.
+
+5. Fixed eval is now the primary comparison source of truth.
+   - Future tuning decisions should prioritize:
+     - `eval_mean_pass_rate`
+     - `eval_best_pass_rate_overall`
+     - `eval_generation_format_ok_rate`
+   - Train first-half vs second-half comparisons are still useful as side evidence, but they should no longer drive main conclusions.
+
+### Current interpretation
+
+- The framework is stable.
+- The audit branches are stable.
+- The remaining problem is not basic pipeline correctness but training variance plus residual soft-reward over-optimism on a subset of hard zero-pass items.
+- Current setup is usable for further tuning, but single-run train metrics should not be treated as reliable evidence of general improvement without fixed-eval confirmation.
+
+## Eval-design note
+
+### User-side evaluation criterion proposal
+
+The current full eval still replays the rollout tree, including audit and `final_reason` logic. This is useful for diagnosing whether reward branches are alive, but it is not the cleanest primary model-quality metric.
+
+For primary evaluation, the better design is:
+
+1. Eval should be code-only.
+   - Do not run logic audit or execution audit during main eval.
+   - The purpose of those branches during training is to improve code success, not to become the final reported metric.
+
+2. Eval should use a single trajectory rather than a branching tree.
+   - If training allows up to `T_max = N` code rounds, eval should follow one multi-round repair trajectory:
+     - round 1 generate one code candidate
+     - if failed, round 2 repair once
+     - if failed, round 3 repair once
+     - and so on
+
+3. Report roundwise solve probability directly.
+   - If maximum code rounds is 3, the main eval metrics should be:
+     - round-1 `pass@1`
+     - round-2 cumulative solve rate
+     - round-3 cumulative solve rate
+   - Equivalently:
+     - probability solved within 1 round
+     - probability solved within 2 rounds
+     - probability solved within 3 rounds
+
+### Interpretation
+
+This is a more reasonable primary evaluation target than the current heavy full-rollout eval, because it measures what ultimately matters:
+
+- whether the model can write correct code immediately;
+- whether it can repair code within a bounded number of rounds;
+- and how solve probability improves as more repair rounds are allowed.
+
+### Practical recommendation
+
+Keep two eval modes:
+
+1. `full eval`
+   - current rollout-tree eval with audit branches;
+   - use only for reward / algorithm diagnostics.
+
+2. `light eval`
+   - code-only, single-trajectory, no audit;
+   - use as the main comparable metric across experiments.
+
+## Eval switch note
+
+- The representative run `20260311_152858__...` was still produced by the old full-rollout eval path.
+- Its `eval_logic_format_ok_rate`, `eval_exec_format_ok_rate`, and `eval_final_reason_*` metrics confirm that it was not yet using the new code-only single-trajectory eval.
+- After this note, the default eval path and the MBPP small config were aligned to:
+  - `eval_code_only_single_trajectory = true`
+  - `num_generations_eval = 1`
+  - `per_device_eval_batch_size = 1`
+- Future eval interpretation should therefore focus on:
+  - `eval_pass_at_1_round_1`
+  - `eval_pass_at_1_round_2`
+  - ...
+  - `eval_pass_at_1_round_T_max`
+  - and the final cumulative `eval_pass_at_1`
+
+## Train-length and reward-window decision
+
+- The next comparison run should use `max_steps = 200`, not `100`.
+- Rationale:
+  - `100` steps are enough to expose obvious failures;
+  - but they are still short for judging stable trend direction in this rollout-heavy RL setup.
+- `200` steps remain cheap enough on the current 7B setup while giving a more informative curve.
+
+### Windowed reward logging
+
+Train-side window logging was added for easier TensorBoard analysis.
+
+- A new config field was introduced:
+  - `reward_window_bins = N`
+- Window interval is computed as:
+  - `ceil(max_steps / N)`
+- For the current MBPP small config:
+  - `max_steps = 200`
+  - `reward_window_bins = 10`
+  - so one reward window is logged every `20` steps
+
+The window metrics are:
+
+- `window/mean_R_code`
+- `window/mean_R_reason`
+- `window/mean_R_soft_effective`
+- `window/steps`
+- `window/end_step`
+
+This does not change optimization. It only adds a lower-variance train-side reward summary to complement eval.

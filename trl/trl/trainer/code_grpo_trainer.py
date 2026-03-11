@@ -1,7 +1,9 @@
 import json
+import math
 import os
 import random
 import time
+from collections import defaultdict
 from typing import Any
 
 import torch
@@ -103,11 +105,58 @@ class CodeGRPOTrainer(GRPOTrainer):
             args=self.args,
             logger=logger,
         )
+        self._reward_window_interval_steps = self._resolve_reward_window_interval_steps()
+        self._reward_window_buffers: dict[str, list[float]] = defaultdict(list)
         self._trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
+
+    def _resolve_reward_window_interval_steps(self) -> int:
+        bins = int(getattr(self.args, "reward_window_bins", 0) or 0)
+        max_steps = int(getattr(self.args, "max_steps", 0) or 0)
+        if bins > 0 and max_steps > 0:
+            return max(1, math.ceil(max_steps / bins))
+        eval_steps = getattr(self.args, "eval_steps", 0)
+        if isinstance(eval_steps, int) and eval_steps > 0:
+            return eval_steps
+        return 0
+
+    @staticmethod
+    def _window_mean(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    def _update_train_reward_window_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
+        interval = self._reward_window_interval_steps
+        if interval <= 0:
+            return {}
+
+        tracked = {
+            "mean_R_code": "window/mean_R_code",
+            "mean_R_reason": "window/mean_R_reason",
+            "mean_R_soft_effective": "window/mean_R_soft_effective",
+        }
+        for source_key in tracked:
+            if source_key in metrics:
+                self._reward_window_buffers[source_key].append(float(metrics[source_key]))
+
+        current_step = int(self.state.global_step)
+        max_steps = int(getattr(self.args, "max_steps", 0) or 0)
+        should_emit = current_step > 0 and (current_step % interval == 0 or (max_steps > 0 and current_step >= max_steps))
+        if not should_emit:
+            return {}
+
+        payload: dict[str, float] = {
+            "window/steps": float(len(self._reward_window_buffers.get("mean_R_code", []))),
+            "window/end_step": float(current_step),
+        }
+        for source_key, target_key in tracked.items():
+            values = self._reward_window_buffers.get(source_key, [])
+            if values:
+                payload[target_key] = self._window_mean(values)
+        self._reward_window_buffers.clear()
+        return payload
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
@@ -273,11 +322,17 @@ class CodeGRPOTrainer(GRPOTrainer):
         rollouts = []
         for _idx, example in enumerate(examples):
             rollout_seed = base_rng.randint(0, 2**31 - 1)
-            rollout = self.tree_runner.run_question(
-                example,
-                rng=random.Random(rollout_seed),
-                update_exec_baseline=(mode == "train"),
-            )
+            if mode == "eval" and getattr(self.args, "eval_code_only_single_trajectory", True):
+                rollout = self.tree_runner.run_question_eval_code_only(
+                    example,
+                    rng=random.Random(rollout_seed),
+                )
+            else:
+                rollout = self.tree_runner.run_question(
+                    example,
+                    rng=random.Random(rollout_seed),
+                    update_exec_baseline=(mode == "train"),
+                )
             rollouts.append(rollout)
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
 
@@ -426,3 +481,17 @@ class CodeGRPOTrainer(GRPOTrainer):
         if self._last_eval_metrics:
             metrics.update({f"eval_{key}": value for key, value in self._last_eval_metrics.items()})
         return metrics
+
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
+        mode = "train" if self.model.training else "eval"
+        metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}
+
+        if mode == "train":
+            metrics.update(self._update_train_reward_window_metrics(metrics))
+        else:
+            metrics = {f"eval_{key}": val for key, val in metrics.items()}
+            self._last_eval_metrics = dict(metrics)
+
+        logs = {**logs, **metrics}
+        self._metrics[mode].clear()
+        super().log(logs, start_time)
