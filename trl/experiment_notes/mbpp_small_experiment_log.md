@@ -648,3 +648,86 @@ This run is intentionally shortened to 60 steps because the current objective is
 
 - check whether longer completions reduce truncated fenced-code generations,
 - without paying the full 100-step cost before the trend is clear.
+
+### Representative run
+
+- `20260311_073802__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. `max_completion_length = 96` did not produce a clear improvement over the fenced-code baseline.
+   - `generation_format_ok_rate ~ 0.4583`, which is essentially flat relative to the previous fenced-code run (`~0.4575`).
+   - `mean_pass_rate ~ 0.225`, slightly below the previous fenced-code run (`~0.2354`).
+   - `best_pass_rate_overall ~ 0.50`, essentially flat relative to the previous run (`~0.5058`).
+
+2. The shorter 60-step run does not show the same "second half gets better" pattern as the stronger 100-step fenced-code run.
+   - First half:
+     - `mean_pass_rate ~ 0.2528`
+     - `best_pass_rate_overall ~ 0.5778`
+   - Second half:
+     - `mean_pass_rate ~ 0.1972`
+     - `best_pass_rate_overall ~ 0.4222`
+   - This suggests the 60-step run is noisier and less informative than the 100-step run.
+
+3. Truncated / empty generation is still present, but it is no longer the dominant failure mode in sampled traces.
+   - Good examples:
+     - `mbpp_train_618_rank0_000051`
+     - `mbpp_train_625_rank0_000054`
+     - `mbpp_train_627_rank0_000028`
+   - These show correct fenced Python outputs with `generation_format_ok = True`.
+   - Remaining hard failures now still include:
+     - empty outputs
+     - occasional incomplete code
+   - But the 96-token increase alone did not obviously unlock a new performance regime.
+
+4. Memory remained stable on the current A800 run.
+   - No instability or OOM regression was observed in this shortened 96-token run.
+
+5. `final_reason` remains active.
+   - `final_reason_node_count ~ 0.35`
+   - This is actually higher than the previous fenced-code run, though the shorter run makes this harder to interpret as a stable trend.
+
+### Interpretation
+
+The fenced-code switch remains the important fix.
+
+The `96`-token increase by itself is not yet a convincing improvement:
+
+- it did not clearly raise format rate,
+- it did not clearly raise pass metrics,
+- and the shorter 60-step run is less reliable for trend judgment than the earlier 100-step run.
+
+### Current recommendation
+
+Do not treat `max_completion_length = 96` as a confirmed win yet.
+
+At this point, the stronger baseline remains:
+
+- fenced-code main generation
+- Group D reward settings
+- longer training horizon for trend judgment
+
+If the next change is needed, it should probably not be another blind length increase.
+
+## Group E plan: split code vs audit length
+
+### Planned change
+
+- `max_steps: 60 -> 100`
+- shared `max_completion_length: 96 -> 128`
+- `max_completion_length_code: 128`
+- `max_completion_length_audit: 64`
+
+### Why this is the current best next experiment
+
+1. Main generation is still the only path that shows clear completion-length pressure on hard MBPP tasks.
+2. Logic / execution audit format rates are already stable enough that they do not need the same token budget.
+3. A split budget should give more room to code generation without wasting the same budget on audit prompts.
+4. The next run should return to `100` steps so the trend is comparable to the stronger earlier baseline.
+
+### What to check after the next run
+
+1. whether incomplete fenced-code failures decrease
+2. whether `generation_format_ok_rate` improves without hurting audit format rates
+3. whether `mean_pass_rate` and `best_pass_rate_overall` improve over the current fenced-code baseline
+4. whether memory remains stable under code `128` / audit `64`

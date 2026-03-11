@@ -104,6 +104,22 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    max_completion_length_code: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional main-generation completion length override. Falls back to max_completion_length when unset."
+            )
+        },
+    )
+    max_completion_length_audit: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional audit/reason completion length override. Falls back to max_completion_length when unset."
+            )
+        },
+    )
     prefill_generation_code_tag: bool = field(
         default=True,
         metadata={
@@ -233,6 +249,21 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("format_outside_noise_chars must be >= 0.")
         if self.generation_outside_noise_chars < 0:
             raise ValueError("generation_outside_noise_chars must be >= 0.")
+        if self.max_completion_length_code is not None and self.max_completion_length_code <= 0:
+            raise ValueError("max_completion_length_code must be > 0 when provided.")
+        if self.max_completion_length_audit is not None and self.max_completion_length_audit <= 0:
+            raise ValueError("max_completion_length_audit must be > 0 when provided.")
+        if self.max_completion_length_code is not None and self.max_completion_length_code > self.max_completion_length:
+            raise ValueError(
+                "max_completion_length_code must be <= max_completion_length so shared generation backends remain valid."
+            )
+        if (
+            self.max_completion_length_audit is not None
+            and self.max_completion_length_audit > self.max_completion_length
+        ):
+            raise ValueError(
+                "max_completion_length_audit must be <= max_completion_length so shared generation backends remain valid."
+            )
         if not (0.0 <= self.terminal_logic_backprop_bonus <= 1.0):
             raise ValueError(
                 f"terminal_logic_backprop_bonus must be in [0, 1], got: {self.terminal_logic_backprop_bonus}"

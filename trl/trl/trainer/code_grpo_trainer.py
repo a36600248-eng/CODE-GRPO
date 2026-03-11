@@ -69,8 +69,15 @@ class CodeGRPOTrainer(GRPOTrainer):
         else:
             self.code_tokenizer = self.processing_class.tokenizer
 
+        self.code_max_completion_length = int(
+            getattr(self.args, "max_completion_length_code", None) or self.max_completion_length
+        )
+        self.audit_max_completion_length = int(
+            getattr(self.args, "max_completion_length_audit", None) or self.max_completion_length
+        )
+
         generation_defaults = {
-            "max_new_tokens": self.max_completion_length,
+            "max_new_tokens": self.code_max_completion_length,
             "do_sample": True,
             "temperature": self.temperature,
             "top_p": self.top_p,

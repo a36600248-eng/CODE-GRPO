@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 
 import torch
 
+_SUPPORTED_VLLM_OVERRIDES = {"max_new_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty"}
+
 
 def _truncate_at_stop_strings(text: str, stop_strings: list[str] | tuple[str, ...] | None) -> str:
     if not text or not stop_strings:
@@ -106,10 +108,30 @@ class VLLMBackend(Backend):
         self.tokenizer = tokenizer
         self.hf_fallback = hf_fallback
 
+    @staticmethod
+    def _split_vllm_overrides(gen_cfg: dict) -> tuple[dict, dict]:
+        overrides = {}
+        passthrough = {}
+        for key, value in gen_cfg.items():
+            if key in _SUPPORTED_VLLM_OVERRIDES:
+                if key == "max_new_tokens":
+                    overrides["max_completion_length"] = int(value)
+                else:
+                    overrides[key] = value
+            else:
+                passthrough[key] = value
+        return overrides, passthrough
+
     def generate(self, prompt: str, **gen_cfg) -> str:
         stop_strings = gen_cfg.pop("stop_strings", None)
-        del gen_cfg
-        prompt_ids, completion_ids, _, _, _ = self.vllm_generation.generate([prompt], num_generations=1)
+        generation_overrides, passthrough = self._split_vllm_overrides(gen_cfg)
+        if passthrough:
+            return self.hf_fallback.generate(prompt, stop_strings=stop_strings, **gen_cfg)
+        prompt_ids, completion_ids, _, _, _ = self.vllm_generation.generate(
+            [prompt],
+            num_generations=1,
+            generation_overrides=generation_overrides or None,
+        )
         if not completion_ids:
             return ""
         decoded = self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
@@ -120,13 +142,18 @@ class VLLMBackend(Backend):
             return []
         stop_strings = gen_cfg.pop("stop_strings", None)
         num_generations = int(gen_cfg.pop("num_generations", 1) or 1)
-        if gen_cfg:
+        generation_overrides, passthrough = self._split_vllm_overrides(gen_cfg)
+        if passthrough:
             # vLLM wrapper is configured at initialization time; for per-call overrides, fallback to HF path.
             expanded_prompts: list[str] = []
             for prompt in prompts:
                 expanded_prompts.extend([prompt] * num_generations)
             return [self.hf_fallback.generate(prompt, stop_strings=stop_strings, **gen_cfg) for prompt in expanded_prompts]
-        _, completion_ids, _, _, _ = self.vllm_generation.generate(prompts, num_generations=num_generations)
+        _, completion_ids, _, _, _ = self.vllm_generation.generate(
+            prompts,
+            num_generations=num_generations,
+            generation_overrides=generation_overrides or None,
+        )
         if not completion_ids:
             return ["" for _ in range(len(prompts) * num_generations)]
         decoded = [

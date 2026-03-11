@@ -546,7 +546,13 @@ class VLLMGeneration:
         elif self.mode == "colocate":
             self.llm.reset_prefix_cache()
 
-    def generate(self, prompts: list, num_generations: int, profiler: ProfilingContext | None = None) -> tuple:
+    def generate(
+        self,
+        prompts: list,
+        num_generations: int,
+        profiler: ProfilingContext | None = None,
+        generation_overrides: dict | None = None,
+    ) -> tuple:
         """Generate completions using vLLM.
 
         Args:
@@ -579,6 +585,14 @@ class VLLMGeneration:
         chat_template_kwargs = self.chat_template_kwargs
         tools = self.tools
         chat_template = self.chat_template
+        generation_overrides = generation_overrides or {}
+
+        repetition_penalty = generation_overrides.get("repetition_penalty", repetition_penalty)
+        temperature = generation_overrides.get("temperature", temperature)
+        top_p = generation_overrides.get("top_p", top_p)
+        top_k = generation_overrides.get("top_k", top_k)
+        min_p = generation_overrides.get("min_p", min_p)
+        max_completion_length = int(generation_overrides.get("max_completion_length", max_completion_length))
 
         # Wake up colocated vLLM weights if needed (idempotent if already awake from sync_weights)
         if self.mode == "colocate" and self.enable_sleep_mode:

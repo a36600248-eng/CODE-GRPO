@@ -186,6 +186,12 @@ class CodeGRPOTreeRunner:
             pass
         return prompt_text
 
+    def _code_completion_length(self) -> int:
+        return int(getattr(self.args, "max_completion_length_code", None) or self.args.max_completion_length)
+
+    def _audit_completion_length(self) -> int:
+        return int(getattr(self.args, "max_completion_length_audit", None) or self.args.max_completion_length)
+
     def _apply_terminal_logic_backprop(self, nodes: list[Node], node_by_id: dict[str, Node]) -> None:
         solved_nodes = [node for node in nodes if node.pass_rate == 1.0]
         if not solved_nodes or self.args.terminal_logic_backprop_bonus <= 0.0:
@@ -406,7 +412,10 @@ class CodeGRPOTreeRunner:
             )
             unified_prompts_raw = [build_frozen_reason_prompt(code, case_input) for case_input in case_inputs]
             unified_prompts = [self._render_prompt_with_chat_template(p) for p in unified_prompts_raw]
-            unified_outputs = self.backend.generate_many(unified_prompts)
+            unified_outputs = self.backend.generate_many(
+                unified_prompts,
+                max_new_tokens=self._audit_completion_length(),
+            )
 
             for idx, case_input, case, actual, unified_prompt, unified_output in zip(
                 audit_indices,
@@ -954,7 +963,11 @@ class CodeGRPOTreeRunner:
             )
             rendered_prompt_text = self._render_prompt_with_chat_template(prompt_text)
 
-            raw_outputs = self.backend.generate_many([rendered_prompt_text], num_generations=to_generate)
+            raw_outputs = self.backend.generate_many(
+                [rendered_prompt_text],
+                num_generations=to_generate,
+                max_new_tokens=self._code_completion_length(),
+            )
             siblings: list[Node] = []
             for raw_output in raw_outputs:
                 node_serial += 1
@@ -1024,7 +1037,11 @@ class CodeGRPOTreeRunner:
         else:
             prompt_text_raw = prompt_text_raw_override or prompt_text_override
             prompt_text = prompt_text_override
-        raw_output = raw_output_override if raw_output_override is not None else self.backend.generate(prompt_text)
+        raw_output = (
+            raw_output_override
+            if raw_output_override is not None
+            else self.backend.generate(prompt_text, max_new_tokens=self._code_completion_length())
+        )
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction, generation_format_ok = (
             parse_generation_response(
                 raw_output,
@@ -1095,7 +1112,10 @@ class CodeGRPOTreeRunner:
             if unify_reason_mode:
                 unified_prompts_raw = [build_frozen_reason_prompt(code, case_inputs[idx]) for idx in audit_indices]
                 unified_prompts = [self._render_prompt_with_chat_template(p) for p in unified_prompts_raw]
-                unified_outputs = self.backend.generate_many(unified_prompts)
+                unified_outputs = self.backend.generate_many(
+                    unified_prompts,
+                    max_new_tokens=self._audit_completion_length(),
+                )
                 for idx, unified_prompt, unified_output in zip(audit_indices, unified_prompts, unified_outputs, strict=True):
                     case = test_cases[idx]
                     actual = exec_results[idx]
@@ -1199,7 +1219,10 @@ class CodeGRPOTreeRunner:
             else:
                 logic_prompts_raw = [build_logic_prompt(code, case_inputs[idx], question_prompt=prompt) for idx in audit_indices]
                 logic_prompts = [self._render_prompt_with_chat_template(p) for p in logic_prompts_raw]
-                logic_outputs = self.backend.generate_many(logic_prompts)
+                logic_outputs = self.backend.generate_many(
+                    logic_prompts,
+                    max_new_tokens=self._audit_completion_length(),
+                )
                 for idx, logic_prompt, logic_output in zip(audit_indices, logic_prompts, logic_outputs, strict=True):
                     case = test_cases[idx]
                     logic_prompt_preview = summarize_error(logic_prompt, trace_max_chars, trace_max_lines)
@@ -1256,7 +1279,10 @@ class CodeGRPOTreeRunner:
 
                 exec_prompts_raw = [build_exec_prompt(code, case_inputs[idx]) for idx in audit_indices]
                 exec_prompts = [self._render_prompt_with_chat_template(p) for p in exec_prompts_raw]
-                exec_outputs = self.backend.generate_many(exec_prompts)
+                exec_outputs = self.backend.generate_many(
+                    exec_prompts,
+                    max_new_tokens=self._audit_completion_length(),
+                )
                 for idx, exec_prompt, exec_output in zip(audit_indices, exec_prompts, exec_outputs, strict=True):
                     actual = exec_results[idx]
                     exec_prompt_preview = summarize_error(exec_prompt, trace_max_chars, trace_max_lines)
