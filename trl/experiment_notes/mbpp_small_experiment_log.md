@@ -956,3 +956,8 @@ Future comparisons should stop using â€œfirst half vs second half of train logsâ
 - `eval_mean_pass_rate`
 - `eval_best_pass_rate_overall`
 - `eval_generation_format_ok_rate`
+
+Implementation note:
+
+- after enabling step-based eval, `per_device_eval_batch_size` must be divisible by `num_generations_eval`;
+- the config was adjusted from `per_device_eval_batch_size = 1` to `2` to satisfy the GRPO eval batching constraint.
