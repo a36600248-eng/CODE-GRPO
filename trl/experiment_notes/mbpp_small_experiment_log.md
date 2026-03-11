@@ -895,3 +895,64 @@ If the next code change is needed, it should focus on:
 
 1. stricter/smarter fenced-code parsing or stopping for duplicated fence fragments, and
 2. only after that, revisiting the remaining soft-reward optimism on a few stubborn zero-pass questions.
+
+## Eval Tracking Upgrade
+
+To reduce noise from comparing training first-half vs second-half summaries, the MBPP-small config now enables fixed-step evaluation:
+
+- `eval_strategy: steps`
+- `eval_steps: 20`
+- `seed: 42`
+- `data_seed: 42`
+
+Rationale:
+
+- training-rollout summaries are high variance because sampled questions, audit cases, and sibling generations vary by step;
+- fixed eval on the held-out split is a better signal for whether code pass rate and format quality are actually improving;
+- future comparisons should prioritize `eval_mean_pass_rate`, `eval_best_pass_rate_overall`, and `eval_generation_format_ok_rate` over train-half vs train-half comparisons.
+
+## Latest observed run after parser tightening
+
+### Representative run
+
+- `20260311_143920__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Observed results
+
+1. The run remains healthy but is not stronger than the previous best baseline.
+   - `mean_pass_rate ~ 0.4183`
+   - `best_pass_rate_overall ~ 0.5267`
+   - `generation_format_ok_rate ~ 0.8650`
+   - `logic_format_ok_rate ~ 0.9800`
+   - `exec_format_ok_rate ~ 0.9808`
+   - `logic_confirmed_rate ~ 0.2667`
+   - `final_reason_node_count ~ 0.49`
+
+2. Logic / execution audit remain stable.
+   - Audit format rates stay high.
+   - `final_reason` still triggers in real training, so the one-shot reason-only branch remains active.
+   - terminal logic backprop remains active on some solved steps (`logic_confirmed_rate > 0`, non-zero terminal bonus on selected steps).
+
+3. Main-generation behavior is still slightly noisier than the strongest previous run.
+   - Some steps still show weakened `generation_format_ok_rate`.
+   - The old “zero-pass but high soft reward” pattern still appears on a few hard MBPP items:
+     - `mbpp_train_733`
+     - `mbpp_train_623`
+     - `mbpp_train_644`
+     - `mbpp_train_743`
+     - `mbpp_train_608`
+
+4. This run should be interpreted as a mild regression / sampling-variance outcome, not as a framework failure.
+   - Core workflow remains intact.
+   - Reward branches still function.
+   - The remaining issue is reward calibration / generation stability on a subset of hard zero-pass problems.
+
+### Important note
+
+This reviewed run still does **not** include `eval_results.json`, so the newly enabled fixed-step eval configuration has not yet been validated by a completed bundle.
+
+Future comparisons should stop using “first half vs second half of train logs” as the primary basis and instead rely on:
+
+- `eval_mean_pass_rate`
+- `eval_best_pass_rate_overall`
+- `eval_generation_format_ok_rate`

@@ -3,8 +3,11 @@ report_to: none
 logging_steps: 1
 save_strategy: "no"
 save_total_limit: 0
-eval_strategy: "no"
+eval_strategy: "steps"
+eval_steps: 20
 push_to_hub: false
+seed: 42
+data_seed: 42
 
 use_cpu: false
 bf16: true
