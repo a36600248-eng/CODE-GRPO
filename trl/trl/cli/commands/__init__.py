@@ -23,6 +23,7 @@ def get_commands() -> list[Command]:
     """Return all registered top-level TRL CLI commands."""
     return [
         TrainingCommand("code_grpo"),
+        TrainingCommand("code_grpo_eval"),
         TrainingCommand("code_grpo_sft"),
         TrainingCommand("dpo"),
         EnvCommand(),

@@ -1,11 +1,11 @@
 # MBPP Small Experiment Log
 
-This file tracks the parameter groups used for `codegrpo_train_qwen7b_vllm_mbpp_small.yaml`,
+This file tracks the parameter groups used for `trl/configs/train/codegrpo_train_qwen7b_vllm_mbpp_small.yaml`,
 the observed issues from the resulting run, and the rationale for the next group.
 
 ## Group A
 
-- Config file: `trl/codegrpo_train_qwen7b_vllm_mbpp_small.yaml`
+- Config file: `trl/configs/train/codegrpo_train_qwen7b_vllm_mbpp_small.yaml`
 - Dataset: `trl/data/mbpp_sanitized_codegrpo_small64.jsonl`
 - Representative run:
   - `20260310_154839__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
@@ -1982,3 +1982,62 @@ For internal iteration this plotting setup is sufficient and much easier to read
 - Impact after fix:
   - best-checkpoint selection works again with `metric_for_best_model: eval_pass_at_1`
   - future runs should report a single `eval_` prefix only
+
+## 2026-03-13 - Vanilla GRPO and Standalone Raw Eval Split
+
+- Training and raw-base eval are now explicitly decoupled.
+- The main Code-GRPO training config no longer runs an embedded raw baseline eval during training:
+  - `trl/configs/train/codegrpo_train_qwen7b_vllm_mbpp_small.yaml`
+  - `run_base_model_baseline_eval: false`
+- Added a standalone raw eval entrypoint:
+  - CLI command: `code_grpo_eval`
+  - script: `trl/trl/scripts/code_grpo_eval.py`
+- Added a standalone raw Qwen7B MBPP eval config:
+  - `trl/configs/eval/codegrpo_eval_qwen7b_raw_mbpp.yaml`
+  - intended for raw `Qwen2.5-Coder-7B-Instruct`
+  - no PEFT, no quantized-training path, no training/baseline coupling
+- Added a vanilla GRPO comparison config:
+  - `trl/configs/train/codegrpo_train_qwen7b_vllm_mbpp_vanilla_grpo.yaml`
+  - disables audit/reason supervision and soft reward shaping
+  - keeps the same data and code-only eval harness for direct comparison
+- Current comparison plan:
+  1. raw standalone eval via `code_grpo_eval`
+  2. vanilla GRPO training via `code_grpo`
+  3. current Code-GRPO training via `code_grpo`
+
+## 2026-03-13 - Vanilla GRPO Fairness Correction
+
+- The initial vanilla GRPO config was too stripped down and therefore not a fair comparison.
+- It incorrectly zeroed out some code-side shaping terms that are not specific to Code-GRPO:
+  - `code_compile_reward_scale`
+  - `code_format_reward_scale`
+  - `gamma_shrink`
+- These have now been restored to match the main training config:
+  - `code_compile_reward_scale: 0.1`
+  - `code_format_reward_scale: 0.12`
+  - `gamma_shrink: 0.1`
+- The remaining intended differences for vanilla GRPO are now:
+  - no audit branch (`M_audit = 0`)
+  - no soft reward contribution (`lambda_soft = 0.0`)
+  - no reason loss (`beta_reason = 0.0`)
+  - no terminal logic backprop
+  - no frozen-code reason-only phase
+- This is the comparison config that should be used for a stricter Code-GRPO vs vanilla GRPO ablation.
+
+## 2026-03-13 - Comparison Suite Folder
+
+- Added a dedicated comparison folder:
+  - `trl/configs/comparison/`
+- It now contains four configs in one place:
+  - `codegrpo_method_mbpp.yaml`
+  - `vanilla_grpo_multiround_k2_mbpp.yaml`
+  - `vanilla_grpo_single_round_k8_mbpp.yaml`
+  - `raw_qwen7b_eval_mbpp.yaml`
+- Rationale:
+  - `vanilla_grpo_multiround_k2_mbpp.yaml` is the structural multi-round baseline.
+  - `vanilla_grpo_single_round_k8_mbpp.yaml` is the wide single-round sampling baseline.
+  - `raw_qwen7b_eval_mbpp.yaml` is the standalone raw base-model eval.
+  - `codegrpo_method_mbpp.yaml` is the current full method config copied into the same folder for direct side-by-side use.
+- A `README.md` in the same folder now contains the exact commands to run all four experiments.
+
+

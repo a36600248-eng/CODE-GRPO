@@ -2,13 +2,11 @@ import argparse
 import ast
 import json
 import operator
+import random
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any
-
-from datasets import load_dataset
-
+from typing import Any, Optional
 
 _BIN_OPS = {
     ast.Add: operator.add,
@@ -264,42 +262,118 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def convert_mbpp(output_dir: Path, small_train_size: int) -> dict[str, Any]:
-    dataset = load_dataset("mbpp", "sanitized")
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
 
-    split_rows: dict[str, list[dict[str, Any]]] = {}
+
+def _split_counts(total: int, train_ratio: float, validation_ratio: float, test_ratio: float) -> tuple[int, int, int]:
+    if total <= 0:
+        raise ValueError("Total example count must be positive.")
+    if abs((train_ratio + validation_ratio + test_ratio) - 1.0) > 1e-9:
+        raise ValueError("Split ratios must sum to 1.0.")
+
+    raw = [total * train_ratio, total * validation_ratio, total * test_ratio]
+    counts = [int(value) for value in raw]
+    remainder = total - sum(counts)
+    fractional = sorted(
+        enumerate(value - int(value) for value in raw),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    for idx, _frac in fractional[:remainder]:
+        counts[idx] += 1
+    return counts[0], counts[1], counts[2]
+
+
+def convert_mbpp(
+    output_dir: Path,
+    small_train_size: int,
+    train_ratio: float,
+    validation_ratio: float,
+    test_ratio: float,
+    split_seed: int,
+    source_jsonl_dir: Optional[Path] = None,
+) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "dataset": "mbpp",
         "config": "sanitized",
-        "splits": {},
+        "source_splits": {},
+        "final_splits": {},
         "files": {},
         "skipped_examples": defaultdict(list),
+        "split_ratios": {
+            "train": train_ratio,
+            "validation": validation_ratio,
+            "test": test_ratio,
+        },
+        "split_seed": split_seed,
     }
+    converted_rows: list[dict[str, Any]] = []
+    if source_jsonl_dir is not None:
+        for split in ("train", "validation", "test"):
+            split_path = source_jsonl_dir / f"mbpp_sanitized_codegrpo_{split}.jsonl"
+            rows = _read_jsonl(split_path)
+            converted_rows.extend(rows)
+            summary["source_splits"][split] = {
+                "raw_count": len(rows),
+                "converted_count": len(rows),
+                "skipped_count": 0,
+                "skip_reasons": {},
+                "source": str(split_path),
+            }
+    else:
+        try:
+            from datasets import load_dataset
+        except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+            raise ModuleNotFoundError(
+                "datasets is not installed. Re-run with --source-jsonl-dir pointing to existing converted MBPP JSONL files."
+            ) from exc
 
-    for split in ("train", "validation", "test"):
-        converted: list[dict[str, Any]] = []
-        skipped = 0
-        reasons = Counter()
-        for example in dataset[split]:
-            try:
-                converted.append(_convert_example(example, split))
-            except Exception as exc:  # noqa: BLE001
-                skipped += 1
-                reasons[type(exc).__name__] += 1
-                summary["skipped_examples"][split].append(
-                    {
-                        "task_id": int(example.get("task_id", -1)),
-                        "reason": f"{type(exc).__name__}: {exc}",
-                    }
-                )
+        dataset = load_dataset("mbpp", "sanitized")
+        for split in ("train", "validation", "test"):
+            converted_for_source_split: list[dict[str, Any]] = []
+            skipped = 0
+            reasons = Counter()
+            for example in dataset[split]:
+                try:
+                    converted = _convert_example(example, split)
+                    converted_for_source_split.append(converted)
+                    converted_rows.append(converted)
+                except Exception as exc:  # noqa: BLE001
+                    skipped += 1
+                    reasons[type(exc).__name__] += 1
+                    summary["skipped_examples"][split].append(
+                        {
+                            "task_id": int(example.get("task_id", -1)),
+                            "reason": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
 
-        split_rows[split] = converted
-        summary["splits"][split] = {
-            "raw_count": len(dataset[split]),
-            "converted_count": len(converted),
-            "skipped_count": skipped,
-            "skip_reasons": dict(reasons),
-        }
+            summary["source_splits"][split] = {
+                "raw_count": len(dataset[split]),
+                "converted_count": len(converted_for_source_split),
+                "skipped_count": skipped,
+                "skip_reasons": dict(reasons),
+            }
+
+    rng = random.Random(split_seed)
+    rng.shuffle(converted_rows)
+    train_count, val_count, test_count = _split_counts(
+        len(converted_rows),
+        train_ratio=train_ratio,
+        validation_ratio=validation_ratio,
+        test_ratio=test_ratio,
+    )
+    train_rows = converted_rows[:train_count]
+    val_rows = converted_rows[train_count:train_count + val_count]
+    test_rows = converted_rows[train_count + val_count:train_count + val_count + test_count]
 
     train_path = output_dir / "mbpp_sanitized_codegrpo_train.jsonl"
     val_path = output_dir / "mbpp_sanitized_codegrpo_validation.jsonl"
@@ -307,11 +381,27 @@ def convert_mbpp(output_dir: Path, small_train_size: int) -> dict[str, Any]:
     trainval_path = output_dir / "mbpp_sanitized_codegrpo_trainval.jsonl"
     small_path = output_dir / f"mbpp_sanitized_codegrpo_small{small_train_size}.jsonl"
 
-    _write_jsonl(train_path, split_rows["train"])
-    _write_jsonl(val_path, split_rows["validation"])
-    _write_jsonl(test_path, split_rows["test"])
-    _write_jsonl(trainval_path, split_rows["train"] + split_rows["validation"])
-    _write_jsonl(small_path, split_rows["train"][:small_train_size])
+    _write_jsonl(train_path, train_rows)
+    _write_jsonl(val_path, val_rows)
+    _write_jsonl(test_path, test_rows)
+    _write_jsonl(trainval_path, train_rows + val_rows)
+    _write_jsonl(small_path, train_rows[:small_train_size])
+
+    summary["final_splits"] = {
+        "train": {
+            "count": len(train_rows),
+            "ratio": len(train_rows) / len(converted_rows),
+        },
+        "validation": {
+            "count": len(val_rows),
+            "ratio": len(val_rows) / len(converted_rows),
+        },
+        "test": {
+            "count": len(test_rows),
+            "ratio": len(test_rows) / len(converted_rows),
+        },
+        "total_converted_count": len(converted_rows),
+    }
 
     summary["files"] = {
         "train": str(train_path.name),
@@ -332,9 +422,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Download MBPP and convert it to Code-GRPO JSONL format.")
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
     parser.add_argument("--small-train-size", type=int, default=64)
+    parser.add_argument("--train-ratio", type=float, default=0.70)
+    parser.add_argument("--validation-ratio", type=float, default=0.15)
+    parser.add_argument("--test-ratio", type=float, default=0.15)
+    parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument("--source-jsonl-dir", type=Path, default=None)
     args = parser.parse_args()
 
-    summary = convert_mbpp(args.output_dir, args.small_train_size)
+    summary = convert_mbpp(
+        args.output_dir,
+        args.small_train_size,
+        train_ratio=args.train_ratio,
+        validation_ratio=args.validation_ratio,
+        test_ratio=args.test_ratio,
+        split_seed=args.split_seed,
+        source_jsonl_dir=args.source_jsonl_dir,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
