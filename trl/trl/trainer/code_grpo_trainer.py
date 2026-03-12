@@ -529,7 +529,11 @@ class CodeGRPOTrainer(GRPOTrainer):
     def evaluate(self, *args, **kwargs):
         metrics = super().evaluate(*args, **kwargs)
         if self._last_eval_metrics:
-            metrics.update({f"eval_{key}": value for key, value in self._last_eval_metrics.items()})
+            normalized_metrics = {}
+            for key, value in self._last_eval_metrics.items():
+                normalized_key = key if key.startswith("eval_") else f"eval_{key}"
+                normalized_metrics[normalized_key] = value
+            metrics.update(normalized_metrics)
         return metrics
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:

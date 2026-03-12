@@ -1971,3 +1971,14 @@ For internal iteration this plotting setup is sufficient and much easier to read
 - The new target is to keep total training closer to the previously observed best-checkpoint region while making multi-seed runs cheaper.
 
 
+
+## 2026-03-12 - Eval metric prefix fix
+
+- Fixed a regression where eval metrics were being prefixed twice (`eval_eval_*`).
+- Root cause: `CodeGRPOTrainer.log()` already prefixes eval metrics with `eval_`, and `CodeGRPOTrainer.evaluate()` was adding `eval_` again when merging `_last_eval_metrics`.
+- Impact before fix:
+  - `metric_for_best_model: eval_pass_at_1` could not be found.
+  - training crashed at the first checkpoint-selection point.
+- Impact after fix:
+  - best-checkpoint selection works again with `metric_for_best_model: eval_pass_at_1`
+  - future runs should report a single `eval_` prefix only
