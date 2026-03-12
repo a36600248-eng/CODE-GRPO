@@ -58,6 +58,9 @@ class HFBackend(Backend):
     def generate(self, prompt: str, **gen_cfg) -> str:
         cfg = {**self.generation_defaults, **gen_cfg}
         stop_strings = cfg.pop("stop_strings", None)
+        if float(cfg.get("temperature", 1.0) or 0.0) <= 0.0:
+            cfg["do_sample"] = False
+            cfg.pop("temperature", None)
         encoded = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
         encoded = {k: v.to(self.device) for k, v in encoded.items()}
         with torch.no_grad():
@@ -72,6 +75,9 @@ class HFBackend(Backend):
         cfg = {**self.generation_defaults, **gen_cfg}
         stop_strings = cfg.pop("stop_strings", None)
         num_generations = int(cfg.pop("num_generations", 1) or 1)
+        if float(cfg.get("temperature", 1.0) or 0.0) <= 0.0:
+            cfg["do_sample"] = False
+            cfg.pop("temperature", None)
         expanded_prompts: list[str] = []
         for prompt in prompts:
             expanded_prompts.extend([prompt] * num_generations)

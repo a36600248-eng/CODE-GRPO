@@ -131,6 +131,14 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    eval_generation_temperature_code: float | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional code-only eval temperature override. Set to 0 for deterministic greedy eval."
+            )
+        },
+    )
     generation_top_p_code: float | None = field(
         default=None,
         metadata={
@@ -205,6 +213,15 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    eval_T_max_override: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional eval-only maximum code-repair rounds. When set, code-only eval can run for more rounds "
+                "than training T_max."
+            )
+        },
+    )
     eval_repeat_count: int = field(
         default=1,
         metadata={
@@ -241,6 +258,14 @@ class CodeGRPOConfig(GRPOConfig):
         default=1,
         metadata={"help": "How many rollout traces to dump per train step when dump_train_traces=True (0 means all)."},
     )
+    dump_train_trace_interval_steps: int = field(
+        default=120,
+        metadata={"help": "Dump train rollout traces only every N global steps. <=1 means every step."},
+    )
+    max_train_trace_files: int = field(
+        default=12,
+        metadata={"help": "Maximum number of train rollout trace files to dump in a single run (0 means no cap)."},
+    )
     debug_trace_question_ids: list[str] = field(
         default_factory=list,
         metadata={"help": "Optional question_id whitelist for trace dump. Empty means no whitelist."},
@@ -248,6 +273,26 @@ class CodeGRPOConfig(GRPOConfig):
     dump_train_traces: bool = field(
         default=False,
         metadata={"help": "Whether to dump per-question rollout traces during train mode as well."},
+    )
+    dump_eval_traces: bool = field(
+        default=False,
+        metadata={"help": "Whether to dump per-question rollout traces during eval mode."},
+    )
+    log_eval_trajectories: bool = field(
+        default=False,
+        metadata={"help": "Whether to log per-question eval trajectory summaries and node rewards to the console."},
+    )
+    log_train_rollout_details: bool = field(
+        default=False,
+        metadata={"help": "Whether to log per-question train rollout summaries and node rewards to the console."},
+    )
+    write_trainer_text_log: bool = field(
+        default=False,
+        metadata={"help": "Whether to write a duplicated plain-text trainer_events log in addition to jsonl."},
+    )
+    review_bundle_trace_sample_size: int = field(
+        default=2,
+        metadata={"help": "How many trace files to copy into review_bundle."},
     )
 
     def __post_init__(self):
@@ -266,6 +311,12 @@ class CodeGRPOConfig(GRPOConfig):
             )
         if self.eval_repeat_count < 1:
             raise ValueError("eval_repeat_count must be >= 1.")
+        if self.dump_train_trace_interval_steps == 0:
+            raise ValueError("dump_train_trace_interval_steps must be != 0.")
+        if self.max_train_trace_files < 0:
+            raise ValueError("max_train_trace_files must be >= 0.")
+        if self.review_bundle_trace_sample_size < 0:
+            raise ValueError("review_bundle_trace_sample_size must be >= 0.")
         if self.M_audit < 0 or self.M_retry < 0:
             raise ValueError("M_audit and M_retry must be non-negative.")
         if not (0.0 <= self.lambda_soft <= 1.0):
@@ -318,6 +369,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("max_completion_length_audit must be > 0 when provided.")
         if self.generation_temperature_code is not None and self.generation_temperature_code < 0.0:
             raise ValueError("generation_temperature_code must be >= 0 when provided.")
+        if self.eval_generation_temperature_code is not None and self.eval_generation_temperature_code < 0.0:
+            raise ValueError("eval_generation_temperature_code must be >= 0 when provided.")
         if self.generation_top_p_code is not None and not (0.0 < self.generation_top_p_code <= 1.0):
             raise ValueError("generation_top_p_code must be in (0, 1] when provided.")
         if self.generation_min_new_tokens_code < 0:

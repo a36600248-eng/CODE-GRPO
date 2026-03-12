@@ -108,6 +108,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._reward_window_interval_steps = self._resolve_reward_window_interval_steps()
         self._reward_window_buffers: dict[str, list[float]] = defaultdict(list)
         self._trace_dump_counter = 0
+        self._train_trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
@@ -166,6 +167,13 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _mean(values: list[float]) -> float:
         return sum(values) / len(values) if values else 0.0
 
+    @staticmethod
+    def _std(values: list[float]) -> float:
+        if len(values) <= 1:
+            return 0.0
+        mean_v = sum(values) / len(values)
+        return (sum((value - mean_v) ** 2 for value in values) / len(values)) ** 0.5
+
     def _unique_examples(self, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: dict[str, dict[str, Any]] = {}
         for idx, example in enumerate(inputs):
@@ -205,6 +213,18 @@ class CodeGRPOTrainer(GRPOTrainer):
             selected = rng.sample(selected, sample_size)
         return selected
 
+    def _should_dump_train_traces(self) -> bool:
+        if not bool(getattr(self.args, "dump_train_traces", False)):
+            return False
+        max_files = int(getattr(self.args, "max_train_trace_files", 0) or 0)
+        if max_files > 0 and self._train_trace_dump_counter >= max_files:
+            return False
+        interval = int(getattr(self.args, "dump_train_trace_interval_steps", 1) or 1)
+        interval = abs(interval)
+        if interval > 1 and int(self.state.global_step) % interval != 0:
+            return False
+        return True
+
     def _append_rollout_summaries(self, rollouts, mode: str):
         lines = []
         for rollout in rollouts:
@@ -218,7 +238,6 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "mean_R_reason": rollout.mean_R_reason,
                 "mean_pass_rate": rollout.mean_pass_rate,
                 **rollout.eval_metrics,
-                "eval_metrics": rollout.eval_metrics,
             }
             lines.append(json.dumps(payload, ensure_ascii=False))
         if lines:
@@ -330,6 +349,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                         example,
                         rng=random.Random(repeat_seed),
                     )
+                    rollout.repeat_idx = repeat_idx
                     rollouts.append(rollout)
             else:
                 rollout = self.tree_runner.run_question(
@@ -389,29 +409,51 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
-        for key in metric_keys:
-            value = self._mean([rollout.eval_metrics.get(key, 0.0) for rollout in rollouts])
-            self._metrics[mode][key].append(value)
-            merged_eval_metrics[key] = value
-        if "pass_at_k_round_n" in metric_keys:
-            merged_pass_at_k_round_n = self._mean([rollout.eval_metrics.get("pass_at_k_round_n", 0.0) for rollout in rollouts])
-            self._metrics[mode]["pass_at_k_round_n"].append(merged_pass_at_k_round_n)
-            merged_eval_metrics["pass_at_k_round_n"] = merged_pass_at_k_round_n
+        per_repeat_metric_values: dict[str, list[float]] = {}
+        if mode == "eval" and getattr(self.args, "eval_code_only_single_trajectory", True):
+            repeat_groups: dict[int, list[Any]] = {}
+            for rollout in rollouts:
+                repeat_idx = int(getattr(rollout, "repeat_idx", 0) or 0)
+                repeat_groups.setdefault(repeat_idx, []).append(rollout)
+            for key in metric_keys:
+                repeat_means = [
+                    self._mean([rollout.eval_metrics.get(key, 0.0) for rollout in group])
+                    for _repeat_idx, group in sorted(repeat_groups.items())
+                ]
+                per_repeat_metric_values[key] = repeat_means
+                value = self._mean(repeat_means)
+                value_std = self._std(repeat_means)
+                self._metrics[mode][key].append(value)
+                self._metrics[mode][f"{key}_std"].append(value_std)
+                merged_eval_metrics[key] = value
+                merged_eval_metrics[f"{key}_std"] = value_std
+        else:
+            for key in metric_keys:
+                value = self._mean([rollout.eval_metrics.get(key, 0.0) for rollout in rollouts])
+                self._metrics[mode][key].append(value)
+                merged_eval_metrics[key] = value
 
         if self.args.codegrpo_mode == "test":
             selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="test")
             self._dump_rollout_traces(selected_rollouts)
             logger.info("[TEST] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
         elif mode == "eval":
-            selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="eval")
-            self._dump_rollout_traces(selected_rollouts)
-            logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
-        else:
-            if self.args.dump_train_traces:
-                selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="train")
+            if self.args.dump_eval_traces:
+                selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="eval")
                 self._dump_rollout_traces(selected_rollouts)
+                logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
+        else:
+            if self._should_dump_train_traces():
+                selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="train")
+                max_files = int(getattr(self.args, "max_train_trace_files", 0) or 0)
+                if max_files > 0:
+                    remaining = max(0, max_files - self._train_trace_dump_counter)
+                    selected_rollouts = selected_rollouts[:remaining]
+                self._dump_rollout_traces(selected_rollouts)
+                self._train_trace_dump_counter += len(selected_rollouts)
                 logger.info("[TRAIN] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
-            logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
+            if bool(getattr(self.args, "log_train_rollout_details", False)):
+                logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
 
         if mode == "eval":
             self._last_eval_metrics = {

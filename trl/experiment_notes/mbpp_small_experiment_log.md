@@ -1703,3 +1703,263 @@ From the step-driven run on train `120` / eval `43`, the fixed code-only eval ch
 4. Training can remain epoch-driven, but eval should preferably stay step-based if trend visibility is important.
    - Epoch-driven train coverage is cleaner.
    - But eval only once per epoch gives too few checkpoints for diagnosis.
+
+### Infra note
+
+- Eval trace dumping is now disabled by default.
+  - Reason: code-only eval no longer needs per-question JSON dumps in normal runs.
+  - This keeps review bundles smaller and avoids mixing train trace diagnostics with eval artifacts.
+- Eval console logging is now also reduced.
+  - Code-only eval no longer prints per-question `[REWARD]` or `[EVAL_TREE]` lines by default.
+  - Console output should now focus on checkpoint-level eval metrics instead of rollout internals.
+
+## 2026-03-12 run: trainval-163 / test-241 / 3 epochs / baseline-enabled
+
+Run:
+- `20260312_003117__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+
+### Run shape
+
+- Training split: `163` MBPP trainval questions
+- Eval split: `241` MBPP test questions
+- Train schedule: `3` epochs
+- Effective trainer steps per epoch: about `326`
+- Total trainer steps: `978`
+- Eval cadence: every `60` steps
+- Eval repeat count: `3`
+
+### Raw base-model baseline under the same harness
+
+From `baseline_eval_results.json`:
+
+- `eval_pass_at_1_round_1 = 0.4813`
+- `eval_pass_at_1_round_2 = 0.5201`
+- `eval_pass_at_1 = 0.5201`
+- `eval_generation_format_ok_rate = 0.8396`
+
+This is important because it shows the current harness itself is already fairly strong for the raw Qwen2.5-Coder-7B-Instruct baseline. Earlier comparisons without this baseline were too noisy.
+
+### Eval checkpoints
+
+- step `60`
+  - `round_1 = 0.4965`
+  - `round_2 = 0.5173`
+  - `final = 0.5173`
+- step `120`
+  - `round_1 = 0.4841`
+  - `round_2 = 0.5076`
+  - `final = 0.5076`
+- step `180`
+  - `round_1 = 0.4924`
+  - `round_2 = 0.5187`
+  - `final = 0.5187`
+- step `240`
+  - `round_1 = 0.4703`
+  - `round_2 = 0.5159`
+  - `final = 0.5159`
+- step `300`
+  - `round_1 = 0.4896`
+  - `round_2 = 0.5270`
+  - `final = 0.5270`
+- step `360` (best checkpoint)
+  - `round_1 = 0.5090`
+  - `round_2 = 0.5436`
+  - `final = 0.5436`
+- step `420`
+  - `round_1 = 0.4855`
+  - `round_2 = 0.5214`
+  - `final = 0.5214`
+- step `480`
+  - `round_1 = 0.5021`
+  - `round_2 = 0.5339`
+  - `final = 0.5339`
+- step `540`
+  - `round_1 = 0.4813`
+  - `round_2 = 0.5187`
+  - `final = 0.5187`
+- step `600`
+  - `round_1 = 0.5035`
+  - `round_2 = 0.5367`
+  - `final = 0.5367`
+- step `660`
+  - `round_1 = 0.4952`
+  - `round_2 = 0.5270`
+  - `final = 0.5270`
+- step `720`
+  - `round_1 = 0.4855`
+  - `round_2 = 0.5214`
+  - `final = 0.5214`
+- step `780`
+  - `round_1 = 0.5090`
+  - `round_2 = 0.5367`
+  - `final = 0.5367`
+- step `840`
+  - `round_1 = 0.5007`
+  - `round_2 = 0.5311`
+  - `final = 0.5311`
+- step `900`
+  - `round_1 = 0.4869`
+  - `round_2 = 0.5173`
+  - `final = 0.5173`
+- step `960`
+  - `round_1 = 0.5007`
+  - `round_2 = 0.5297`
+  - `final = 0.5297`
+
+### Interpretation
+
+1. RL is helping, but only modestly.
+   - Best checkpoint (`step 360`) improves over raw base:
+     - round 1: `0.4813 -> 0.5090` (`+0.0277`)
+     - final: `0.5201 -> 0.5436` (`+0.0235`)
+   - This is a real gain, but much smaller than earlier impression-based conclusions.
+
+2. Second-round repair is now consistently useful, but the gain is still small.
+   - At most checkpoints:
+     - `round_2 > round_1`
+   - The typical gain is about `+0.02 ~ +0.04`
+   - This is much better than the earlier stage where round 2 often added nothing.
+
+3. The best checkpoint appears early relative to total training length.
+   - Best point is around `step 360`
+   - Later checkpoints oscillate around that level instead of clearly improving
+   - This strongly suggests we should select by best eval checkpoint rather than by final step.
+
+4. Eval formatting is stable enough and is no longer the limiting factor.
+   - `eval_generation_format_ok_rate` stays in roughly the `0.84 ~ 0.86` band.
+
+5. Remaining problem is not parser stability; it is still code quality and soft-reward optimism.
+   - There are still training cases with:
+     - `pass_rate = 0`
+     - but `mean_R_soft_effective` very high
+   - So the residual optimism issue is still real, though it is no longer a catastrophic blocker.
+
+### Practical takeaways
+
+1. Keep the code-only eval harness.
+   - It is now finally informative.
+
+2. Do not judge progress by the final checkpoint.
+   - Best checkpoint selection is necessary.
+
+3. Do not increase tree depth yet.
+   - Round 2 already adds a little value now.
+   - The bigger gain target is still round-1 code quality.
+
+4. The current training schedule is probably longer than necessary.
+   - Since the best checkpoint is already around `step 360`, a shorter run may be sufficient for iteration speed.
+
+## Eval repeat statistics and reporting update
+
+### Why this was added
+
+The fixed eval now uses:
+- `241` held-out questions
+- repeated evaluation runs per checkpoint (`eval_repeat_count`)
+
+Flattening all repeats into one mean is numerically valid, but it hides repeat-to-repeat variance. For analysis and paper-style reporting, the more useful quantity is:
+- mean across eval repeats
+- standard deviation across eval repeats
+
+### What is now logged
+
+For code-only eval metrics, the trainer now records:
+- `eval_pass_at_1_round_k`
+- `eval_pass_at_1_round_k_std`
+
+and likewise for the other eval-side metrics produced by the code-only trajectory evaluator.
+
+### Plotting update
+
+`review_bundle/plots/eval_pass_at_1_by_round.png` now uses:
+- trainer step / eval checkpoint on the x-axis
+- one line per repair horizon (`<= round k`)
+- shaded bands for `mean +/- std` when eval repeats are enabled
+
+### Important evaluation note
+
+At this stage, the `241`-question MBPP test split is being used as model-selection eval during training. That is acceptable for internal iteration, but it means this split is no longer an untouched final test set in the strict academic sense.
+
+## Logging and review bundle slimming
+
+To keep future runs readable and easier to share:
+
+- trainer step logs are now recorded every `5` steps instead of every step
+- duplicated plain-text trainer logs are disabled by default
+- train rollout traces are dumped sparsely instead of effectively every step
+- rollout summary jsonl no longer duplicates the same eval metrics in nested form
+- `review_bundle` now keeps only the compact essentials:
+  - `trainer_events_rank*.jsonl`
+  - `rollout_summary_rank*.jsonl`
+  - result json files
+  - generated plots
+  - a very small sampled set of traces
+
+Verbose runtime logs and duplicated text logs still remain in the full run directory when needed for debugging, but they are no longer copied into `review_bundle` by default.
+
+## Follow-up config decision after the baseline-aligned run
+
+### Best-checkpoint policy
+
+The next training runs should not keep `save_strategy = "no"`.
+
+Reason:
+- We now know the best model is not the final one.
+- In the latest larger-split run, the best eval point was around `step 360`, while later checkpoints oscillated below it.
+
+So the config is updated to:
+- save every eval point
+- keep only a small number of checkpoints
+- reload the best model at the end
+
+Target metric:
+- `eval_pass_at_1`
+
+### Eval-round extension
+
+Training still uses:
+- `T_max = 2`
+
+But eval now gets an independent override:
+- `eval_T_max_override = 5`
+
+Reason:
+- The method is explicitly multi-round.
+- Even if training only exposes two repair rounds, code-only eval should also measure whether the learned policy remains useful under longer repair horizons.
+- This is especially important for comparison with vanilla GRPO, because the current method may not dominate on first-round pass@1 but may still benefit more from multi-round repair.
+
+The intended readout now becomes:
+- `eval_pass_at_1_round_1`
+- `eval_pass_at_1_round_2`
+- ...
+- `eval_pass_at_1_round_5`
+
+These are cumulative solve rates within `<= r` repair rounds.
+
+## Plot exports for paper-style inspection
+
+The review bundle now auto-generates:
+
+- `plots/train_reward_curves.png`
+  - training-side curves for:
+    - `R_code`
+    - `R_reason`
+    - `R_soft_effective`
+- `plots/eval_pass_at_1_by_round.png`
+  - eval curves for:
+    - `pass@1 within <= round 1`
+    - `pass@1 within <= round 2`
+    - ...
+    - up to the configured eval repair horizon
+
+This is acceptable for paper-style reporting if:
+- the eval set is fixed,
+- the metric definition is explicitly stated,
+- and final claims are backed by multiple seeds (mean/std), not just one run.
+
+For internal iteration this plotting setup is sufficient and much easier to read than raw jsonl logs.
+## Eval Policy Update (2026-03-12)
+- Eval now uses a single deterministic run per checkpoint: `eval_repeat_count = 1`.
+- Code-only eval generation now uses `eval_generation_temperature_code = 0.0`.
+- This makes checkpoint selection cleaner and shifts variance estimation to external multi-seed runs.
+- Going forward, report `mean ¡À std` across independent experiment seeds instead of repeated eval sampling within one run.

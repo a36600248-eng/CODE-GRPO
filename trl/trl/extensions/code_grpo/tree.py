@@ -192,12 +192,15 @@ class CodeGRPOTreeRunner:
     def _audit_completion_length(self) -> int:
         return int(getattr(self.args, "max_completion_length_audit", None) or self.args.max_completion_length)
 
-    def _code_generation_kwargs(self) -> dict[str, Any]:
+    def _code_generation_kwargs(self, *, eval_mode: bool = False) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"max_new_tokens": self._code_completion_length()}
         min_new_tokens = int(getattr(self.args, "generation_min_new_tokens_code", 0) or 0)
         if min_new_tokens > 0:
             kwargs["min_new_tokens"] = min_new_tokens
-        temperature = getattr(self.args, "generation_temperature_code", None)
+        temperature_attr = "eval_generation_temperature_code" if eval_mode else "generation_temperature_code"
+        temperature = getattr(self.args, temperature_attr, None)
+        if temperature is None:
+            temperature = getattr(self.args, "generation_temperature_code", None)
         if temperature is not None:
             kwargs["temperature"] = float(temperature)
         top_p = getattr(self.args, "generation_top_p_code", None)
@@ -205,12 +208,18 @@ class CodeGRPOTreeRunner:
             kwargs["top_p"] = float(top_p)
         return kwargs
 
-    def _retry_empty_generation_outputs(self, prompt_text: str, raw_outputs: list[str]) -> list[str]:
+    def _retry_empty_generation_outputs(
+        self,
+        prompt_text: str,
+        raw_outputs: list[str],
+        *,
+        generation_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
         retry_count = int(getattr(self.args, "generation_empty_retry_count", 0) or 0)
         if retry_count <= 0 or not raw_outputs:
             return raw_outputs
         fixed = list(raw_outputs)
-        gen_kwargs = self._code_generation_kwargs()
+        gen_kwargs = dict(generation_kwargs or self._code_generation_kwargs())
         for idx, raw_output in enumerate(fixed):
             if (raw_output or "").strip():
                 continue
@@ -744,22 +753,24 @@ class CodeGRPOTreeRunner:
                             rounds.append(self._build_round_record(final_round_idx, final_round_nodes, stage="final_reason"))
                         if any(node.pass_rate == 1.0 and node.R_reason == 1.0 for node in final_round_nodes):
                             solved = True
-                    self.logger.info(
-                        "[TREE] final_reason_stage search_round=%d pass_nodes=%d reason_parents=%d generated=%d",
-                        round_idx,
-                        len(code_pass_nodes),
-                        len(final_reason_parents),
-                        len(final_round_nodes),
-                    )
+                    if bool(getattr(self.args, "log_train_rollout_details", False)):
+                        self.logger.info(
+                            "[TREE] final_reason_stage search_round=%d pass_nodes=%d reason_parents=%d generated=%d",
+                            round_idx,
+                            len(code_pass_nodes),
+                            len(final_reason_parents),
+                            len(final_round_nodes),
+                        )
                     break
 
                 frontier = [node for node in code_pass_nodes if not (node.frozen_code and node.frozen_reason)]
-                self.logger.info(
-                    "[TREE] passed_code_continue search_round=%d pass_nodes=%d next_frontier=%d",
-                    round_idx,
-                    len(code_pass_nodes),
-                    len(frontier),
-                )
+                if bool(getattr(self.args, "log_train_rollout_details", False)):
+                    self.logger.info(
+                        "[TREE] passed_code_continue search_round=%d pass_nodes=%d next_frontier=%d",
+                        round_idx,
+                        len(code_pass_nodes),
+                        len(frontier),
+                    )
                 if not frontier:
                     break
                 continue
@@ -929,15 +940,16 @@ class CodeGRPOTreeRunner:
                 }
             )
 
-        self.logger.info(
-            "[TREE] question_id=%s rounds=%d node_count=%d final_reason_node_count=%d resample_count=%d solved=%s",
-            question_id,
-            len(rounds),
-            node_count,
-            final_reason_node_count,
-            resample_count,
-            solved,
-        )
+        if bool(getattr(self.args, "log_train_rollout_details", False)):
+            self.logger.info(
+                "[TREE] question_id=%s rounds=%d node_count=%d final_reason_node_count=%d resample_count=%d solved=%s",
+                question_id,
+                len(rounds),
+                node_count,
+                final_reason_node_count,
+                resample_count,
+                solved,
+            )
 
         eval_metrics["final_reason_node_count"] = float(final_reason_node_count)
 
@@ -960,6 +972,7 @@ class CodeGRPOTreeRunner:
         question_id = str(sample["question_id"])
         prompt = str(sample["prompt"])
         test_cases = list(sample["test_cases"])
+        eval_max_rounds = int(getattr(self.args, "eval_T_max_override", 0) or self.args.T_max)
 
         root = Node(node_id="root", parent_id=None, round_idx=0, code=None, reasoning=None, exec_summary={"history": []})
         parent = root
@@ -968,7 +981,7 @@ class CodeGRPOTreeRunner:
         node_count = 0
         node_serial = 0
 
-        for round_idx in range(1, self.args.T_max + 1):
+        for round_idx in range(1, eval_max_rounds + 1):
             node_serial += 1
             child = self._generate_node(
                 question_id=question_id,
@@ -978,6 +991,8 @@ class CodeGRPOTreeRunner:
                 test_cases=test_cases,
                 audit_indices=[],
                 round_idx=round_idx,
+                generation_kwargs_override=self._code_generation_kwargs(eval_mode=True),
+                log_reward=bool(getattr(self.args, "log_eval_trajectories", False)),
             )
             collected_nodes.append(child)
             rounds.append(self._build_round_record(round_idx, [child], stage="search"))
@@ -1023,13 +1038,14 @@ class CodeGRPOTreeRunner:
                 }
             )
 
-        self.logger.info(
-            "[EVAL_TREE] question_id=%s rounds=%d node_count=%d solved=%s",
-            question_id,
-            len(rounds),
-            node_count,
-            any(node.pass_rate == 1.0 for node in collected_nodes),
-        )
+        if getattr(self.args, "log_eval_trajectories", False):
+            self.logger.info(
+                "[EVAL_TRAJECTORY] question_id=%s rounds=%d node_count=%d solved=%s",
+                question_id,
+                len(rounds),
+                node_count,
+                any(node.pass_rate == 1.0 for node in collected_nodes),
+            )
 
         return QuestionRollout(
             question_id=question_id,
@@ -1082,12 +1098,17 @@ class CodeGRPOTreeRunner:
             )
             rendered_prompt_text = self._render_prompt_with_chat_template(prompt_text)
 
+            generation_kwargs = self._code_generation_kwargs()
             raw_outputs = self.backend.generate_many(
                 [rendered_prompt_text],
                 num_generations=to_generate,
-                **self._code_generation_kwargs(),
+                **generation_kwargs,
             )
-            raw_outputs = self._retry_empty_generation_outputs(rendered_prompt_text, raw_outputs)
+            raw_outputs = self._retry_empty_generation_outputs(
+                rendered_prompt_text,
+                raw_outputs,
+                generation_kwargs=generation_kwargs,
+            )
             siblings: list[Node] = []
             for raw_output in raw_outputs:
                 node_serial += 1
@@ -1109,12 +1130,13 @@ class CodeGRPOTreeRunner:
             # Group-level retry: if all siblings are double-zero, drop the whole group and resample.
             if siblings and all(_is_double_zero_node(node) for node in siblings) and retry_idx < self.args.M_retry:
                 resample_count += 1
-                self.logger.info(
-                    "[TREE] resample parent=%s round=%d retry=%d reason=all_double_zero",
-                    parent.node_id,
-                    round_idx,
-                    retry_idx + 1,
-                )
+                if bool(getattr(self.args, "log_train_rollout_details", False)):
+                    self.logger.info(
+                        "[TREE] resample parent=%s round=%d retry=%d reason=all_double_zero",
+                        parent.node_id,
+                        round_idx,
+                        retry_idx + 1,
+                    )
                 continue
 
             accepted = siblings
@@ -1137,6 +1159,8 @@ class CodeGRPOTreeRunner:
         prompt_text_override: str | None = None,
         prompt_text_raw_override: str | None = None,
         raw_output_override: str | None = None,
+        generation_kwargs_override: dict[str, Any] | None = None,
+        log_reward: bool = False,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
         context_history = history[-self.args.context_round_window :]
@@ -1160,10 +1184,14 @@ class CodeGRPOTreeRunner:
         raw_output = (
             raw_output_override
             if raw_output_override is not None
-            else self.backend.generate(prompt_text, **self._code_generation_kwargs())
+            else self.backend.generate(prompt_text, **(generation_kwargs_override or self._code_generation_kwargs()))
         )
         if raw_output_override is None and not (raw_output or "").strip():
-            retried_outputs = self._retry_empty_generation_outputs(prompt_text, [raw_output])
+            retried_outputs = self._retry_empty_generation_outputs(
+                prompt_text,
+                [raw_output],
+                generation_kwargs=generation_kwargs_override,
+            )
             raw_output = retried_outputs[0] if retried_outputs else raw_output
         parsed_code, parsed_reason, parsed_logic_prediction, parsed_exec_prediction, generation_format_ok = (
             parse_generation_response(
@@ -1586,20 +1614,21 @@ class CodeGRPOTreeRunner:
             reason_token_mask=reason_mask,
             prompt_text=prompt_text,
         )
-        self.logger.info(
-            "[REWARD] node=%s pass_rate=%.4f R_code=%.4f R_reason=%.4f "
-            "R_soft_raw=%.4f R_soft_match=%.4f R_soft_effective=%.4f compile=%.2f gen_fmt=%.2f soft_eligible=%s",
-            child.node_id,
-            child.pass_rate,
-            child.R_code,
-            child.R_reason,
-            R_soft,
-            R_soft_match_raw,
-            R_soft_effective,
-            compile_score,
-            generation_format_score,
-            soft_reward_eligible,
-        )
+        if log_reward:
+            self.logger.info(
+                "[REWARD] node=%s pass_rate=%.4f R_code=%.4f R_reason=%.4f "
+                "R_soft_raw=%.4f R_soft_match=%.4f R_soft_effective=%.4f compile=%.2f gen_fmt=%.2f soft_eligible=%s",
+                child.node_id,
+                child.pass_rate,
+                child.R_code,
+                child.R_reason,
+                R_soft,
+                R_soft_match_raw,
+                R_soft_effective,
+                compile_score,
+                generation_format_score,
+                soft_reward_eligible,
+            )
         return child
 
     def _assign_group_advantages(self, siblings: list[Node], update_exec_baseline: bool = True) -> None:
@@ -1771,7 +1800,8 @@ class CodeGRPOTreeRunner:
         flat_nodes = [round_item["nodes"][0] for round_item in eval_rounds if round_item.get("nodes")]
         cumulative_solved = False
         cumulative_best = 0.0
-        max_rounds = max(int(self.args.T_max), len(flat_nodes))
+        eval_max_rounds = int(getattr(self.args, "eval_T_max_override", 0) or self.args.T_max)
+        max_rounds = max(eval_max_rounds, len(flat_nodes))
 
         for round_idx in range(1, max_rounds + 1):
             if round_idx <= len(flat_nodes):

@@ -162,16 +162,19 @@ def _attach_runtime_file_logger(log_path: str):
 class TextMetricsCallback(TrainerCallback):
     """Persist train/eval metrics to plain text and jsonl files."""
 
-    def __init__(self, text_path: str, jsonl_path: str):
+    def __init__(self, text_path: str | None, jsonl_path: str):
         self.text_path = text_path
         self.jsonl_path = jsonl_path
-        os.makedirs(os.path.dirname(self.text_path), exist_ok=True)
+        target_dir = os.path.dirname(self.text_path) if self.text_path else os.path.dirname(self.jsonl_path)
+        os.makedirs(target_dir, exist_ok=True)
 
     @staticmethod
     def _now() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _append_text(self, line: str):
+        if not self.text_path:
+            return
         with open(self.text_path, "a", encoding="utf-8") as handle:
             handle.write(line.rstrip() + "\n")
 
@@ -243,8 +246,6 @@ def _write_run_index(path: str, run_layout: dict[str, str], rank: int):
         f"- review bundle: {os.path.join(run_layout['run_root'], 'review_bundle')}",
         "",
         "Most useful files:",
-        f"- runtime log: {os.path.join(run_layout['logs_dir'], f'runtime_rank{rank}.txt')}",
-        f"- trainer text log: {os.path.join(run_layout['logs_dir'], f'trainer_events_rank{rank}.txt')}",
         f"- trainer jsonl log: {os.path.join(run_layout['logs_dir'], f'trainer_events_rank{rank}.jsonl')}",
         f"- rollout summary: {os.path.join(run_layout['logs_dir'], f'rollout_summary_rank{rank}.jsonl')}",
         f"- traces: {os.path.join(run_layout['traces_dir'], '*.json')}",
@@ -252,10 +253,10 @@ def _write_run_index(path: str, run_layout: dict[str, str], rank: int):
         f"- trainer state / checkpoints / saved model: {run_layout['artifacts_dir']}",
         "",
         "Reading order:",
-        "1. trainer_events_rank*.txt  -> step-level loss and metrics",
+        "1. trainer_events_rank*.jsonl -> step-level loss and metrics",
         "2. rollout_summary_rank*.jsonl -> per-question summary",
-        "3. traces/*.json -> full tree and audit details for sampled questions",
-        "4. runtime_rank*.txt -> raw runtime log",
+        "3. plots/*.png -> compact trend visualization",
+        "4. traces/*.json -> sampled detailed traces when needed",
     ]
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -268,14 +269,145 @@ def _copy_if_exists(src: str, dst: str):
     shutil.copy2(src, dst)
 
 
-def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_size: int = 3):
+def _load_jsonl_rows(path: str) -> list[dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    rows: list[dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def _generate_review_plots(bundle_root: str, logs_bundle: str, artifacts_bundle: str, rank: int):
+    plots_dir = os.path.join(bundle_root, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - plotting is optional at runtime
+        with open(os.path.join(plots_dir, "PLOTS_DISABLED.txt"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "Plot generation skipped because matplotlib is unavailable.\n"
+                f"Reason: {type(exc).__name__}: {exc}\n"
+            )
+        return
+
+    trainer_jsonl = os.path.join(logs_bundle, f"trainer_events_rank{rank}.jsonl")
+    rows = _load_jsonl_rows(trainer_jsonl)
+    if not rows:
+        with open(os.path.join(plots_dir, "PLOTS_DISABLED.txt"), "w", encoding="utf-8") as handle:
+            handle.write("Plot generation skipped because trainer_events_rank*.jsonl was not found or was empty.\n")
+        return
+
+    train_rows = [row for row in rows if isinstance(row.get("logs"), dict) and "loss" in row["logs"]]
+    eval_rows = [row for row in rows if isinstance(row.get("logs"), dict) and "eval_pass_at_1_round_1" in row["logs"]]
+
+    # 1. Training reward curves
+    reward_key_candidates = {
+        "R_code": ["window/mean_R_code", "mean_R_code"],
+        "R_reason": ["window/mean_R_reason", "mean_R_reason"],
+        "R_soft_effective": ["window/mean_R_soft_effective", "mean_R_soft_effective"],
+    }
+    fig, ax = plt.subplots(figsize=(9, 5))
+    plotted = False
+    for label, candidates in reward_key_candidates.items():
+        points: list[tuple[int, float]] = []
+        for row in train_rows:
+            logs = row["logs"]
+            value = None
+            for key in candidates:
+                if key in logs:
+                    value = logs[key]
+                    break
+            if value is None:
+                continue
+            points.append((int(row.get("step", 0)), float(value)))
+        if points:
+            ax.plot([p[0] for p in points], [p[1] for p in points], label=label)
+            plotted = True
+    if plotted:
+        ax.set_title("Training Reward Curves")
+        ax.set_xlabel("Trainer step")
+        ax.set_ylabel("Reward")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(plots_dir, "train_reward_curves.png"), dpi=180)
+    plt.close(fig)
+
+    # 2. Eval pass@1 by repair round
+    eval_round_keys: dict[int, str] = {}
+    for row in eval_rows:
+        for key in row["logs"].keys():
+            match = re.fullmatch(r"eval_pass_at_1_round_(\d+)", key)
+            if match:
+                eval_round_keys[int(match.group(1))] = key
+    fig, ax = plt.subplots(figsize=(9, 5))
+    plotted = False
+    for round_idx in sorted(eval_round_keys.keys()):
+        key = eval_round_keys[round_idx]
+        std_key = f"{key}_std"
+        points = [(int(row.get("step", 0)), float(row["logs"][key])) for row in eval_rows if key in row["logs"]]
+        if not points:
+            continue
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        ax.plot(xs, ys, marker="o", label=f"<= round {round_idx}")
+        if any(std_key in row["logs"] for row in eval_rows):
+            std_points = [
+                (int(row.get("step", 0)), float(row["logs"].get(std_key, 0.0)))
+                for row in eval_rows
+                if key in row["logs"]
+            ]
+            if len(std_points) == len(points):
+                stds = [p[1] for p in std_points]
+                lower = [max(0.0, y - s) for y, s in zip(ys, stds)]
+                upper = [min(1.0, y + s) for y, s in zip(ys, stds)]
+                ax.fill_between(xs, lower, upper, alpha=0.12)
+        plotted = True
+    if plotted:
+        ax.set_title("Eval Pass@1 by Repair Round (mean +/- std)")
+        ax.set_xlabel("Trainer step")
+        ax.set_ylabel("Solve rate")
+        ax.set_ylim(0.0, 1.0)
+        ax.grid(alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(plots_dir, "eval_pass_at_1_by_round.png"), dpi=180)
+    plt.close(fig)
+
+    # 3. Optional baseline summary for plotting consumers
+    baseline_path = os.path.join(artifacts_bundle, "baseline_eval_results.json")
+    if os.path.exists(baseline_path):
+        try:
+            with open(baseline_path, "r", encoding="utf-8") as handle:
+                baseline = json.load(handle)
+            with open(os.path.join(plots_dir, "baseline_plot_points.json"), "w", encoding="utf-8") as handle:
+                json.dump(baseline, handle, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_size: int = 2):
     bundle_root = os.path.join(run_layout["run_root"], "review_bundle")
     logs_bundle = os.path.join(bundle_root, "logs")
     traces_bundle = os.path.join(bundle_root, "traces")
     artifacts_bundle = os.path.join(bundle_root, "artifacts")
+    plots_bundle = os.path.join(bundle_root, "plots")
     os.makedirs(logs_bundle, exist_ok=True)
     os.makedirs(traces_bundle, exist_ok=True)
     os.makedirs(artifacts_bundle, exist_ok=True)
+    os.makedirs(plots_bundle, exist_ok=True)
 
     # Core metadata
     _copy_if_exists(os.path.join(run_layout["run_root"], "RUN_INDEX.txt"), os.path.join(bundle_root, "RUN_INDEX.txt"))
@@ -286,8 +418,6 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
 
     # Logs
     for filename in (
-        f"runtime_rank{rank}.txt",
-        f"trainer_events_rank{rank}.txt",
         f"trainer_events_rank{rank}.jsonl",
         f"rollout_summary_rank{rank}.jsonl",
         "test_metrics.txt",
@@ -328,14 +458,22 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
         "",
         "Included:",
         "- RUN_INDEX.txt and run_manifest.json",
-        "- plain-text and jsonl logs",
+        "- compact jsonl logs",
+        "- plots/train_reward_curves.png",
+        "- plots/eval_pass_at_1_by_round.png (mean +/- std across eval repeats, if repeats are enabled)",
         "- trainer state / result json files",
-        "- a random sample of rollout trace json files",
+        "- a small sampled set of rollout trace json files",
         "",
-        "If a requested file is missing here, it was not produced in this run.",
+        "Not included on purpose:",
+        "- verbose runtime log",
+        "- duplicated plain-text trainer log",
+        "- full trace dump",
+        "",
+        "If a requested file is missing here, it was either not produced or intentionally omitted for compactness.",
     ]
     with open(os.path.join(bundle_root, "README.txt"), "w", encoding="utf-8") as handle:
         handle.write("\n".join(bundle_note) + "\n")
+    _generate_review_plots(bundle_root, logs_bundle, artifacts_bundle, rank)
 
 
 @dataclass
@@ -424,7 +562,12 @@ def main(script_args, training_args, model_args, dataset_args):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         peft_config=get_peft_config(model_args),
-        callbacks=[TextMetricsCallback(trainer_text_log_path, trainer_jsonl_path)],
+        callbacks=[
+            TextMetricsCallback(
+                trainer_text_log_path if getattr(training_args, "write_trainer_text_log", False) else None,
+                trainer_jsonl_path,
+            )
+        ],
     )
 
     if (
@@ -453,7 +596,11 @@ def main(script_args, training_args, model_args, dataset_args):
         if rank == 0:
             with open(os.path.join(run_layout["logs_dir"], "test_metrics.txt"), "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(_json_safe(metrics), ensure_ascii=False) + "\n")
-            _build_review_bundle(run_layout, rank)
+            _build_review_bundle(
+                run_layout,
+                rank,
+                trace_sample_size=int(getattr(training_args, "review_bundle_trace_sample_size", 2)),
+            )
         trainer.accelerator.print(metrics)
         trainer.accelerator.print("CodeGRPO test mode completed.")
         return
@@ -466,7 +613,11 @@ def main(script_args, training_args, model_args, dataset_args):
     trainer.save_model(training_args.output_dir)
     trainer.accelerator.print(f"Model saved to {training_args.output_dir}.")
     if rank == 0:
-        _build_review_bundle(run_layout, rank)
+        _build_review_bundle(
+            run_layout,
+            rank,
+            trace_sample_size=int(getattr(training_args, "review_bundle_trace_sample_size", 2)),
+        )
 
     if training_args.push_to_hub:
         trainer.push_to_hub(dataset_name=script_args.dataset_name)

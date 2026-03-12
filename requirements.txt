@@ -18,4 +18,5 @@ sentencepiece>=0.2.0
 safetensors>=0.4.0
 pyyaml>=6.0
 tensorboard>=2.14.0
+matplotlib>=3.8.0
 pytest>=8.0.0
