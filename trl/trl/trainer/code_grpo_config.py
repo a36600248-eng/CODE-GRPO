@@ -249,6 +249,15 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    tensorboard_root_dir: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional external TensorBoard root directory. When set, event files are written to "
+                "<tensorboard_root_dir>/<mode>/<run_id> instead of <run_root>/tensorboard."
+            )
+        },
+    )
 
     debug_trace_dir: str = field(
         default="traces/rollout",
@@ -289,6 +298,14 @@ class CodeGRPOConfig(GRPOConfig):
     write_trainer_text_log: bool = field(
         default=False,
         metadata={"help": "Whether to write a duplicated plain-text trainer_events log in addition to jsonl."},
+    )
+    log_reward_losses: bool = field(
+        default=False,
+        metadata={"help": "Whether to print per-step loss_code/loss_reason messages to the console."},
+    )
+    log_trace_dump_events: bool = field(
+        default=False,
+        metadata={"help": "Whether to print trace dump count messages to the console."},
     )
     review_bundle_trace_sample_size: int = field(
         default=2,

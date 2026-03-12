@@ -1,5 +1,6 @@
 output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo
 report_to: tensorboard
+tensorboard_root_dir: /root/tf-logs/CODE-GRPO
 logging_steps: 5
 save_strategy: "steps"
 save_steps: 60
@@ -103,6 +104,8 @@ dump_eval_traces: false
 log_eval_trajectories: false
 log_train_rollout_details: false
 write_trainer_text_log: false
+log_reward_losses: false
+log_trace_dump_events: false
 debug_trace_dir: traces/rollout
 debug_trace_sample_size: 2
 dump_train_trace_interval_steps: 120

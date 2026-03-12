@@ -436,12 +436,14 @@ class CodeGRPOTrainer(GRPOTrainer):
         if self.args.codegrpo_mode == "test":
             selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="test")
             self._dump_rollout_traces(selected_rollouts)
-            logger.info("[TEST] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
+            if bool(getattr(self.args, "log_trace_dump_events", False)):
+                logger.info("[TEST] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
         elif mode == "eval":
             if self.args.dump_eval_traces:
                 selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="eval")
                 self._dump_rollout_traces(selected_rollouts)
-                logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
+                if bool(getattr(self.args, "log_trace_dump_events", False)):
+                    logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
         else:
             if self._should_dump_train_traces():
                 selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="train")
@@ -451,7 +453,8 @@ class CodeGRPOTrainer(GRPOTrainer):
                     selected_rollouts = selected_rollouts[:remaining]
                 self._dump_rollout_traces(selected_rollouts)
                 self._train_trace_dump_counter += len(selected_rollouts)
-                logger.info("[TRAIN] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
+                if bool(getattr(self.args, "log_trace_dump_events", False)):
+                    logger.info("[TRAIN] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
             if bool(getattr(self.args, "log_train_rollout_details", False)):
                 logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
 
@@ -514,12 +517,13 @@ class CodeGRPOTrainer(GRPOTrainer):
         gathered_loss_reason = self.accelerator.gather(loss_reason.detach()).float().mean().item()
         self._metrics[mode]["loss_code"].append(gathered_loss_code)
         self._metrics[mode]["loss_reason"].append(gathered_loss_reason)
-        logger.info(
-            "[REWARD] loss_code=%.6f loss_reason=%.6f beta_reason=%.4f",
-            gathered_loss_code,
-            gathered_loss_reason,
-            self.args.beta_reason,
-        )
+        if bool(getattr(self.args, "log_reward_losses", False)):
+            logger.info(
+                "[REWARD] loss_code=%.6f loss_reason=%.6f beta_reason=%.4f",
+                gathered_loss_code,
+                gathered_loss_reason,
+                self.args.beta_reason,
+            )
         return loss
 
     def evaluate(self, *args, **kwargs):

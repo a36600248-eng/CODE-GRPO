@@ -113,7 +113,11 @@ def _configure_run_layout(script_args, training_args, model_args, dataset_args) 
     artifacts_dir = os.path.join(run_root, "test_out" if mode == "test" else "train_out")
     logs_dir = os.path.join(run_root, "logs")
     traces_dir = os.path.join(run_root, "traces", "rollout")
-    tensorboard_dir = os.path.join(run_root, "tensorboard")
+    tensorboard_root_dir = getattr(training_args, "tensorboard_root_dir", None)
+    if tensorboard_root_dir:
+        tensorboard_dir = os.path.join(os.path.abspath(tensorboard_root_dir), mode, run_id)
+    else:
+        tensorboard_dir = os.path.join(run_root, "tensorboard")
     for path in (run_root, artifacts_dir, logs_dir, traces_dir, tensorboard_dir):
         os.makedirs(path, exist_ok=True)
 
