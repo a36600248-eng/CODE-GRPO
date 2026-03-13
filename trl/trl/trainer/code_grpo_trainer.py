@@ -111,6 +111,8 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._trace_dump_counter = 0
         self._train_trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
+        self._last_weight_probe_step: int | None = None
+        self._last_weight_probe_metrics: dict[str, float] = {}
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
@@ -170,6 +172,103 @@ class CodeGRPOTrainer(GRPOTrainer):
                 payload[target_key] = self._window_mean(values)
         self._reward_window_buffers.clear()
         return payload
+
+    @staticmethod
+    def _select_probe_parameter(named_parameters, preferred_substrings: list[str]):
+        for preferred in preferred_substrings:
+            for name, parameter in named_parameters:
+                if preferred in name:
+                    return name, parameter
+        if named_parameters:
+            return named_parameters[0]
+        return None, None
+
+    @staticmethod
+    def _tensor_probe_metrics(parameter: torch.Tensor, prefix: str) -> dict[str, float]:
+        flat = parameter.detach().float().reshape(-1)
+        if flat.numel() == 0:
+            return {
+                f"{prefix}_sample_sum": 0.0,
+                f"{prefix}_sample_abs_mean": 0.0,
+                f"{prefix}_sample_abs_max": 0.0,
+            }
+        sample = flat[: min(1024, flat.numel())]
+        return {
+            f"{prefix}_sample_sum": float(sample.sum().item()),
+            f"{prefix}_sample_abs_mean": float(sample.abs().mean().item()),
+            f"{prefix}_sample_abs_max": float(sample.abs().max().item()),
+        }
+
+    def _get_vllm_probe_model(self):
+        vllm_generation = getattr(self, "vllm_generation", None)
+        llm = getattr(vllm_generation, "llm", None)
+        llm_engine = getattr(llm, "llm_engine", None)
+        model_executor = getattr(llm_engine, "model_executor", None)
+        driver_worker = getattr(model_executor, "driver_worker", None)
+        if driver_worker is None:
+            workers = getattr(model_executor, "workers", None)
+            if workers:
+                driver_worker = workers[0]
+        model_runner = getattr(driver_worker, "model_runner", None)
+        return getattr(model_runner, "model", None)
+
+    def _collect_eval_weight_probe_metrics(self) -> dict[str, float]:
+        current_step = int(self.state.global_step)
+        if self._last_weight_probe_step == current_step and self._last_weight_probe_metrics:
+            return dict(self._last_weight_probe_metrics)
+
+        metrics: dict[str, float] = {
+            "probe_hf_lora_found": 0.0,
+            "probe_vllm_qproj_found": 0.0,
+        }
+        hf_probe_name = ""
+        vllm_probe_name = ""
+
+        model_for_probe = self.accelerator.unwrap_model(self.model)
+        hf_named_parameters = list(model_for_probe.named_parameters())
+        hf_probe_name, hf_parameter = self._select_probe_parameter(
+            hf_named_parameters,
+            [
+                "layers.0.self_attn.q_proj.lora_B.default.weight",
+                "layers.0.self_attn.q_proj.lora_B.weight",
+                "lora_B.default.weight",
+                "lora_B.weight",
+            ],
+        )
+        if hf_parameter is not None:
+            metrics["probe_hf_lora_found"] = 1.0
+            metrics.update(self._tensor_probe_metrics(hf_parameter, "probe_hf_lora"))
+
+        if getattr(self, "use_vllm", False):
+            vllm_model = self._get_vllm_probe_model()
+            if vllm_model is not None:
+                vllm_named_parameters = list(vllm_model.named_parameters())
+                vllm_probe_name, vllm_parameter = self._select_probe_parameter(
+                    vllm_named_parameters,
+                    [
+                        "model.layers.0.self_attn.q_proj.weight",
+                        "layers.0.self_attn.q_proj.weight",
+                        "self_attn.q_proj.weight",
+                    ],
+                )
+                if vllm_parameter is not None:
+                    metrics["probe_vllm_qproj_found"] = 1.0
+                    metrics.update(self._tensor_probe_metrics(vllm_parameter, "probe_vllm_qproj"))
+
+        logger.info(
+            "[WEIGHT_PROBE] step=%s hf_name=%s hf_sum=%.8f hf_abs_mean=%.8f vllm_name=%s vllm_sum=%.8f vllm_abs_mean=%.8f",
+            current_step,
+            hf_probe_name or "<missing>",
+            metrics.get("probe_hf_lora_sample_sum", 0.0),
+            metrics.get("probe_hf_lora_sample_abs_mean", 0.0),
+            vllm_probe_name or "<missing>",
+            metrics.get("probe_vllm_qproj_sample_sum", 0.0),
+            metrics.get("probe_vllm_qproj_sample_abs_mean", 0.0),
+        )
+
+        self._last_weight_probe_step = current_step
+        self._last_weight_probe_metrics = dict(metrics)
+        return dict(metrics)
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
@@ -347,6 +446,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         examples = self._unique_examples(inputs)
         rollout_t0 = time.perf_counter()
         self._maybe_sync_vllm_weights()
+        probe_metrics = self._collect_eval_weight_probe_metrics() if mode == "eval" else {}
 
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
@@ -472,6 +572,10 @@ class CodeGRPOTrainer(GRPOTrainer):
                 logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
 
         if mode == "eval":
+            for key, value in probe_metrics.items():
+                self._metrics[mode][key].append(float(value))
+                merged_eval_metrics[key] = float(value)
+
             self._last_eval_metrics = {
                 "mean_R_code": mean_r_code,
                 "mean_R_reason": mean_r_reason,
