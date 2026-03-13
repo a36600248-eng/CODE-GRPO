@@ -402,6 +402,72 @@ class VLLMGeneration:
             name = name.replace(prefix, "")
         return name
 
+    @staticmethod
+    def _stacked_param_mappings() -> list[tuple[str, str, str | int]]:
+        """Mappings from HF checkpoint names to vLLM fused parameter names."""
+        return [
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+    def _get_colocate_llm_params(self) -> tuple[nn.Module, dict[str, nn.Parameter]]:
+        llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+        params_dict = dict(llm_model.named_parameters())
+        return llm_model, params_dict
+
+    def _resolve_vllm_param_target(
+        self,
+        params_dict: dict[str, nn.Parameter],
+        name: str,
+    ) -> tuple[str, nn.Parameter, str | int | None] | None:
+        if name in params_dict:
+            return name, params_dict[name], None
+
+        for packed_name, weight_name, shard_id in self._stacked_param_mappings():
+            if weight_name not in name:
+                continue
+            candidate_name = name.replace(weight_name, packed_name)
+            if candidate_name in params_dict:
+                return candidate_name, params_dict[candidate_name], shard_id
+
+        return None
+
+    @staticmethod
+    def _copy_param_tensor(target_param: nn.Parameter, loaded_weight: torch.Tensor):
+        with torch.no_grad():
+            target_param.data.copy_(loaded_weight.to(device=target_param.device, dtype=target_param.dtype))
+
+    def _update_colocate_param(
+        self,
+        params_dict: dict[str, nn.Parameter],
+        name: str,
+        param: torch.Tensor,
+    ) -> bool:
+        resolved = self._resolve_vllm_param_target(params_dict, name)
+        if resolved is None:
+            return False
+
+        _target_name, target_param, shard_id = resolved
+        loaded_weight = param.data if isinstance(param, nn.Parameter) else param
+        weight_loader = getattr(target_param, "weight_loader", None)
+
+        if weight_loader is not None:
+            if shard_id is None:
+                weight_loader(target_param, loaded_weight)
+            else:
+                weight_loader(target_param, loaded_weight, shard_id)
+        else:
+            if shard_id is not None:
+                raise ValueError(
+                    f"vLLM fused parameter '{_target_name}' for source '{name}' does not expose a weight_loader."
+                )
+            self._copy_param_tensor(target_param, loaded_weight)
+
+        return True
+
     def _sync_fsdp1_params_to_vllm(self, module: nn.Module, prefix: str = "", visited: set[str] | None = None):
         """Memory-efficient post-order traversal of FSDP modules to extract full parameters and sync with vLLM."""
         # For FSDP1, we need to recurse into children and also use summon_full_params
@@ -417,6 +483,9 @@ class VLLMGeneration:
 
         if isinstance(module, FSDP):
             with FSDP.summon_full_params(module, recurse=False, writeback=False):
+                params_dict = None
+                if self.mode == "colocate":
+                    _, params_dict = self._get_colocate_llm_params()
                 for param_name, param in module.named_parameters():
                     full_name = f"{prefix}.{param_name}" if prefix else param_name
                     full_name = self._fix_param_name_to_vllm(full_name, extra_prefixes=["_fsdp_wrapped_module."])
@@ -428,12 +497,15 @@ class VLLMGeneration:
                     if self.mode == "server" and accelerator.is_main_process:
                         self.vllm_client.update_named_param(full_name, param.data)
                     elif self.mode == "colocate":
-                        llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                        llm_model.load_weights([(full_name, param.data)])
+                        if params_dict is None or not self._update_colocate_param(params_dict, full_name, param):
+                            raise KeyError(f"Unable to map FSDP1 parameter '{full_name}' into colocated vLLM model.")
 
     def _sync_fsdp2_params_to_vllm(self, module: nn.Module):
         """FSDP2-specific parameter synchronization."""
         accelerator = self.accelerator
+        params_dict = None
+        if self.mode == "colocate":
+            _, params_dict = self._get_colocate_llm_params()
 
         # For FSDP2, module.state_dict() already covers all parameters, so no need for recursion
         for name, param in module.state_dict().items():
@@ -454,8 +526,8 @@ class VLLMGeneration:
             if self.mode == "server" and accelerator.is_main_process:
                 self.vllm_client.update_named_param(name, param)
             elif self.mode == "colocate":
-                llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                llm_model.load_weights([(name, param)])
+                if params_dict is None or not self._update_colocate_param(params_dict, name, param):
+                    raise KeyError(f"Unable to map FSDP2 parameter '{name}' into colocated vLLM model.")
 
     def sync_weights(self):
         """Synchronize model weights to vLLM.
@@ -502,6 +574,9 @@ class VLLMGeneration:
                         self._sync_fsdp2_params_to_vllm(model)
                 else:
                     # DeepSpeed ZeRO-3 with PEFT
+                    params_dict = None
+                    if self.mode == "colocate":
+                        _, params_dict = self._get_colocate_llm_params()
                     for name, param in model.named_parameters():
                         # When using PEFT, we need to recover the original parameter name
                         name = name.removeprefix("base_model.model.").replace(".base_layer", "")
@@ -516,8 +591,10 @@ class VLLMGeneration:
                         if self.mode == "server" and accelerator.is_main_process:
                             self.vllm_client.update_named_param(name, param.data)
                         elif self.mode == "colocate":
-                            llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                            llm_model.load_weights([(name, param.data)])
+                            if params_dict is None or not self._update_colocate_param(params_dict, name, param):
+                                raise KeyError(
+                                    f"Unable to map PEFT parameter '{name}' into colocated vLLM model."
+                                )
                 # Unmerge adapters while parameters are still gathered
                 model.unmerge_adapter()
                 # Parameters will automatically be repartitioned when exiting the context
@@ -531,14 +608,19 @@ class VLLMGeneration:
                 elif fsdp_version == 2:
                     self._sync_fsdp2_params_to_vllm(model)
             else:
+                params_dict = None
+                if self.mode == "colocate":
+                    _, params_dict = self._get_colocate_llm_params()
                 for name, param in model.named_parameters():
                     name = self._fix_param_name_to_vllm(name)
                     with gather_if_zero3([param]):
                         if self.mode == "server" and accelerator.is_main_process:
                             self.vllm_client.update_named_param(name, param.data)
                         elif self.mode == "colocate":
-                            llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                            llm_model.load_weights([(name, param.data)])
+                            if params_dict is None or not self._update_colocate_param(params_dict, name, param):
+                                raise KeyError(
+                                    f"Unable to map dense parameter '{name}' into colocated vLLM model."
+                                )
 
         # Reset cache on vLLM
         if self.mode == "server" and accelerator.is_main_process:
