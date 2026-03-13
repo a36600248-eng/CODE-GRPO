@@ -735,6 +735,9 @@ class GRPOTrainer(_BaseTrainer):
                 * args.steps_per_generation,
                 enable_sleep_mode=args.vllm_enable_sleep_mode,
                 model_impl=args.vllm_model_impl,
+                vllm_dynamic_lora_path=getattr(args, "vllm_dynamic_lora_path", None),
+                vllm_dynamic_lora_name=getattr(args, "vllm_dynamic_lora_name", "adapter"),
+                vllm_dynamic_lora_int_id=getattr(args, "vllm_dynamic_lora_int_id", 1),
                 # Generation configuration
                 repetition_penalty=self.repetition_penalty,
                 temperature=self.temperature,

@@ -258,6 +258,23 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    vllm_dynamic_lora_path: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional standalone-eval LoRA adapter path for vLLM dynamic LoRA requests. "
+                "When set, vLLM keeps the base model loaded and applies this adapter per request."
+            )
+        },
+    )
+    vllm_dynamic_lora_name: str = field(
+        default="adapter",
+        metadata={"help": "Request name used when applying a dynamic LoRA adapter in vLLM."},
+    )
+    vllm_dynamic_lora_int_id: int = field(
+        default=1,
+        metadata={"help": "Integer adapter id used for dynamic LoRA requests in vLLM."},
+    )
 
     debug_trace_dir: str = field(
         default="traces/rollout",

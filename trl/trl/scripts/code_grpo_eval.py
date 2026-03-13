@@ -18,6 +18,7 @@ import os
 
 import torch
 from accelerate import logging
+from peft import PeftConfig
 
 from trl import (
     DatasetMixtureConfig,
@@ -53,6 +54,26 @@ logger = logging.get_logger(__name__)
 def main(script_args, training_args, model_args, dataset_args):
     training_args.codegrpo_mode = "test"
     training_args.run_base_model_baseline_eval = False
+
+    effective_model_name_or_path = model_args.model_name_or_path
+    eval_peft_config = get_peft_config(model_args)
+    if (
+        training_args.use_vllm
+        and training_args.backend == "vllm"
+        and os.path.exists(os.path.join(model_args.model_name_or_path, "adapter_config.json"))
+    ):
+        adapter_path = model_args.model_name_or_path
+        adapter_config = PeftConfig.from_pretrained(adapter_path)
+        effective_model_name_or_path = adapter_config.base_model_name_or_path
+        eval_peft_config = None
+        training_args.vllm_dynamic_lora_path = adapter_path
+        training_args.vllm_dynamic_lora_name = os.path.basename(os.path.abspath(adapter_path)) or "adapter"
+        training_args.vllm_dynamic_lora_int_id = 1
+        logger.info(
+            "[EVAL] using vLLM dynamic LoRA: base_model=%s adapter=%s",
+            effective_model_name_or_path,
+            adapter_path,
+        )
 
     run_layout = _configure_run_layout(script_args, training_args, model_args, dataset_args)
     rank = _get_rank()
@@ -104,11 +125,11 @@ def main(script_args, training_args, model_args, dataset_args):
         raise ValueError("Standalone code_grpo_eval requires an eval/test split.")
 
     trainer = CodeGRPOTrainer(
-        model=model_args.model_name_or_path,
+        model=effective_model_name_or_path,
         args=training_args,
         train_dataset=eval_dataset,
         eval_dataset=eval_dataset,
-        peft_config=get_peft_config(model_args),
+        peft_config=eval_peft_config,
         callbacks=[
             TextMetricsCallback(
                 trainer_text_log_path if getattr(training_args, "write_trainer_text_log", False) else None,

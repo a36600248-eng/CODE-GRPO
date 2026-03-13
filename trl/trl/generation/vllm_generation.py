@@ -102,6 +102,7 @@ if TYPE_CHECKING:
 if is_vllm_available():
     import vllm
     from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
 
     if Version(vllm.__version__) <= Version("0.10.2"):
         from vllm.sampling_params import GuidedDecodingParams
@@ -252,6 +253,9 @@ class VLLMGeneration:
         max_num_seqs: int | None = None,
         enable_sleep_mode: bool = False,
         model_impl: str = "auto",
+        vllm_dynamic_lora_path: str | None = None,
+        vllm_dynamic_lora_name: str = "adapter",
+        vllm_dynamic_lora_int_id: int = 1,
         # Generation configuration
         repetition_penalty: float = 1.0,
         temperature: float = 1.0,
@@ -290,6 +294,10 @@ class VLLMGeneration:
         self.max_num_seqs = max_num_seqs
         self.enable_sleep_mode = enable_sleep_mode
         self.model_impl = model_impl
+        self.vllm_dynamic_lora_path = vllm_dynamic_lora_path
+        self.vllm_dynamic_lora_name = vllm_dynamic_lora_name
+        self.vllm_dynamic_lora_int_id = int(vllm_dynamic_lora_int_id)
+        self._vllm_dynamic_lora_request = None
 
         # Generation configuration
         self.repetition_penalty = repetition_penalty
@@ -375,6 +383,7 @@ class VLLMGeneration:
                 max_num_seqs=self.max_num_seqs,
                 enable_sleep_mode=self.enable_sleep_mode,
                 model_impl=self.model_impl,
+                enable_lora=bool(self.vllm_dynamic_lora_path),
                 distributed_executor_backend="external_launcher",
                 # Feed identical seed for tp groups to ensure sampling results are the same across workers
                 seed=accelerator.process_index // self.tensor_parallel_size,
@@ -393,6 +402,19 @@ class VLLMGeneration:
         # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
         # synchronize all processes after vLLM has been fully initialized.
         accelerator.wait_for_everyone()
+
+    def _get_vllm_dynamic_lora_request(self):
+        if not self.vllm_dynamic_lora_path:
+            return None
+        if self.mode != "colocate":
+            raise NotImplementedError("Dynamic vLLM LoRA requests are currently supported only in colocate mode.")
+        if self._vllm_dynamic_lora_request is None:
+            self._vllm_dynamic_lora_request = LoRARequest(
+                self.vllm_dynamic_lora_name,
+                self.vllm_dynamic_lora_int_id,
+                self.vllm_dynamic_lora_path,
+            )
+        return self._vllm_dynamic_lora_request
 
     def _fix_param_name_to_vllm(self, name: str, extra_prefixes: list[str] | None = None) -> str:
         """Fix parameter name for vLLM compatibility."""
@@ -668,6 +690,7 @@ class VLLMGeneration:
         tools = self.tools
         chat_template = self.chat_template
         generation_overrides = generation_overrides or {}
+        lora_request = self._get_vllm_dynamic_lora_request()
 
         repetition_penalty = generation_overrides.get("repetition_penalty", repetition_penalty)
         temperature = generation_overrides.get("temperature", temperature)
@@ -868,9 +891,15 @@ class VLLMGeneration:
                             chat_template_kwargs=chat_template_kwargs,
                             tools=tools,
                             chat_template=chat_template,
+                            lora_request=lora_request,
                         )
                     else:
-                        all_outputs = self.llm.generate(all_prompts, sampling_params=sampling_params, use_tqdm=False)
+                        all_outputs = self.llm.generate(
+                            all_prompts,
+                            sampling_params=sampling_params,
+                            use_tqdm=False,
+                            lora_request=lora_request,
+                        )
 
                 all_prompt_ids = [output.prompt_token_ids for output in all_outputs]
                 all_completion_ids = [output.token_ids for outputs in all_outputs for output in outputs.outputs]
