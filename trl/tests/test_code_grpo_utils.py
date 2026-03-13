@@ -25,7 +25,7 @@ from trl.extensions.code_grpo.parser import (
     parse_logic_response,
     parse_prediction_only,
 )
-from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_node
+from trl.extensions.code_grpo.tree import _compute_advantage_diagnostics, _compute_code_reward, _is_double_zero_node
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
 from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
@@ -174,6 +174,29 @@ def test_code_grpo_trainer_syncs_vllm_weights_once_per_step():
 
     CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)
     assert trainer.vllm_generation.sync_calls == 1
+    assert trainer._last_loaded_step == 7
+
+    CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)
+    assert trainer.vllm_generation.sync_calls == 1
+
+
+def test_compute_advantage_diagnostics_tracks_zero_std_groups():
+    nodes = [
+        Node(node_id="n1", parent_id="p1", round_idx=1, code="a", reasoning="", R_code=1.0, pass_rate=1.0, A_code=1.0, completion_text="c1"),
+        Node(node_id="n2", parent_id="p1", round_idx=1, code="b", reasoning="", R_code=0.22, pass_rate=0.0, A_code=-1.0, completion_text="c2"),
+        Node(node_id="n3", parent_id="p2", round_idx=1, code="c", reasoning="", R_code=1.0, pass_rate=1.0, A_code=0.0, completion_text="c3"),
+        Node(node_id="n4", parent_id="p2", round_idx=1, code="d", reasoning="", R_code=1.0, pass_rate=1.0, A_code=0.0, completion_text="c4"),
+    ]
+
+    metrics = _compute_advantage_diagnostics(nodes)
+
+    assert metrics["nonzero_A_code_rate"] == 0.5
+    assert metrics["sibling_group_count"] == 2.0
+    assert metrics["sibling_group_zero_std_R_code_rate"] == 0.5
+    assert metrics["sibling_group_nonzero_std_R_code_rate"] == 0.5
+    assert metrics["sibling_group_mean_unique_R_code_count"] == 1.5
+    assert metrics["sibling_group_all_pass_rate"] == 0.5
+    assert metrics["sibling_group_all_fail_rate"] == 0.0
 
 
 def test_create_model_from_path_loads_adapter_checkpoint(monkeypatch, tmp_path):
@@ -213,7 +236,3 @@ def test_create_model_from_path_loads_adapter_checkpoint(monkeypatch, tmp_path):
         ("base", "base-model-id", {"dtype": trainer_utils.torch.float32, "device_map": "auto"}),
         ("adapter", "base-model", str(adapter_dir), False),
     ]
-    assert trainer._last_loaded_step == 7
-
-    CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)
-    assert trainer.vllm_generation.sync_calls == 1

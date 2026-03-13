@@ -86,6 +86,45 @@ def _safe_preview(value: Any, max_chars: int = 200) -> str:
     return text
 
 
+def _compute_advantage_diagnostics(nodes: list[Node], eps: float = 1e-12) -> dict[str, float]:
+    code_nodes = [node for node in nodes if node.completion_text]
+    sibling_groups: dict[str, list[Node]] = {}
+    for node in code_nodes:
+        if node.parent_id is None:
+            continue
+        sibling_groups.setdefault(str(node.parent_id), []).append(node)
+
+    groups = list(sibling_groups.values())
+    group_stds = [_std([node.R_code for node in group]) for group in groups]
+    group_unique_counts = [
+        float(len({round(float(node.R_code), 12) for node in group}))
+        for group in groups
+    ]
+    group_sizes = [float(len(group)) for group in groups]
+    group_spans = [
+        max((float(node.R_code) for node in group), default=0.0) - min((float(node.R_code) for node in group), default=0.0)
+        for group in groups
+    ]
+
+    return {
+        "nonzero_A_code_rate": _mean([1.0 if abs(float(node.A_code)) > eps else 0.0 for node in code_nodes]),
+        "nonzero_A_reason_rate": _mean([1.0 if abs(float(node.A_reason)) > eps else 0.0 for node in nodes]),
+        "sibling_group_count": float(len(groups)),
+        "sibling_group_mean_size": _mean(group_sizes),
+        "sibling_group_zero_std_R_code_rate": _mean([1.0 if std <= eps else 0.0 for std in group_stds]),
+        "sibling_group_nonzero_std_R_code_rate": _mean([1.0 if std > eps else 0.0 for std in group_stds]),
+        "sibling_group_mean_std_R_code": _mean(group_stds),
+        "sibling_group_mean_unique_R_code_count": _mean(group_unique_counts),
+        "sibling_group_mean_reward_span": _mean(group_spans),
+        "sibling_group_all_pass_rate": _mean(
+            [1.0 if all(float(node.pass_rate) == 1.0 for node in group) else 0.0 for group in groups]
+        ),
+        "sibling_group_all_fail_rate": _mean(
+            [1.0 if all(float(node.pass_rate) < 1.0 for node in group) else 0.0 for group in groups]
+        ),
+    }
+
+
 def _is_double_zero_node(node: Node, eps: float = 1e-12) -> bool:
     """Return True when both rewards are (numerically) zero."""
     return abs(node.R_code) <= eps and abs(node.R_reason) <= eps
@@ -862,6 +901,7 @@ class CodeGRPOTreeRunner:
         pass_rates = [node.pass_rate for node in metric_nodes]
         eval_metrics = self._compute_eval_metrics(rounds)
         if collected_nodes:
+            eval_metrics.update(_compute_advantage_diagnostics(metric_nodes))
             logic_items = [
                 item for node in metric_nodes for item in node.exec_summary.get("logic_train_samples", [])
             ]
