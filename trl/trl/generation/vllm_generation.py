@@ -556,6 +556,11 @@ class VLLMGeneration:
 
         Handles FSDP, DeepSpeed, PEFT weight synchronization.
         """
+        # In dynamic LoRA mode, the evaluated adapter is attached request-by-request and
+        # we must not push HF-side weights through the colocated merge/load path.
+        if self.vllm_dynamic_lora_path:
+            return
+
         # Wake up vLLM weights before loading to ensure device memory is mapped. Without this, load_weights() writes to
         # freed/unmapped memory when sleep mode is active, which crashes on backends with strict physical memory
         # management (e.g., Ascend NPU). See https://github.com/huggingface/trl/issues/5142

@@ -704,6 +704,17 @@ class GRPOTrainer(_BaseTrainer):
         set_seed(args.seed, device_specific=True)
 
         if self.use_vllm:
+            if (
+                self.vllm_mode == "colocate"
+                and is_peft_available()
+                and is_peft_model(self.model)
+                and getattr(self.model, "is_quantized", False)
+            ):
+                logger.warning(
+                    "Detected vLLM colocate with a quantized PEFT model. The online HF->vLLM merge/load sync path "
+                    "has shown stale-weight behavior in this setup. Prefer standalone checkpoint eval via dynamic "
+                    "LoRA, or disable one of vLLM/quantization for online rollout."
+                )
             # Initialize vLLM generation backend
             # Wrap rollout_func to capture trainer context if provided
             rollout_func = None
