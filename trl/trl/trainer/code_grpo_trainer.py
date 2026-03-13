@@ -139,7 +139,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         # Standalone eval can route adapters to vLLM via request-level dynamic LoRA.
         # In that mode, syncing HF-side weights into the colocated engine is both
         # unnecessary and harmful because it re-enters the old merge/load_weights path.
-        if getattr(self.vllm_generation, "vllm_dynamic_lora_path", None):
+        if (
+            getattr(self.vllm_generation, "vllm_dynamic_lora_path", None)
+            and not getattr(self.vllm_generation, "vllm_dynamic_lora_online_refresh", False)
+        ):
             self._last_loaded_step = self.state.global_step
             return
         if self.state.global_step == self._last_loaded_step:

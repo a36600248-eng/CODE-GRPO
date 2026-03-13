@@ -704,16 +704,24 @@ class GRPOTrainer(_BaseTrainer):
         set_seed(args.seed, device_specific=True)
 
         if self.use_vllm:
+            online_dynamic_lora_path = getattr(args, "vllm_dynamic_lora_path", None)
+            online_dynamic_lora_refresh = False
             if (
-                self.vllm_mode == "colocate"
+                online_dynamic_lora_path is None
+                and self.vllm_mode == "colocate"
                 and is_peft_available()
                 and is_peft_model(self.model)
                 and getattr(self.model, "is_quantized", False)
             ):
+                online_dynamic_lora_path = os.path.join(
+                    os.path.dirname(args.output_dir),
+                    "vllm_online_dynamic_lora",
+                )
+                online_dynamic_lora_refresh = True
                 logger.warning(
-                    "Detected vLLM colocate with a quantized PEFT model. The online HF->vLLM merge/load sync path "
-                    "has shown stale-weight behavior in this setup. Prefer standalone checkpoint eval via dynamic "
-                    "LoRA, or disable one of vLLM/quantization for online rollout."
+                    "Detected vLLM colocate with a quantized PEFT model. Enabling online dynamic LoRA adapter "
+                    "snapshots for rollout/eval to avoid the stale HF->vLLM merge/load sync path. Adapter dir: %s",
+                    online_dynamic_lora_path,
                 )
             # Initialize vLLM generation backend
             # Wrap rollout_func to capture trainer context if provided
@@ -746,9 +754,10 @@ class GRPOTrainer(_BaseTrainer):
                 * args.steps_per_generation,
                 enable_sleep_mode=args.vllm_enable_sleep_mode,
                 model_impl=args.vllm_model_impl,
-                vllm_dynamic_lora_path=getattr(args, "vllm_dynamic_lora_path", None),
+                vllm_dynamic_lora_path=online_dynamic_lora_path,
                 vllm_dynamic_lora_name=getattr(args, "vllm_dynamic_lora_name", "adapter"),
                 vllm_dynamic_lora_int_id=getattr(args, "vllm_dynamic_lora_int_id", 1),
+                vllm_dynamic_lora_online_refresh=online_dynamic_lora_refresh,
                 # Generation configuration
                 repetition_penalty=self.repetition_penalty,
                 temperature=self.temperature,

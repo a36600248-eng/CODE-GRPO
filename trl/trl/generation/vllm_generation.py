@@ -256,6 +256,7 @@ class VLLMGeneration:
         vllm_dynamic_lora_path: str | None = None,
         vllm_dynamic_lora_name: str = "adapter",
         vllm_dynamic_lora_int_id: int = 1,
+        vllm_dynamic_lora_online_refresh: bool = False,
         # Generation configuration
         repetition_penalty: float = 1.0,
         temperature: float = 1.0,
@@ -297,7 +298,9 @@ class VLLMGeneration:
         self.vllm_dynamic_lora_path = vllm_dynamic_lora_path
         self.vllm_dynamic_lora_name = vllm_dynamic_lora_name
         self.vllm_dynamic_lora_int_id = int(vllm_dynamic_lora_int_id)
+        self.vllm_dynamic_lora_online_refresh = bool(vllm_dynamic_lora_online_refresh)
         self._vllm_dynamic_lora_request = None
+        self._vllm_dynamic_lora_force_reload = False
 
         # Generation configuration
         self.repetition_penalty = repetition_penalty
@@ -408,13 +411,56 @@ class VLLMGeneration:
             return None
         if self.mode != "colocate":
             raise NotImplementedError("Dynamic vLLM LoRA requests are currently supported only in colocate mode.")
-        if self._vllm_dynamic_lora_request is None:
-            self._vllm_dynamic_lora_request = LoRARequest(
+        def _build_request(load_inplace: bool):
+            if load_inplace:
+                try:
+                    return LoRARequest(
+                        self.vllm_dynamic_lora_name,
+                        self.vllm_dynamic_lora_int_id,
+                        self.vllm_dynamic_lora_path,
+                        load_inplace=True,
+                    )
+                except TypeError:
+                    logger.warning(
+                        "Installed vLLM LoRARequest does not support `load_inplace`; falling back to a new adapter id "
+                        "for online refresh."
+                    )
+                    self.vllm_dynamic_lora_int_id += 1
+            return LoRARequest(
                 self.vllm_dynamic_lora_name,
                 self.vllm_dynamic_lora_int_id,
                 self.vllm_dynamic_lora_path,
             )
+        if self.vllm_dynamic_lora_online_refresh:
+            request = _build_request(self._vllm_dynamic_lora_force_reload)
+            self._vllm_dynamic_lora_force_reload = False
+            return request
+        if self._vllm_dynamic_lora_request is None:
+            self._vllm_dynamic_lora_request = _build_request(False)
         return self._vllm_dynamic_lora_request
+
+    def _refresh_online_dynamic_lora_adapter(self):
+        if not self.vllm_dynamic_lora_online_refresh:
+            return
+        if not self.vllm_dynamic_lora_path:
+            raise ValueError("Online dynamic LoRA refresh requires `vllm_dynamic_lora_path` to be set.")
+        if not is_peft_model(self.model):
+            raise ValueError("Online dynamic LoRA refresh requires a PEFT model.")
+        if self.mode != "colocate":
+            raise NotImplementedError("Online dynamic LoRA refresh is currently supported only in colocate mode.")
+
+        adapter_dir = self.vllm_dynamic_lora_path
+        os.makedirs(adapter_dir, exist_ok=True)
+
+        if self.accelerator.is_main_process:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            unwrapped_model.save_pretrained(adapter_dir)
+            logger.info(
+                "Refreshed online dynamic LoRA adapter for vLLM at %s",
+                adapter_dir,
+            )
+        self.accelerator.wait_for_everyone()
+        self._vllm_dynamic_lora_force_reload = True
 
     def _fix_param_name_to_vllm(self, name: str, extra_prefixes: list[str] | None = None) -> str:
         """Fix parameter name for vLLM compatibility."""
@@ -559,6 +605,8 @@ class VLLMGeneration:
         # In dynamic LoRA mode, the evaluated adapter is attached request-by-request and
         # we must not push HF-side weights through the colocated merge/load path.
         if self.vllm_dynamic_lora_path:
+            if self.vllm_dynamic_lora_online_refresh:
+                self._refresh_online_dynamic_lora_adapter()
             return
 
         # Wake up vLLM weights before loading to ensure device memory is mapped. Without this, load_weights() writes to
