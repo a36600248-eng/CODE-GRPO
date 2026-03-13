@@ -1,4 +1,4 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k2_server_2gpu
+﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k2_server_2gpu
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K2-SERVER-2GPU
 logging_steps: 5
@@ -21,7 +21,7 @@ bf16: true
 fp16: false
 
 model_name_or_path: /root/autodl-tmp/models/Qwen2.5-Coder-7B-Instruct
-load_in_4bit: true
+load_in_4bit: false
 use_peft: true
 lora_r: 16
 lora_alpha: 32
@@ -111,3 +111,4 @@ debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 999999
 max_train_trace_files: 0
 review_bundle_trace_sample_size: 1
+
