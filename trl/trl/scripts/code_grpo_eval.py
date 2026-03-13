@@ -64,14 +64,17 @@ def main(script_args, training_args, model_args, dataset_args):
     ):
         adapter_path = model_args.model_name_or_path
         adapter_config = PeftConfig.from_pretrained(adapter_path)
+        # Keep the HF-side trainer on a normal base+LoRA construction so transformers.Trainer
+        # does not reject the model as a purely quantized read-only checkpoint. The actual
+        # adapter under evaluation is applied only through vLLM dynamic LoRA requests below.
         effective_model_name_or_path = adapter_config.base_model_name_or_path
-        eval_peft_config = None
         training_args.vllm_dynamic_lora_path = adapter_path
         training_args.vllm_dynamic_lora_name = os.path.basename(os.path.abspath(adapter_path)) or "adapter"
         training_args.vllm_dynamic_lora_int_id = 1
         logger.info(
-            "[EVAL] using vLLM dynamic LoRA: base_model=%s adapter=%s",
+            "[EVAL] using vLLM dynamic LoRA: hf_model=%s base_model=%s adapter=%s",
             effective_model_name_or_path,
+            adapter_config.base_model_name_or_path,
             adapter_path,
         )
 
