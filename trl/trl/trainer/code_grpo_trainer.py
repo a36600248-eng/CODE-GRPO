@@ -179,8 +179,6 @@ class CodeGRPOTrainer(GRPOTrainer):
             for name, parameter in named_parameters:
                 if preferred in name:
                     return name, parameter
-        if named_parameters:
-            return named_parameters[0]
         return None, None
 
     @staticmethod
@@ -249,11 +247,18 @@ class CodeGRPOTrainer(GRPOTrainer):
                         "model.layers.0.self_attn.q_proj.weight",
                         "layers.0.self_attn.q_proj.weight",
                         "self_attn.q_proj.weight",
+                        "model.layers.0.self_attn.qkv_proj.weight",
+                        "layers.0.self_attn.qkv_proj.weight",
+                        "self_attn.qkv_proj.weight",
+                        "qkv_proj.weight",
                     ],
                 )
                 if vllm_parameter is not None:
                     metrics["probe_vllm_qproj_found"] = 1.0
                     metrics.update(self._tensor_probe_metrics(vllm_parameter, "probe_vllm_qproj"))
+                else:
+                    candidate_names = [name for name, _ in vllm_named_parameters[:12]]
+                    logger.info("[WEIGHT_PROBE] step=%s vllm_probe_candidates=%s", current_step, candidate_names)
 
         logger.info(
             "[WEIGHT_PROBE] step=%s hf_name=%s hf_sum=%.8f hf_abs_mean=%.8f vllm_name=%s vllm_sum=%.8f vllm_abs_mean=%.8f",
