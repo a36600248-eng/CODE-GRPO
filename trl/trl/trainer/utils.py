@@ -1061,9 +1061,28 @@ def create_model_from_path(
             f"a valid `torch.dtype` (e.g., 'float32'), but got {dtype}."
         )
     kwargs["device_map"] = kwargs.get("device_map", "auto")
+
+    # Support PEFT adapter checkpoints saved without full base model weights/config.
+    if is_peft_available() and os.path.exists(os.path.join(model_id, "adapter_config.json")):
+        trained_adapter_config = PeftConfig.from_pretrained(model_id)
+        base_model_id = trained_adapter_config.base_model_name_or_path
+        if architecture is None:
+            base_config = AutoConfig.from_pretrained(base_model_id)
+            architectures = getattr(base_config, "architectures", None)
+            if not architectures:
+                raise ValueError(
+                    f"Could not infer architecture for base model '{base_model_id}' from adapter checkpoint '{model_id}'."
+                )
+            architecture = getattr(transformers, architectures[0])
+        base_model = architecture.from_pretrained(base_model_id, **kwargs)
+        return PeftModel.from_pretrained(base_model, model_id, is_trainable=False)
+
     if architecture is None:
         config = AutoConfig.from_pretrained(model_id)
-        architecture = getattr(transformers, config.architectures[0])
+        architectures = getattr(config, "architectures", None)
+        if not architectures:
+            raise ValueError(f"Could not infer architecture from config at '{model_id}'.")
+        architecture = getattr(transformers, architectures[0])
     model = architecture.from_pretrained(model_id, **kwargs)
     return model
 

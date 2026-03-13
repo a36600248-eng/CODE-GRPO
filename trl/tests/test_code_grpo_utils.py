@@ -29,6 +29,7 @@ from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
 from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
+from trl.trainer import utils as trainer_utils
 
 
 def test_parse_generation_output():
@@ -173,6 +174,45 @@ def test_code_grpo_trainer_syncs_vllm_weights_once_per_step():
 
     CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)
     assert trainer.vllm_generation.sync_calls == 1
+
+
+def test_create_model_from_path_loads_adapter_checkpoint(monkeypatch, tmp_path):
+    adapter_dir = tmp_path / "checkpoint-1"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    calls = []
+
+    class DummyArch:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            calls.append(("base", model_id, kwargs))
+            return "base-model"
+
+    class DummyPeftConfig:
+        base_model_name_or_path = "base-model-id"
+
+        @classmethod
+        def from_pretrained(cls, model_id):
+            assert model_id == str(adapter_dir)
+            return cls()
+
+    class DummyPeftModel:
+        @classmethod
+        def from_pretrained(cls, base_model, model_id, is_trainable=False):
+            calls.append(("adapter", base_model, model_id, is_trainable))
+            return "adapter-model"
+
+    monkeypatch.setattr(trainer_utils, "PeftConfig", DummyPeftConfig)
+    monkeypatch.setattr(trainer_utils, "PeftModel", DummyPeftModel)
+
+    model = trainer_utils.create_model_from_path(str(adapter_dir), architecture=DummyArch, dtype="float32")
+
+    assert model == "adapter-model"
+    assert calls == [
+        ("base", "base-model-id", {"dtype": trainer_utils.torch.float32, "device_map": "auto"}),
+        ("adapter", "base-model", str(adapter_dir), False),
+    ]
     assert trainer._last_loaded_step == 7
 
     CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)

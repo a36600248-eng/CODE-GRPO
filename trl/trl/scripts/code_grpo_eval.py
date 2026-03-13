@@ -32,7 +32,7 @@ from trl.extensions.code_grpo.adapters import load_dataset_adapter
 from trl.trainer.code_grpo_config import CodeGRPOConfig
 from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
 
-from .code_grpo import (
+from trl.scripts.code_grpo import (
     CodeGRPOScriptArguments,
     TextMetricsCallback,
     _adapt_splits,
