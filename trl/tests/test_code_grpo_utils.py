@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 from trl.extensions.code_grpo.error_utils import summarize_error
 from trl.extensions.code_grpo.matcher import is_match, values_equal
 from trl.extensions.code_grpo.parser import (
@@ -26,6 +28,7 @@ from trl.extensions.code_grpo.parser import (
 from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_node
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
+from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
 
 
 def test_parse_generation_output():
@@ -150,3 +153,27 @@ def test_double_zero_node_detection():
     assert _is_double_zero_node(node)
     node.R_code = 1e-6
     assert not _is_double_zero_node(node)
+
+
+def test_code_grpo_trainer_syncs_vllm_weights_once_per_step():
+    class DummyVLLMGeneration:
+        def __init__(self):
+            self.sync_calls = 0
+
+        def sync_weights(self):
+            self.sync_calls += 1
+
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer.use_vllm = True
+    trainer.vllm_generation = DummyVLLMGeneration()
+    trainer._last_loaded_step = -1
+    trainer.state = SimpleNamespace(global_step=7)
+    trainer.args = SimpleNamespace(report_to=[])
+    trainer.accelerator = SimpleNamespace(is_main_process=True)
+
+    CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)
+    assert trainer.vllm_generation.sync_calls == 1
+    assert trainer._last_loaded_step == 7
+
+    CodeGRPOTrainer._maybe_sync_vllm_weights(trainer)
+    assert trainer.vllm_generation.sync_calls == 1

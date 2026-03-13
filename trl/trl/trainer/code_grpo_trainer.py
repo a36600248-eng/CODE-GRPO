@@ -17,6 +17,7 @@ from ..extensions.code_grpo import (
     build_generation_completion,
     build_token_masks,
 )
+from ..extras.profiling import profiling_context
 from .code_grpo_config import CodeGRPOConfig
 from .grpo_trainer import GRPOTrainer
 from .utils import get_config_model_id, pad
@@ -127,6 +128,17 @@ class CodeGRPOTrainer(GRPOTrainer):
     @staticmethod
     def _window_mean(values: list[float]) -> float:
         return sum(values) / len(values) if values else 0.0
+
+    def _maybe_sync_vllm_weights(self) -> None:
+        if not getattr(self, "use_vllm", False):
+            return
+        if not hasattr(self, "vllm_generation") or not hasattr(self, "_last_loaded_step"):
+            return
+        if self.state.global_step == self._last_loaded_step:
+            return
+        with profiling_context(self, "sync_weights"):
+            self.vllm_generation.sync_weights()
+        self._last_loaded_step = self.state.global_step
 
     def _update_train_reward_window_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
         interval = self._reward_window_interval_steps
@@ -334,6 +346,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         mode = "train" if self.model.training else "eval"
         examples = self._unique_examples(inputs)
         rollout_t0 = time.perf_counter()
+        self._maybe_sync_vllm_weights()
 
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
