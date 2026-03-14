@@ -454,6 +454,13 @@ class VLLMClient:
 
         # Set the weight update group's host to "0.0.0.0" so that
         # clients from different IPs can send updated weights
+        logger.info(
+            "Requesting server communicator init: base_url=%s group_port=%s rank=%s world_size=%s",
+            self.base_url,
+            self.group_port,
+            self.rank,
+            world_size,
+        )
         response = self.session.post(
             url,
             json={
