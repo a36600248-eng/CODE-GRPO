@@ -466,12 +466,29 @@ class VLLMClient:
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
-        # Brief delay to allow server initialization. While not strictly required (client socket will retry on
-        # connection failure), this prevents log warnings like:
+        logger.info(
+            "Server accepted communicator init: base_url=%s group_port=%s rank=%s world_size=%s",
+            self.base_url,
+            self.group_port,
+            self.rank,
+            world_size,
+        )
+
+        # Brief delay to allow server-side communicator setup to begin before the client joins.
+        # With the server worker launched asynchronously, a larger cushion avoids races where the
+        # client enters NCCL init before the vLLM worker has constructed its process group.
+        # It also prevents log warnings like:
         # [W416 23:24:57.460001114 socket.cpp:204] [c10d] The hostname of the client socket cannot be retrieved. err=-3
-        time.sleep(0.1)
+        time.sleep(1.0)
 
         # Set up the communication group for weight broadcasting
+        logger.info(
+            "Creating local weight-sync communicator: host=%s group_port=%s rank=%s world_size=%s",
+            self.host,
+            self.group_port,
+            self.rank,
+            world_size,
+        )
         if is_torch_xpu_available():
             store = torch.distributed.TCPStore(
                 host_name=self.host, port=self.group_port, world_size=world_size, is_master=(self.rank == 0)
@@ -490,6 +507,7 @@ class VLLMClient:
                 host=self.host, port=self.group_port, rank=self.rank, world_size=world_size
             )
             self.communicator = PyNcclCommunicator(pg, device=device)
+        logger.info("Local weight-sync communicator ready")
 
         # When the client object is deleted, close the weight update group
         atexit.register(self.close_communicator)
