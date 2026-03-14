@@ -1,7 +1,8 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k8_server_2gpu
+﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k8_server_2gpu
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K8-SERVER-2GPU
-logging_steps: 5
+logging_steps: 5
+disable_tqdm: false
 save_strategy: "steps"
 save_steps: 60
 save_total_limit: 2
@@ -114,3 +115,5 @@ debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 20
 max_train_trace_files: 8
 review_bundle_trace_sample_size: 1
+
+

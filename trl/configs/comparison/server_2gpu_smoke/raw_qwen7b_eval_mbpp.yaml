@@ -1,6 +1,7 @@
 ﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_eval_server_2gpu_smoke
 report_to: none
 logging_steps: 10
+disable_tqdm: false
 save_strategy: "no"
 eval_strategy: "no"
 push_to_hub: false
@@ -87,5 +88,7 @@ log_trace_dump_events: false
 debug_trace_dir: traces/rollout
 debug_trace_sample_size: 1
 review_bundle_trace_sample_size: 0
+
+
 
 

@@ -1,6 +1,7 @@
 ﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k8_server_2gpu_smoke
 report_to: none
 logging_steps: 5
+disable_tqdm: false
 save_strategy: "no"
 eval_strategy: "steps"
 eval_steps: 10
@@ -110,4 +111,6 @@ debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 999999
 max_train_trace_files: 0
 review_bundle_trace_sample_size: 0
+
+
 
