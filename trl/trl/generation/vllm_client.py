@@ -513,10 +513,26 @@ class VLLMClient:
             )
             self.communicator = pg
         else:
+            logger.info(
+                "Creating local StatelessProcessGroup: host=%s group_port=%s rank=%s world_size=%s",
+                self.host,
+                self.group_port,
+                self.rank,
+                world_size,
+            )
             pg = StatelessProcessGroup.create(
                 host=self.host, port=self.group_port, rank=self.rank, world_size=world_size
             )
+            logger.info(
+                "Local StatelessProcessGroup ready: host=%s group_port=%s rank=%s world_size=%s",
+                self.host,
+                self.group_port,
+                self.rank,
+                world_size,
+            )
+            logger.info("Creating local PyNcclCommunicator: device=%s rank=%s", device, self.rank)
             self.communicator = PyNcclCommunicator(pg, device=device)
+            logger.info("Local PyNcclCommunicator ready: device=%s rank=%s", device, self.rank)
         logger.info("Local weight-sync communicator ready")
 
         # When the client object is deleted, close the weight update group

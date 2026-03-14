@@ -168,8 +168,26 @@ class WeightSyncWorkerExtension:
         else:
             # Create a stateless process group to manage communication between training processes and vLLM workers.
             # Initialize the NCCL-based communicator for weight synchronization.
+            logger.info(
+                "Server worker creating StatelessProcessGroup: host=%s port=%s world_size=%s rank=%s device=%s",
+                host,
+                port,
+                world_size,
+                rank,
+                self.device,
+            )
             pg = StatelessProcessGroup.create(host=host, port=port, rank=rank, world_size=world_size)
+            logger.info(
+                "Server worker StatelessProcessGroup ready: host=%s port=%s world_size=%s rank=%s device=%s",
+                host,
+                port,
+                world_size,
+                rank,
+                self.device,
+            )
+            logger.info("Server worker creating PyNcclCommunicator: rank=%s device=%s", rank, self.device)
             self.communicator = PyNcclCommunicator(pg, device=self.device)
+            logger.info("Server worker PyNcclCommunicator ready: rank=%s device=%s", rank, self.device)
 
         # The client process that sends updated weights has the highest rank (world_size - 1).
         self.client_rank = world_size - 1
