@@ -66,7 +66,9 @@ trap cleanup EXIT
 
 choose_stage_port() {
   local candidate="$1"
+  local candidate_group_port
   while true; do
+    candidate_group_port=$((candidate + 40000))
     if healthcheck "$candidate"; then
       log "Port ${candidate} already has a live server, trying next port" >&2
       candidate=$((candidate + 1))
@@ -77,6 +79,11 @@ choose_stage_port() {
       candidate=$((candidate + 1))
       continue
     fi
+    if port_in_use "$candidate_group_port"; then
+      log "Group port ${candidate_group_port} is already in use, trying next port" >&2
+      candidate=$((candidate + 1))
+      continue
+    fi
     echo "$candidate"
     return
   done
@@ -84,15 +91,20 @@ choose_stage_port() {
 
 start_server() {
   local port="$1"
+  local group_port="$((port + 40000))"
   local server_log="/root/autodl-tmp/CODE-GRPO/trl/vllm_server_smoke_${port}.log"
 
-  log "Checking whether port ${port} already has a live server"
+  log "Checking whether port ${port} already has a live server (group_port=${group_port})"
   if healthcheck "$port"; then
     log "Port ${port} already has a live server. Stop it or use another port."
     exit 1
   fi
   if port_in_use "$port"; then
     log "Port ${port} is already in use by another process. Stop it or use another port."
+    exit 1
+  fi
+  if port_in_use "$group_port"; then
+    log "Group port ${group_port} is already in use by another process. Stop it or use another port."
     exit 1
   fi
 
