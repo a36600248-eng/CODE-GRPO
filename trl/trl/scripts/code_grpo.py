@@ -673,6 +673,7 @@ def main(script_args, training_args, model_args, dataset_args):
         metrics = trainer.evaluate(eval_dataset=test_dataset)
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
+        public_metrics = trainer.public_metrics(metrics, split="test")
         if rank == 0:
             with open(os.path.join(run_layout["logs_dir"], "test_metrics.txt"), "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(_json_safe(metrics), ensure_ascii=False) + "\n")
@@ -681,7 +682,7 @@ def main(script_args, training_args, model_args, dataset_args):
                 rank,
                 trace_sample_size=int(getattr(training_args, "review_bundle_trace_sample_size", 2)),
             )
-        trainer.accelerator.print(metrics)
+        trainer.accelerator.print(public_metrics)
         trainer.accelerator.print("CodeGRPO test mode completed.")
         return
 

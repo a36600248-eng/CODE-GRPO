@@ -438,6 +438,10 @@ class CodeGRPOTrainer(GRPOTrainer):
             if key in self._EVAL_LOG_KEYS or any(key.startswith(prefix) for prefix in self._EVAL_LOG_PREFIXES)
         }
 
+    def public_metrics(self, metrics: dict[str, float], split: str) -> dict[str, float]:
+        mode = "eval" if split in {"eval", "test", "baseline_eval"} else "train"
+        return self._filter_public_logs(dict(metrics), mode=mode)
+
     def _build_training_batch(self, train_samples: list) -> dict[str, torch.Tensor]:
         device = self.accelerator.device
         prompt_ids_tensors = []
@@ -823,3 +827,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         logs = self._filter_public_logs({**logs, **metrics}, mode=mode)
         self._metrics[mode].clear()
         super().log(logs, start_time)
+
+    def log_metrics(self, split: str, metrics: dict[str, float]) -> None:
+        public_metrics = self.public_metrics(metrics, split=split)
+        super().log_metrics(split, public_metrics)

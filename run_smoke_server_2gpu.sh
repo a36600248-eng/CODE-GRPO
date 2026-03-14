@@ -64,14 +64,15 @@ fi
 
 cleanup() {
   if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" || true
+    log "Stopping smoke vLLM server process group: ${SERVER_PID}"
+    kill -- -"${SERVER_PID}" 2>/dev/null || kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" || true
   fi
 }
 trap cleanup EXIT
 
 log "Starting smoke vLLM server on GPU0, port=${PORT}"
-CUDA_VISIBLE_DEVICES=0 python -m trl.cli.main vllm-serve \
+setsid env CUDA_VISIBLE_DEVICES=0 python -m trl.cli.main vllm-serve \
   --model "${MODEL_PATH}" \
   --tokenizer "${MODEL_PATH}" \
   --host 127.0.0.1 \
