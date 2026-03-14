@@ -544,6 +544,13 @@ class GRPOConfig(_BaseConfig):
             "Unless the port is occupied, there is no need to change it.",
         },
     )
+    vllm_sync_steps: int = field(
+        default=5,
+        metadata={
+            "help": "Synchronize updated training weights into vLLM every N global steps. Set to 1 for every-step "
+            "sync, or a larger value to trade some policy lag for lower sync overhead."
+        },
+    )
 
     # Parameters that control colocated vLLM execution (only used when `vllm_mode` is `"colocate"`)
     vllm_gpu_memory_utilization: float = field(

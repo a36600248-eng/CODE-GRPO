@@ -145,7 +145,11 @@ class CodeGRPOTrainer(GRPOTrainer):
         ):
             self._last_loaded_step = self.state.global_step
             return
-        if self.state.global_step == self._last_loaded_step:
+        sync_steps = max(1, int(getattr(self.args, "vllm_sync_steps", 5) or 1))
+        should_sync = self._last_loaded_step < 0 or (
+            self.state.global_step - self._last_loaded_step >= sync_steps
+        )
+        if not should_sync:
             return
         with profiling_context(self, "sync_weights"):
             self.vllm_generation.sync_weights()
