@@ -15,6 +15,8 @@ conda activate codegrpo
 
 export OMP_NUM_THREADS=8
 export PYTORCH_ALLOC_CONF=expandable_segments:True
+export NCCL_SOCKET_IFNAME=lo
+export NCCL_IB_DISABLE=1
 
 MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-Coder-7B-Instruct
 
