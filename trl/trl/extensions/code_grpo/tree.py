@@ -1243,6 +1243,7 @@ class CodeGRPOTreeRunner:
         )
         trace_max_chars = max(self.args.error_max_chars * 4, self.args.error_max_chars)
         trace_max_lines = max(self.args.error_max_lines * 4, self.args.error_max_lines)
+        trace_store_full_text = bool(getattr(self.args, "trace_store_full_text", False))
 
         code = parent.code if parent.frozen_code else parsed_code
         reasoning = parent.reasoning if can_reuse_reason else ""
