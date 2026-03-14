@@ -901,9 +901,14 @@ def main(script_args: ScriptArguments):
             "args": (request.host, request.port, world_size, request.client_device_uuid),
         }
         for connection in connections:
-            connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+            connection.send({"type": "call", "method": "collective_rpc", "kwargs": kwargs})
 
-        return {"message": "Request received, initializing communicator"}
+        all_outputs = [connection.recv() for connection in connections]
+        for output in all_outputs:
+            if isinstance(output, dict):
+                _raise_worker_error(output)
+
+        return {"message": "Communicator initialized"}
 
     class UpdateWeightsRequest(BaseModel):
         name: str
