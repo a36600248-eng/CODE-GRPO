@@ -34,9 +34,31 @@ healthcheck() {
   curl -sf --connect-timeout 2 --max-time 3 "http://127.0.0.1:${PORT}/health/" > /dev/null
 }
 
+port_in_use() {
+  python - "$PORT" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(("127.0.0.1", port))
+except OSError:
+    sys.exit(0)
+else:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
 log "Checking whether port ${PORT} already has a live server"
 if healthcheck; then
   log "Port ${PORT} already has a live server. Stop it or use another port."
+  exit 1
+fi
+if port_in_use; then
+  log "Port ${PORT} is already in use by another process. Stop it or use another port."
   exit 1
 fi
 
