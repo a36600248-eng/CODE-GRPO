@@ -208,6 +208,7 @@ class VLLMClient:
         top_p: float = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        min_tokens: int = 0,
         max_tokens: int = 16,
         logprobs: int | None = 0,
         truncate_prompt_tokens: int | None = None,
@@ -234,6 +235,8 @@ class VLLMClient:
                 Top-k sampling parameter. `0` means no truncation.
             min_p (`float`, *optional*, defaults to `0.0`):
                 Minimum probability for sampling.
+            min_tokens (`int`, *optional*, defaults to `0`):
+                Minimum number of tokens to generate for each prompt before EOS can terminate decoding.
             max_tokens (`int`, *optional*, defaults to `16`):
                 Maximum number of tokens to generate for each prompt.
             logprobs (`int` or `None`, *optional*, defaults to `0`):
@@ -278,6 +281,7 @@ class VLLMClient:
                 "top_p": top_p,
                 "top_k": top_k,
                 "min_p": min_p,
+                "min_tokens": min_tokens,
                 "max_tokens": max_tokens,
                 "logprobs": logprobs,
                 "truncate_prompt_tokens": truncate_prompt_tokens,
@@ -305,6 +309,7 @@ class VLLMClient:
         top_p: float = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        min_tokens: int = 0,
         max_tokens: int = 16,
         logprobs: int | None = 0,
         truncate_prompt_tokens: int | None = None,
@@ -333,6 +338,8 @@ class VLLMClient:
                 Top-k sampling parameter. `0` means no truncation.
             min_p (`float`, *optional*, defaults to `0.0`):
                 Minimum probability for sampling.
+            min_tokens (`int`, *optional*, defaults to `0`):
+                Minimum number of tokens to generate for each message list before EOS can terminate decoding.
             max_tokens (`int`, *optional*, defaults to `16`):
                 Maximum number of tokens to generate for each message list.
             logprobs (`int` or `None`, *optional*, defaults to `0`):
@@ -394,6 +401,7 @@ class VLLMClient:
                 "top_p": top_p,
                 "top_k": top_k,
                 "min_p": min_p,
+                "min_tokens": min_tokens,
                 "max_tokens": max_tokens,
                 "logprobs": logprobs,
                 "truncate_prompt_tokens": truncate_prompt_tokens,

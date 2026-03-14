@@ -497,6 +497,7 @@ def main(script_args: ScriptArguments):
         top_p: float = 1.0
         top_k: int = -1
         min_p: float = 0.0
+        min_tokens: int = 0
         max_tokens: int = 16
         logprobs: int | None = 0
         truncate_prompt_tokens: int | None = None
@@ -529,6 +530,8 @@ def main(script_args: ScriptArguments):
                 - `top_k` (`int`, *optional*, defaults to `-1`): Top-k sampling parameter. If set to `-1`, it disables
                   top-k sampling.
                 - `min_p` (`float`, *optional*, defaults to `0.0`): Minimum probability threshold for sampling.
+                - `min_tokens` (`int`, *optional*, defaults to `0`): Minimum number of tokens to generate before EOS
+                  can terminate decoding.
                 - `max_tokens` (`int`, *optional*, defaults to `16`): Maximum number of tokens to generate for each
                   completion.
                 - `logprobs` (`int`, *optional*, defaults to `0`): Number of top logprobs to return per token. When 0,
@@ -583,6 +586,7 @@ def main(script_args: ScriptArguments):
             "top_p": request.top_p,
             "top_k": request.top_k,
             "min_p": request.min_p,
+            "min_tokens": request.min_tokens,
             "max_tokens": request.max_tokens,
             "truncate_prompt_tokens": request.truncate_prompt_tokens,
             "logprobs": request.logprobs,
@@ -661,6 +665,7 @@ def main(script_args: ScriptArguments):
         top_p: float = 1.0
         top_k: int = -1
         min_p: float = 0.0
+        min_tokens: int = 0
         max_tokens: int = 16
         logprobs: int | None = 0
         truncate_prompt_tokens: int | None = None
@@ -693,6 +698,8 @@ def main(script_args: ScriptArguments):
                 - `top_k` (`int`, *optional*, defaults to `-1`): Top-k sampling parameter. If set to `-1`, it disables
                   top-k sampling.
                 - `min_p` (`float`, *optional*, defaults to `0.0`): Minimum probability threshold for sampling.
+                - `min_tokens` (`int`, *optional*, defaults to `0`): Minimum number of tokens to generate before EOS
+                  can terminate decoding.
                 - `max_tokens` (`int`, *optional*, defaults to `16`): Maximum number of tokens to generate for each
                   completion.
                 - `logprobs` (`int`, *optional*, defaults to `0`): Number of top logprobs to return per token. When 0,
@@ -750,6 +757,7 @@ def main(script_args: ScriptArguments):
             "top_p": request.top_p,
             "top_k": request.top_k,
             "min_p": request.min_p,
+            "min_tokens": request.min_tokens,
             "max_tokens": request.max_tokens,
             "truncate_prompt_tokens": request.truncate_prompt_tokens,
             "logprobs": request.logprobs,
