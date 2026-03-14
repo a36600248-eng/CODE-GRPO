@@ -50,6 +50,7 @@ class TrainSample:
     A_reason: float
     R_code: float
     pass_rate: float
+    old_per_token_logps: list[float] | None = None
 
 
 @dataclass

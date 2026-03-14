@@ -18,9 +18,10 @@ from ..extensions.code_grpo import (
     build_token_masks,
 )
 from ..extras.profiling import profiling_context
+from ..models.utils import disable_gradient_checkpointing
 from .code_grpo_config import CodeGRPOConfig
 from .grpo_trainer import GRPOTrainer
-from .utils import get_config_model_id, pad
+from .utils import get_config_model_id, pad, use_adapter
 
 
 if torch.cuda.is_available():
@@ -34,6 +35,32 @@ class CodeGRPOTrainer(GRPOTrainer):
 
     _tag_names = ["trl", "code_grpo"]
     _name = "CodeGRPO"
+    _TRAIN_LOG_KEYS = frozenset(
+        {
+            "loss",
+            "loss_code",
+            "loss_reason",
+            "learning_rate",
+            "grad_norm",
+            "kl",
+            "mean_R_code",
+            "mean_R_reason",
+            "mean_pass_rate",
+            "rollout_time_s",
+        }
+    )
+    _EVAL_LOG_KEYS = frozenset(
+        {
+            "eval_kl",
+            "eval_pass_at_1",
+            "eval_best_pass_rate_overall",
+            "eval_generation_format_ok_rate",
+            "eval_compile_ok_rate",
+            "eval_syntax_error_rate",
+            "eval_timeout_rate",
+        }
+    )
+    _EVAL_LOG_PREFIXES = ("eval_pass_at_1_round_", "eval_best_pass_rate_round_")
 
     def __init__(
         self,
@@ -111,8 +138,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._trace_dump_counter = 0
         self._train_trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
-        self._last_weight_probe_step: int | None = None
-        self._last_weight_probe_metrics: dict[str, float] = {}
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
@@ -186,108 +211,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._reward_window_buffers.clear()
         return payload
 
-    @staticmethod
-    def _select_probe_parameter(named_parameters, preferred_substrings: list[str]):
-        for preferred in preferred_substrings:
-            for name, parameter in named_parameters:
-                if preferred in name:
-                    return name, parameter
-        return None, None
-
-    @staticmethod
-    def _tensor_probe_metrics(parameter: torch.Tensor, prefix: str) -> dict[str, float]:
-        flat = parameter.detach().float().reshape(-1)
-        if flat.numel() == 0:
-            return {
-                f"{prefix}_sample_sum": 0.0,
-                f"{prefix}_sample_abs_mean": 0.0,
-                f"{prefix}_sample_abs_max": 0.0,
-            }
-        sample = flat[: min(1024, flat.numel())]
-        return {
-            f"{prefix}_sample_sum": float(sample.sum().item()),
-            f"{prefix}_sample_abs_mean": float(sample.abs().mean().item()),
-            f"{prefix}_sample_abs_max": float(sample.abs().max().item()),
-        }
-
-    def _get_vllm_probe_model(self):
-        vllm_generation = getattr(self, "vllm_generation", None)
-        llm = getattr(vllm_generation, "llm", None)
-        llm_engine = getattr(llm, "llm_engine", None)
-        model_executor = getattr(llm_engine, "model_executor", None)
-        driver_worker = getattr(model_executor, "driver_worker", None)
-        if driver_worker is None:
-            workers = getattr(model_executor, "workers", None)
-            if workers:
-                driver_worker = workers[0]
-        model_runner = getattr(driver_worker, "model_runner", None)
-        return getattr(model_runner, "model", None)
-
-    def _collect_eval_weight_probe_metrics(self) -> dict[str, float]:
-        current_step = int(self.state.global_step)
-        if self._last_weight_probe_step == current_step and self._last_weight_probe_metrics:
-            return dict(self._last_weight_probe_metrics)
-
-        metrics: dict[str, float] = {
-            "probe_hf_lora_found": 0.0,
-            "probe_vllm_qproj_found": 0.0,
-        }
-        hf_probe_name = ""
-        vllm_probe_name = ""
-
-        model_for_probe = self.accelerator.unwrap_model(self.model)
-        hf_named_parameters = list(model_for_probe.named_parameters())
-        hf_probe_name, hf_parameter = self._select_probe_parameter(
-            hf_named_parameters,
-            [
-                "layers.0.self_attn.q_proj.lora_B.default.weight",
-                "layers.0.self_attn.q_proj.lora_B.weight",
-                "lora_B.default.weight",
-                "lora_B.weight",
-            ],
-        )
-        if hf_parameter is not None:
-            metrics["probe_hf_lora_found"] = 1.0
-            metrics.update(self._tensor_probe_metrics(hf_parameter, "probe_hf_lora"))
-
-        if getattr(self, "use_vllm", False):
-            vllm_model = self._get_vllm_probe_model()
-            if vllm_model is not None:
-                vllm_named_parameters = list(vllm_model.named_parameters())
-                vllm_probe_name, vllm_parameter = self._select_probe_parameter(
-                    vllm_named_parameters,
-                    [
-                        "model.layers.0.self_attn.q_proj.weight",
-                        "layers.0.self_attn.q_proj.weight",
-                        "self_attn.q_proj.weight",
-                        "model.layers.0.self_attn.qkv_proj.weight",
-                        "layers.0.self_attn.qkv_proj.weight",
-                        "self_attn.qkv_proj.weight",
-                        "qkv_proj.weight",
-                    ],
-                )
-                if vllm_parameter is not None:
-                    metrics["probe_vllm_qproj_found"] = 1.0
-                    metrics.update(self._tensor_probe_metrics(vllm_parameter, "probe_vllm_qproj"))
-                else:
-                    candidate_names = [name for name, _ in vllm_named_parameters[:12]]
-                    logger.info("[WEIGHT_PROBE] step=%s vllm_probe_candidates=%s", current_step, candidate_names)
-
-        logger.info(
-            "[WEIGHT_PROBE] step=%s hf_name=%s hf_sum=%.8f hf_abs_mean=%.8f vllm_name=%s vllm_sum=%.8f vllm_abs_mean=%.8f",
-            current_step,
-            hf_probe_name or "<missing>",
-            metrics.get("probe_hf_lora_sample_sum", 0.0),
-            metrics.get("probe_hf_lora_sample_abs_mean", 0.0),
-            vllm_probe_name or "<missing>",
-            metrics.get("probe_vllm_qproj_sample_sum", 0.0),
-            metrics.get("probe_vllm_qproj_sample_abs_mean", 0.0),
-        )
-
-        self._last_weight_probe_step = current_step
-        self._last_weight_probe_metrics = dict(metrics)
-        return dict(metrics)
-
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
             self._signature_columns = ["question_id", "prompt", "test_cases"]
@@ -331,16 +254,64 @@ class CodeGRPOTrainer(GRPOTrainer):
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
             self._trace_dump_counter += 1
 
+    @staticmethod
+    def _iter_rollout_nodes(rollout):
+        for round_item in getattr(rollout, "rounds", []) or []:
+            for node in round_item.get("nodes", []) or []:
+                yield node
+
+    def _score_rollout_for_trace(self, rollout) -> tuple[float, ...]:
+        nodes = list(self._iter_rollout_nodes(rollout))
+        if not nodes:
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+        hard_error_count = 0
+        compile_fail_count = 0
+        soft_fail_count = 0
+        max_soft_fail = 0.0
+        unsolved_count = 0
+        any_full_text = 0.0
+
+        for node in nodes:
+            pass_rate = float(node.get("pass_rate", 0.0) or 0.0)
+            compile_score = float(node.get("compile_score", 0.0) or 0.0)
+            status_code = str(node.get("status_code", "") or "")
+            generation_format_ok = bool(node.get("generation_format_ok", False))
+            r_soft_effective = float(node.get("R_soft_effective", 0.0) or 0.0)
+            generation_debug = node.get("generation_debug", {}) or {}
+
+            if generation_debug.get("full_prompt_rendered") and generation_debug.get("full_raw_output"):
+                any_full_text = 1.0
+
+            if status_code in {"SYNTAX_ERROR", "RUNTIME_ERROR", "TIMEOUT"}:
+                hard_error_count += 1
+            if compile_score < 1.0 or not generation_format_ok:
+                compile_fail_count += 1
+            if pass_rate < 1.0:
+                unsolved_count += 1
+                if r_soft_effective > 0.0:
+                    soft_fail_count += 1
+                    max_soft_fail = max(max_soft_fail, r_soft_effective)
+
+        return (
+            float(hard_error_count),
+            float(compile_fail_count),
+            float(soft_fail_count),
+            float(max_soft_fail),
+            float(unsolved_count),
+            any_full_text,
+        )
+
     def _select_rollouts_for_trace(self, rollouts, mode: str):
         selected = list(rollouts)
         whitelist = {str(qid) for qid in getattr(self.args, "debug_trace_question_ids", [])}
         if whitelist:
             selected = [rollout for rollout in selected if rollout.question_id in whitelist]
+        else:
+            selected = sorted(selected, key=self._score_rollout_for_trace, reverse=True)
         sample_size = int(getattr(self.args, "debug_trace_sample_size", 0) or 0)
-        if sample_size > 0 and len(selected) > sample_size and not whitelist:
-            seed = int(self.args.seed + self.state.global_step + (0 if mode == "train" else 10_000_000))
-            rng = random.Random(seed)
-            selected = rng.sample(selected, sample_size)
+        if sample_size > 0 and len(selected) > sample_size:
+            selected = selected[:sample_size]
         return selected
 
     def _should_dump_train_traces(self) -> bool:
@@ -374,6 +345,93 @@ class CodeGRPOTrainer(GRPOTrainer):
             with open(self._rollout_summary_path, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(lines) + "\n")
 
+    def _should_record_kl_metric(self, mode: str) -> bool:
+        if not bool(getattr(self.args, "log_kl_metrics", True)):
+            return False
+        if mode == "eval":
+            return True
+        logging_strategy = str(getattr(self.args, "logging_strategy", "steps") or "steps")
+        if logging_strategy == "no":
+            return False
+        if logging_strategy != "steps":
+            return True
+        logging_steps = int(getattr(self.args, "logging_steps", 0) or 0)
+        if logging_steps <= 1:
+            return True
+        next_step = int(self.state.global_step) + 1
+        max_steps = int(getattr(self.args, "max_steps", 0) or 0)
+        return next_step % logging_steps == 0 or (max_steps > 0 and next_step >= max_steps)
+
+    def _compute_reference_kl_metric(
+        self,
+        per_token_logps: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        completion_mask: torch.Tensor,
+        logits_to_keep: int,
+    ) -> float | None:
+        if not self._should_record_kl_metric("train" if self.model.training else "eval"):
+            return None
+
+        with torch.no_grad():
+            ref_per_token_logps = self._get_reference_per_token_logps(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                logits_to_keep=logits_to_keep,
+            )
+            if ref_per_token_logps is None:
+                return None
+
+            log_ratio = ref_per_token_logps - per_token_logps.detach()
+            per_token_kl = torch.exp(log_ratio) - log_ratio - 1.0
+            denom = completion_mask.sum().clamp(min=1.0)
+            mean_kl = (per_token_kl * completion_mask).sum() / denom
+            return self.accelerator.gather(mean_kl).nanmean().item()
+
+    def _get_reference_per_token_logps(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        logits_to_keep: int,
+    ) -> torch.Tensor | None:
+        if self.ref_model is not None:
+            ref_per_token_logps, _ = self._get_per_token_logps_and_entropies(
+                self.ref_model,
+                input_ids,
+                attention_mask,
+                logits_to_keep=logits_to_keep,
+                compute_entropy=False,
+            )
+            return ref_per_token_logps
+
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        peft_config = getattr(unwrapped_model, "peft_config", None)
+        if peft_config is None:
+            return None
+
+        adapter_name = "ref" if "ref" in peft_config else None
+        with use_adapter(unwrapped_model, adapter_name=adapter_name):
+            ref_per_token_logps, _ = self._get_per_token_logps_and_entropies(
+                self.model,
+                input_ids,
+                attention_mask,
+                logits_to_keep=logits_to_keep,
+                compute_entropy=False,
+            )
+        return ref_per_token_logps
+
+    def _filter_public_logs(self, logs: dict[str, float], mode: str) -> dict[str, float]:
+        if not bool(getattr(self.args, "compact_logging", True)):
+            return logs
+
+        if mode == "train":
+            return {key: value for key, value in logs.items() if key in self._TRAIN_LOG_KEYS}
+        return {
+            key: value
+            for key, value in logs.items()
+            if key in self._EVAL_LOG_KEYS or any(key.startswith(prefix) for prefix in self._EVAL_LOG_PREFIXES)
+        }
+
     def _build_training_batch(self, train_samples: list) -> dict[str, torch.Tensor]:
         device = self.accelerator.device
         prompt_ids_tensors = []
@@ -382,10 +440,12 @@ class CodeGRPOTrainer(GRPOTrainer):
         completion_masks = []
         code_masks = []
         reason_masks = []
+        old_logprobs = []
         advantages_code = []
         advantages_reason = []
         r_code = []
         pass_rates = []
+        has_old_logprobs = True
 
         for sample in train_samples:
             prompt_ids = self.code_tokenizer(sample.prompt_text, add_special_tokens=False)["input_ids"]
@@ -410,6 +470,14 @@ class CodeGRPOTrainer(GRPOTrainer):
             completion_masks.append(torch.ones_like(completion_tensor, dtype=torch.long))
             code_masks.append(torch.tensor(code_mask, dtype=torch.float32))
             reason_masks.append(torch.tensor(reason_mask, dtype=torch.float32))
+            sample_old_logprobs = getattr(sample, "old_per_token_logps", None)
+            if sample_old_logprobs is None:
+                has_old_logprobs = False
+            else:
+                values = list(sample_old_logprobs)[: len(completion_ids)]
+                if len(values) < len(completion_ids):
+                    values.extend([0.0] * (len(completion_ids) - len(values)))
+                old_logprobs.append(torch.tensor(values, dtype=torch.float32))
             advantages_code.append(sample.A_code)
             advantages_reason.append(sample.A_reason)
             r_code.append(sample.R_code)
@@ -458,14 +526,48 @@ class CodeGRPOTrainer(GRPOTrainer):
             "r_code": torch.tensor(r_code, dtype=torch.float32, device=device),
             "pass_rate": torch.tensor(pass_rates, dtype=torch.float32, device=device),
             "num_items_in_batch": completion_mask.sum(),
+            **(
+                {
+                    "old_per_token_logps": pad(
+                        old_logprobs,
+                        padding_value=0.0,
+                        padding_side="right",
+                        pad_to_multiple_of=self.pad_to_multiple_of,
+                    ).to(device)
+                }
+                if has_old_logprobs and old_logprobs
+                else {}
+            ),
         }
+
+    def _attach_old_per_token_logps(self, batch: dict[str, torch.Tensor | Any]) -> None:
+        if "old_per_token_logps" in batch:
+            return
+
+        prompt_ids = batch["prompt_ids"]
+        prompt_mask = batch["prompt_mask"]
+        completion_ids = batch["completion_ids"]
+        completion_mask = batch["completion_mask"]
+        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        logits_to_keep = completion_ids.size(1)
+
+        with torch.no_grad(), disable_gradient_checkpointing(self.model, self.args.gradient_checkpointing_kwargs):
+            old_per_token_logps, _ = self._get_per_token_logps_and_entropies(
+                self.model,
+                input_ids,
+                attention_mask,
+                logits_to_keep=logits_to_keep,
+                compute_entropy=False,
+            )
+
+        batch["old_per_token_logps"] = old_per_token_logps.detach()
 
     def _generate_and_score_completions(self, inputs: list[dict[str, Any]]) -> dict[str, torch.Tensor | Any]:
         mode = "train" if self.model.training else "eval"
         examples = self._unique_examples(inputs)
         rollout_t0 = time.perf_counter()
         self._maybe_sync_vllm_weights()
-        probe_metrics = self._collect_eval_weight_probe_metrics() if mode == "eval" else {}
 
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
@@ -519,6 +621,8 @@ class CodeGRPOTrainer(GRPOTrainer):
             raise ValueError("CodeGRPOTrainer received an empty generation batch and could not create fallback samples.")
 
         batch = self._build_training_batch(train_samples)
+        if mode == "train":
+            self._attach_old_per_token_logps(batch)
 
         mean_r_code = self._mean([rollout.mean_R_code for rollout in rollouts])
         mean_r_reason = self._mean([rollout.mean_R_reason for rollout in rollouts])
@@ -591,10 +695,6 @@ class CodeGRPOTrainer(GRPOTrainer):
                 logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
 
         if mode == "eval":
-            for key, value in probe_metrics.items():
-                self._metrics[mode][key].append(float(value))
-                merged_eval_metrics[key] = float(value)
-
             self._last_eval_metrics = {
                 "mean_R_code": mean_r_code,
                 "mean_R_reason": mean_r_reason,
@@ -639,11 +739,34 @@ class CodeGRPOTrainer(GRPOTrainer):
         advantages_code = inputs["advantages_code"]
         advantages_reason = inputs["advantages_reason"]
 
-        loss_code_per_seq = -advantages_code * (per_token_logps * code_mask).sum(dim=1)
-        loss_reason_per_seq = -advantages_reason * (per_token_logps * reason_mask).sum(dim=1)
+        old_per_token_logps = inputs.get("old_per_token_logps")
+        old_per_token_logps = per_token_logps.detach() if old_per_token_logps is None else old_per_token_logps
+        log_ratio = per_token_logps - old_per_token_logps
+        coef_1 = torch.exp(log_ratio)
+        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+
+        advantages_code = advantages_code.unsqueeze(1)
+        advantages_reason = advantages_reason.unsqueeze(1)
+
+        per_token_code_loss = -torch.min(coef_1 * advantages_code, coef_2 * advantages_code)
+        per_token_reason_loss = -torch.min(coef_1 * advantages_reason, coef_2 * advantages_reason)
+
+        loss_code_per_seq = (per_token_code_loss * code_mask).sum(dim=1) / code_mask.sum(dim=1).clamp(min=1.0)
+        loss_reason_per_seq = (per_token_reason_loss * reason_mask).sum(dim=1) / reason_mask.sum(dim=1).clamp(min=1.0)
         loss_code = loss_code_per_seq.mean()
         loss_reason = loss_reason_per_seq.mean()
         loss = loss_code + self.args.beta_reason * loss_reason
+        if self.beta != 0.0:
+            ref_per_token_logps = self._get_reference_per_token_logps(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                logits_to_keep=logits_to_keep,
+            )
+            if ref_per_token_logps is not None:
+                log_ratio = ref_per_token_logps - per_token_logps
+                per_token_kl = torch.exp(log_ratio) - log_ratio - 1.0
+                seq_kl = (per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1).clamp(min=1.0)
+                loss = loss + self.beta * seq_kl.mean()
 
         mode = "train" if self.model.training else "eval"
         normalizer = self.current_gradient_accumulation_steps if mode == "train" else 1.0
@@ -653,6 +776,15 @@ class CodeGRPOTrainer(GRPOTrainer):
         gathered_loss_reason = self.accelerator.gather(loss_reason.detach()).float().mean().item()
         self._metrics[mode]["loss_code"].append(gathered_loss_code)
         self._metrics[mode]["loss_reason"].append(gathered_loss_reason)
+        kl_value = self._compute_reference_kl_metric(
+            per_token_logps=per_token_logps,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            completion_mask=completion_mask,
+            logits_to_keep=logits_to_keep,
+        )
+        if kl_value is not None:
+            self._metrics[mode]["kl"].append(kl_value)
         if bool(getattr(self.args, "log_reward_losses", False)):
             logger.info(
                 "[REWARD] loss_code=%.6f loss_reason=%.6f beta_reason=%.4f",
@@ -682,6 +814,6 @@ class CodeGRPOTrainer(GRPOTrainer):
             metrics = {f"eval_{key}": val for key, val in metrics.items()}
             self._last_eval_metrics = dict(metrics)
 
-        logs = {**logs, **metrics}
+        logs = self._filter_public_logs({**logs, **metrics}, mode=mode)
         self._metrics[mode].clear()
         super().log(logs, start_time)

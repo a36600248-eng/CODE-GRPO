@@ -21,14 +21,17 @@ import random
 import re
 import shutil
 import gc
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import torch
 from accelerate import logging
-from datasets import load_dataset
+from datasets import IterableDataset, load_dataset
 from transformers import TrainerCallback
+
+warnings.filterwarnings("ignore", message=r"TRL currently supports vLLM versions.*")
 
 from trl import (
     DatasetMixtureConfig,
@@ -50,6 +53,9 @@ logger = logging.get_logger(__name__)
 
 # Enable logging in a Hugging Face Space
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
+
+# Reduce known low-signal runtime warnings from dependencies on the shared server.
+warnings.filterwarnings("ignore", message=r"Detected kernel version .* can cause the process to hang\.")
 
 
 def _safe_slug(value: str, fallback: str, max_len: int = 64) -> str:
@@ -142,8 +148,54 @@ def _attach_runtime_file_logger(log_path: str):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     root_logger = py_logging.getLogger()
     abs_path = os.path.abspath(log_path)
+
+    def _configure_runtime_logging_levels():
+        if root_logger.level > py_logging.INFO:
+            root_logger.setLevel(py_logging.INFO)
+
+        logger_levels = {
+            "trl": py_logging.INFO,
+            "accelerate": py_logging.WARNING,
+            "accelerate.utils.other": py_logging.ERROR,
+            "transformers": py_logging.WARNING,
+            "transformers.trainer": py_logging.WARNING,
+            "transformers.tokenization_utils_base": py_logging.WARNING,
+            "transformers.configuration_utils": py_logging.WARNING,
+            "transformers.modeling_utils": py_logging.WARNING,
+            "transformers.generation.configuration_utils": py_logging.WARNING,
+            "transformers.image_processing_auto": py_logging.WARNING,
+            "datasets": py_logging.WARNING,
+            "vllm": py_logging.WARNING,
+            "peft": py_logging.WARNING,
+            "urllib3": py_logging.WARNING,
+            "httpx": py_logging.WARNING,
+            "httpcore": py_logging.WARNING,
+            "uvicorn": py_logging.WARNING,
+            "uvicorn.access": py_logging.ERROR,
+            "filelock": py_logging.WARNING,
+        }
+        for logger_name, level in logger_levels.items():
+            named_logger = py_logging.getLogger(logger_name)
+            named_logger.propagate = True
+            named_logger.setLevel(level)
+
+        try:
+            from datasets.utils import logging as datasets_logging
+
+            datasets_logging.set_verbosity_warning()
+        except Exception:
+            pass
+
+        try:
+            from transformers.utils import logging as transformers_logging
+
+            transformers_logging.set_verbosity_warning()
+        except Exception:
+            pass
+
     for handler in root_logger.handlers:
         if isinstance(handler, py_logging.FileHandler) and getattr(handler, "baseFilename", "") == abs_path:
+            _configure_runtime_logging_levels()
             return
     file_handler = py_logging.FileHandler(abs_path, encoding="utf-8")
     file_handler.setLevel(py_logging.INFO)
@@ -154,13 +206,7 @@ def _attach_runtime_file_logger(log_path: str):
         )
     )
     root_logger.addHandler(file_handler)
-    if root_logger.level > py_logging.INFO:
-        root_logger.setLevel(py_logging.INFO)
-    for logger_name in ("accelerate", "transformers", "trl", "datasets"):
-        named_logger = py_logging.getLogger(logger_name)
-        named_logger.propagate = True
-        if named_logger.level > py_logging.INFO:
-            named_logger.setLevel(py_logging.INFO)
+    _configure_runtime_logging_levels()
 
 
 class TextMetricsCallback(TrainerCallback):
@@ -405,13 +451,9 @@ def _generate_review_plots(bundle_root: str, logs_bundle: str, artifacts_bundle:
 def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_size: int = 2):
     bundle_root = os.path.join(run_layout["run_root"], "review_bundle")
     logs_bundle = os.path.join(bundle_root, "logs")
-    traces_bundle = os.path.join(bundle_root, "traces")
     artifacts_bundle = os.path.join(bundle_root, "artifacts")
-    plots_bundle = os.path.join(bundle_root, "plots")
     os.makedirs(logs_bundle, exist_ok=True)
-    os.makedirs(traces_bundle, exist_ok=True)
     os.makedirs(artifacts_bundle, exist_ok=True)
-    os.makedirs(plots_bundle, exist_ok=True)
 
     # Core metadata
     _copy_if_exists(os.path.join(run_layout["run_root"], "RUN_INDEX.txt"), os.path.join(bundle_root, "RUN_INDEX.txt"))
@@ -431,9 +473,8 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
             os.path.join(logs_bundle, filename),
         )
 
-    # Artifact summaries, but not heavy checkpoints.
+    # Artifact summaries only. Keep this bundle focused on direct result consumption.
     for filename in (
-        "trainer_state.json",
         "train_results.json",
         "eval_results.json",
         "baseline_eval_results.json",
@@ -445,9 +486,11 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
             os.path.join(artifacts_bundle, filename),
         )
 
-    # Randomly sample a few rollout traces for quick review.
+    # Randomly sample a few rollout traces only when explicitly requested.
     trace_candidates = sorted(glob.glob(os.path.join(run_layout["traces_dir"], "*.json")))
-    if trace_candidates:
+    if trace_sample_size > 0 and trace_candidates:
+        traces_bundle = os.path.join(bundle_root, "traces")
+        os.makedirs(traces_bundle, exist_ok=True)
         rng = random.Random(run_layout["run_id"])
         selected = (
             rng.sample(trace_candidates, min(trace_sample_size, len(trace_candidates)))
@@ -458,26 +501,25 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
             _copy_if_exists(src, os.path.join(traces_bundle, os.path.basename(src)))
 
     bundle_note = [
-        "This folder is the minimal package to send for debugging.",
+        "This folder is a compact review bundle for quick debugging.",
         "",
         "Included:",
         "- RUN_INDEX.txt and run_manifest.json",
         "- compact jsonl logs",
-        "- plots/train_reward_curves.png",
-        "- plots/eval_pass_at_1_by_round.png (mean +/- std across eval repeats, if repeats are enabled)",
-        "- trainer state / result json files",
-        "- a small sampled set of rollout trace json files",
+        "- result json files",
+        "- optional sampled rollout traces only when explicitly requested",
         "",
         "Not included on purpose:",
         "- verbose runtime log",
         "- duplicated plain-text trainer log",
+        "- trainer_state.json",
+        "- generated plots",
         "- full trace dump",
         "",
         "If a requested file is missing here, it was either not produced or intentionally omitted for compactness.",
     ]
     with open(os.path.join(bundle_root, "README.txt"), "w", encoding="utf-8") as handle:
         handle.write("\n".join(bundle_note) + "\n")
-    _generate_review_plots(bundle_root, logs_bundle, artifacts_bundle, rank)
 
 
 @dataclass
@@ -488,6 +530,14 @@ class CodeGRPOScriptArguments(ScriptArguments):
             "help": "Dataset adapter name/class path. Use 'default' or a dotted path "
             "like 'my_pkg.module:MyDatasetAdapter'."
         },
+    )
+    max_train_samples: int | None = field(
+        default=None,
+        metadata={"help": "Optional cap on the number of training examples after dataset adaptation."},
+    )
+    max_eval_samples: int | None = field(
+        default=None,
+        metadata={"help": "Optional cap on the number of eval/test examples after dataset adaptation."},
     )
 
 
@@ -507,9 +557,33 @@ def _load_dataset(script_args, dataset_args):
     raise ValueError("Either `datasets` or `dataset_name` must be provided.")
 
 
-def _adapt_splits(dataset, adapter, train_split: str, test_split: str):
-    train_dataset = adapter.adapt_dataset(dataset[train_split])
-    eval_dataset = adapter.adapt_dataset(dataset[test_split]) if test_split in dataset else None
+def _limit_examples(dataset_split, max_samples: int | None):
+    if max_samples is None:
+        return dataset_split
+    max_samples = int(max_samples)
+    if max_samples <= 0:
+        return dataset_split
+    if isinstance(dataset_split, IterableDataset):
+        take_fn = getattr(dataset_split, "take", None)
+        return take_fn(max_samples) if callable(take_fn) else dataset_split
+    select_fn = getattr(dataset_split, "select", None)
+    if callable(select_fn):
+        return dataset_split.select(range(min(len(dataset_split), max_samples)))
+    return dataset_split
+
+
+def _adapt_splits(
+    dataset,
+    adapter,
+    train_split: str,
+    test_split: str,
+    max_train_samples: int | None = None,
+    max_eval_samples: int | None = None,
+):
+    train_dataset = _limit_examples(adapter.adapt_dataset(dataset[train_split]), max_train_samples)
+    eval_dataset = (
+        _limit_examples(adapter.adapt_dataset(dataset[test_split]), max_eval_samples) if test_split in dataset else None
+    )
     return train_dataset, eval_dataset
 
 
@@ -558,6 +632,8 @@ def main(script_args, training_args, model_args, dataset_args):
         adapter=adapter,
         train_split=script_args.dataset_train_split,
         test_split=script_args.dataset_test_split,
+        max_train_samples=script_args.max_train_samples,
+        max_eval_samples=script_args.max_eval_samples,
     )
 
     trainer = CodeGRPOTrainer(

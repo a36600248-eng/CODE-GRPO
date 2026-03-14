@@ -191,11 +191,11 @@ class VLLMClient:
                 if response.status_code == 200:
                     if "X-Forwarded-For" in response.headers:
                         self.host = response.headers["X-Forwarded-For"]
-                    logger.info("Server is up!")
+                    logger.debug("Server is up.")
                     return None
 
             # Retry logic: wait before trying again
-            logger.info(f"Server is not up yet. Retrying in {retry_interval} seconds...")
+            logger.debug(f"Server is not up yet. Retrying in {retry_interval} seconds...")
             time.sleep(retry_interval)
 
     def generate(

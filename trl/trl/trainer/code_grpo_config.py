@@ -289,7 +289,7 @@ class CodeGRPOConfig(GRPOConfig):
         metadata={"help": "Dump train rollout traces only every N global steps. <=1 means every step."},
     )
     max_train_trace_files: int = field(
-        default=12,
+        default=8,
         metadata={"help": "Maximum number of train rollout trace files to dump in a single run (0 means no cap)."},
     )
     debug_trace_question_ids: list[str] = field(
@@ -299,8 +299,7 @@ class CodeGRPOConfig(GRPOConfig):
     trace_store_full_text: bool = field(
         default=False,
         metadata={
-            "help": "Store full prompt/output text inside rollout traces for exact replay and debugging. Keeps trace "
-            "files much larger, so enable only for diagnostic runs."
+            "help": "Store full prompt/output text inside the selected rollout traces for exact replay and debugging."
         },
     )
     dump_train_traces: bool = field(
@@ -330,6 +329,18 @@ class CodeGRPOConfig(GRPOConfig):
     log_trace_dump_events: bool = field(
         default=False,
         metadata={"help": "Whether to print trace dump count messages to the console."},
+    )
+    compact_logging: bool = field(
+        default=True,
+        metadata={
+            "help": "Log only a compact whitelist of high-signal metrics to console/reporters such as TensorBoard."
+        },
+    )
+    log_kl_metrics: bool = field(
+        default=True,
+        metadata={
+            "help": "Compute and log KL divergence as a monitoring metric even when it is not part of the loss."
+        },
     )
     review_bundle_trace_sample_size: int = field(
         default=2,

@@ -15,10 +15,13 @@
 import argparse
 import json
 import os
+import warnings
 
 import torch
 from accelerate import logging
 from peft import PeftConfig
+
+warnings.filterwarnings("ignore", message=r"TRL currently supports vLLM versions.*")
 
 from trl import (
     DatasetMixtureConfig,
@@ -123,6 +126,8 @@ def main(script_args, training_args, model_args, dataset_args):
         adapter=adapter,
         train_split=script_args.dataset_train_split,
         test_split=script_args.dataset_test_split,
+        max_train_samples=script_args.max_train_samples,
+        max_eval_samples=script_args.max_eval_samples,
     )
     if eval_dataset is None:
         raise ValueError("Standalone code_grpo_eval requires an eval/test split.")
