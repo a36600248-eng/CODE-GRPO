@@ -8,6 +8,7 @@ fi
 
 SEED=$1
 PORT=${2:-8000}
+GROUP_PORT=$((PORT + 40000))
 
 cd ~/autodl-tmp/CODE-GRPO/trl
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -41,7 +42,7 @@ finally:
 PY
 }
 
-echo "Checking whether port ${PORT} already has a live server"
+echo "Checking whether port ${PORT} already has a live server (group_port=${GROUP_PORT})"
 if healthcheck; then
   echo "Port ${PORT} already has a live server. Stop it or use another port."
   exit 1
@@ -98,7 +99,8 @@ run_train() {
     --config "${cfg}" \
     --seed "${SEED}" \
     --data_seed "${SEED}" \
-    --vllm_server_base_url "http://127.0.0.1:${PORT}"
+    --vllm_server_base_url "http://127.0.0.1:${PORT}" \
+    --vllm_group_port "${GROUP_PORT}"
 }
 
 run_eval() {
@@ -108,7 +110,8 @@ run_eval() {
     --config "${cfg}" \
     --seed "${SEED}" \
     --data_seed "${SEED}" \
-    --vllm_server_base_url "http://127.0.0.1:${PORT}"
+    --vllm_server_base_url "http://127.0.0.1:${PORT}" \
+    --vllm_group_port "${GROUP_PORT}"
 }
 
 CONFIG_ROOT=configs/comparison/server_2gpu

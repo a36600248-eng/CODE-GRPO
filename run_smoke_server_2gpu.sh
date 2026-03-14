@@ -8,6 +8,7 @@ fi
 
 SEED=$1
 PORT=${2:-8010}
+GROUP_PORT=$((PORT + 40000))
 ORCH_LOG=/root/autodl-tmp/CODE-GRPO/trl/smoke_orchestrator_${PORT}.log
 
 log() {
@@ -16,7 +17,7 @@ log() {
 
 exec > >(tee -a "${ORCH_LOG}") 2>&1
 
-log "Smoke orchestrator starting: seed=${SEED} port=${PORT}"
+log "Smoke orchestrator starting: seed=${SEED} port=${PORT} group_port=${GROUP_PORT}"
 
 cd ~/autodl-tmp/CODE-GRPO/trl
 log "Changed directory to $(pwd)"
@@ -111,7 +112,8 @@ run_train() {
     --config "${cfg}" \
     --seed "${SEED}" \
     --data_seed "${SEED}" \
-    --vllm_server_base_url "http://127.0.0.1:${PORT}"
+    --vllm_server_base_url "http://127.0.0.1:${PORT}" \
+    --vllm_group_port "${GROUP_PORT}"
 }
 
 run_eval() {
@@ -121,7 +123,8 @@ run_eval() {
     --config "${cfg}" \
     --seed "${SEED}" \
     --data_seed "${SEED}" \
-    --vllm_server_base_url "http://127.0.0.1:${PORT}"
+    --vllm_server_base_url "http://127.0.0.1:${PORT}" \
+    --vllm_group_port "${GROUP_PORT}"
 }
 
 CONFIG_ROOT=configs/comparison/server_2gpu_smoke
