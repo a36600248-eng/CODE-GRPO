@@ -16,6 +16,7 @@ import argparse
 import base64
 import logging
 import os
+import traceback
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -41,7 +42,7 @@ from trl.import_utils import (
 
 
 if is_fastapi_available():
-    from fastapi import FastAPI
+    from fastapi import FastAPI, HTTPException
 
 
 if is_pydantic_available():
@@ -78,6 +79,17 @@ if is_vllm_available():
 
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_worker_error(payload: dict) -> None:
+    if payload.get("status") != "error":
+        return
+    detail = (
+        f"Worker method '{payload.get('method')}' failed with {payload.get('error_type')}: "
+        f"{payload.get('error')}\n{payload.get('traceback', '')}"
+    )
+    logger.error(detail)
+    raise HTTPException(status_code=500, detail=detail)
 
 # We use CUDA with multiprocessing, so we must use the 'spawn' start method. Otherwise, we will get the following
 # error: RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use
@@ -384,8 +396,21 @@ def llm_worker(
         if command["type"] in ["call", "fire_and_forget"]:
             method_name = command["method"]
             args, kwargs = command.get("args", ()), command.get("kwargs", {})
-            method = getattr(llm, method_name)
-            result = method(*args, **kwargs)
+            try:
+                method = getattr(llm, method_name)
+                result = method(*args, **kwargs)
+            except Exception as exc:
+                error_payload = {
+                    "status": "error",
+                    "method": method_name,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                logger.exception("vLLM worker method failed: %s", method_name)
+                if command["type"] == "call":
+                    connection.send(error_payload)
+                continue
             if command["type"] == "call":
                 connection.send(result)
         elif command["type"] == "shutdown":
@@ -640,6 +665,9 @@ def main(script_args: ScriptArguments):
 
         # Receive results
         all_outputs = [connection.recv() for connection in connections]
+        for output in all_outputs:
+            if isinstance(output, dict):
+                _raise_worker_error(output)
 
         # Handle empty prompts (see above)
         all_outputs = [output for output, prompts in zip(all_outputs, chunked_prompts, strict=True) if prompts]
@@ -815,6 +843,9 @@ def main(script_args: ScriptArguments):
 
         # Receive results
         all_outputs = [connection.recv() for connection in connections]
+        for output in all_outputs:
+            if isinstance(output, dict):
+                _raise_worker_error(output)
 
         # Handle empty prompts (see above)
         all_outputs = [output for output, prompts in zip(all_outputs, chunked_messages, strict=True) if prompts]
