@@ -786,9 +786,12 @@ class VLLMGeneration:
                 # num_generations outputs for each one. This is faster than generating outputs for each duplicate
                 # prompt individually.
                 ordered_set_of_prompts = all_prompts[::num_generations]
+                greedy_server_multi = temperature == 0.0 and num_generations > 1 and rollout_func is None
+                if greedy_server_multi:
+                    ordered_set_of_prompts = [prompt for prompt in ordered_set_of_prompts for _ in range(num_generations)]
 
                 sampling_params = {
-                    "n": num_generations,
+                    "n": 1 if greedy_server_multi else num_generations,
                     "repetition_penalty": repetition_penalty,
                     "temperature": temperature,
                     "top_p": top_p,
@@ -842,7 +845,7 @@ class VLLMGeneration:
             # When using rollout_func, it handles its own generation logic and returns one result per prompt.
             # When NOT using rollout_func, vllm_client.generate(n=num_generations) returns num_generations
             # completions per prompt, so we need to duplicate prompt_ids to match.
-            if self.rollout_func is None:
+            if self.rollout_func is None and not (temperature == 0.0 and num_generations > 1):
                 # At this point, we only get 1 copy of each prompt, so we need to repeat them num_generations times
                 all_prompt_ids = [ids for ids in all_prompt_ids for _ in range(num_generations)]
 
