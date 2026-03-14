@@ -60,8 +60,27 @@ cleanup() {
     wait "$SERVER_PID" || true
   fi
   SERVER_PID=""
+  sleep 2
 }
 trap cleanup EXIT
+
+choose_stage_port() {
+  local candidate="$1"
+  while true; do
+    if healthcheck "$candidate"; then
+      log "Port ${candidate} already has a live server, trying next port"
+      candidate=$((candidate + 1))
+      continue
+    fi
+    if port_in_use "$candidate"; then
+      log "Port ${candidate} is already in use, trying next port"
+      candidate=$((candidate + 1))
+      continue
+    fi
+    echo "$candidate"
+    return
+  done
+}
 
 start_server() {
   local port="$1"
@@ -139,23 +158,23 @@ run_eval() {
 
 CONFIG_ROOT=configs/comparison/server_2gpu_smoke
 
-STAGE_PORT=$PORT
+STAGE_PORT=$(choose_stage_port "$PORT")
 
 start_server "${STAGE_PORT}"
 run_eval ${CONFIG_ROOT}/raw_qwen7b_eval_mbpp.yaml "${STAGE_PORT}"
 cleanup
 
-STAGE_PORT=$((PORT + 1))
+STAGE_PORT=$(choose_stage_port "$((STAGE_PORT + 1))")
 start_server "${STAGE_PORT}"
 run_train ${CONFIG_ROOT}/codegrpo_method_mbpp.yaml "${STAGE_PORT}"
 cleanup
 
-STAGE_PORT=$((PORT + 2))
+STAGE_PORT=$(choose_stage_port "$((STAGE_PORT + 1))")
 start_server "${STAGE_PORT}"
 run_train ${CONFIG_ROOT}/vanilla_grpo_multiround_k2_mbpp.yaml "${STAGE_PORT}"
 cleanup
 
-STAGE_PORT=$((PORT + 3))
+STAGE_PORT=$(choose_stage_port "$((STAGE_PORT + 1))")
 start_server "${STAGE_PORT}"
 run_train ${CONFIG_ROOT}/vanilla_grpo_single_round_k8_mbpp.yaml "${STAGE_PORT}"
 cleanup
