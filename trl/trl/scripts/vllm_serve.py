@@ -613,9 +613,10 @@ def main(script_args: ScriptArguments):
             "min_p": request.min_p,
             "min_tokens": request.min_tokens,
             "max_tokens": request.max_tokens,
-            "truncate_prompt_tokens": request.truncate_prompt_tokens,
             "logprobs": request.logprobs,
         }
+        if request.truncate_prompt_tokens is not None:
+            generation_kwargs["truncate_prompt_tokens"] = request.truncate_prompt_tokens
         generation_kwargs.update(request.generation_kwargs)
 
         # Structured outputs, if enabled
@@ -787,9 +788,10 @@ def main(script_args: ScriptArguments):
             "min_p": request.min_p,
             "min_tokens": request.min_tokens,
             "max_tokens": request.max_tokens,
-            "truncate_prompt_tokens": request.truncate_prompt_tokens,
             "logprobs": request.logprobs,
         }
+        if request.truncate_prompt_tokens is not None:
+            generation_kwargs["truncate_prompt_tokens"] = request.truncate_prompt_tokens
         generation_kwargs.update(request.generation_kwargs)
 
         # Structured outputs, if enabled

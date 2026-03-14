@@ -270,25 +270,25 @@ class VLLMClient:
         # Convert PIL images to base64 strings
         images = [pil_to_base64(img) for img in images] if images else None
 
-        response = self.session.post(
-            url,
-            json={
-                "prompts": prompts,
-                "images": images,
-                "n": n,
-                "repetition_penalty": repetition_penalty,
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-                "min_p": min_p,
-                "min_tokens": min_tokens,
-                "max_tokens": max_tokens,
-                "logprobs": logprobs,
-                "truncate_prompt_tokens": truncate_prompt_tokens,
-                "structured_outputs_regex": structured_outputs_regex,
-                "generation_kwargs": generation_kwargs or {},
-            },
-        )
+        payload = {
+            "prompts": prompts,
+            "images": images,
+            "n": n,
+            "repetition_penalty": repetition_penalty,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "min_tokens": min_tokens,
+            "max_tokens": max_tokens,
+            "logprobs": logprobs,
+            "structured_outputs_regex": structured_outputs_regex,
+            "generation_kwargs": generation_kwargs or {},
+        }
+        if truncate_prompt_tokens is not None:
+            payload["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+        response = self.session.post(url, json=payload)
         if response.status_code == 200:
             json_response = response.json()
             return {
@@ -391,25 +391,25 @@ class VLLMClient:
                         if part["type"] == "image_pil":
                             part["image_pil"] = pil_to_base64(part["image_pil"])
 
-        response = self.session.post(
-            url,
-            json={
-                "messages": messages,
-                "n": n,
-                "repetition_penalty": repetition_penalty,
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-                "min_p": min_p,
-                "min_tokens": min_tokens,
-                "max_tokens": max_tokens,
-                "logprobs": logprobs,
-                "truncate_prompt_tokens": truncate_prompt_tokens,
-                "structured_outputs_regex": structured_outputs_regex,
-                "generation_kwargs": generation_kwargs or {},
-                "chat_template_kwargs": chat_template_kwargs or {},
-            },
-        )
+        payload = {
+            "messages": messages,
+            "n": n,
+            "repetition_penalty": repetition_penalty,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "min_tokens": min_tokens,
+            "max_tokens": max_tokens,
+            "logprobs": logprobs,
+            "structured_outputs_regex": structured_outputs_regex,
+            "generation_kwargs": generation_kwargs or {},
+            "chat_template_kwargs": chat_template_kwargs or {},
+        }
+        if truncate_prompt_tokens is not None:
+            payload["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+        response = self.session.post(url, json=payload)
         if response.status_code == 200:
             json_response = response.json()
             return {
