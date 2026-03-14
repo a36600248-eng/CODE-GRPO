@@ -30,7 +30,12 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-Coder-7B-Instruct
 SERVER_LOG=/root/autodl-tmp/CODE-GRPO/trl/vllm_server_smoke_${PORT}.log
 
-if curl -sf "http://127.0.0.1:${PORT}/health/" > /dev/null; then
+healthcheck() {
+  curl -sf --connect-timeout 2 --max-time 3 "http://127.0.0.1:${PORT}/health/" > /dev/null
+}
+
+log "Checking whether port ${PORT} already has a live server"
+if healthcheck; then
   log "Port ${PORT} already has a live server. Stop it or use another port."
   exit 1
 fi
@@ -62,13 +67,13 @@ for _ in $(seq 1 120); do
     tail -n 100 "${SERVER_LOG}" || true
     exit 1
   fi
-  if curl -sf "http://127.0.0.1:${PORT}/health/" > /dev/null; then
+  if healthcheck; then
     break
   fi
   sleep 2
 done
 
-if ! curl -sf "http://127.0.0.1:${PORT}/health/" > /dev/null; then
+if ! healthcheck; then
   log "vLLM server failed to start. Tail of ${SERVER_LOG}:"
   tail -n 100 "${SERVER_LOG}" || true
   exit 1
