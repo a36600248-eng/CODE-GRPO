@@ -99,6 +99,7 @@ code_timeout_seconds: 1.0
 eval_round_n: 1
 eval_k_list: [1, 2]
 
+trace_store_full_text: true
 dump_train_traces: true
 dump_eval_traces: false
 log_eval_trajectories: false

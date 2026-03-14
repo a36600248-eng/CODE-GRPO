@@ -322,6 +322,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 f"{safe_qid}_rank{self.accelerator.process_index}_{self._trace_dump_counter:06d}.json",
             )
             payload = {
+                "global_step": int(self.state.global_step),
                 "question_id": rollout.question_id,
                 "audit_indices": rollout.audit_indices,
                 "rounds": rollout.rounds,

@@ -296,6 +296,13 @@ class CodeGRPOConfig(GRPOConfig):
         default_factory=list,
         metadata={"help": "Optional question_id whitelist for trace dump. Empty means no whitelist."},
     )
+    trace_store_full_text: bool = field(
+        default=False,
+        metadata={
+            "help": "Store full prompt/output text inside rollout traces for exact replay and debugging. Keeps trace "
+            "files much larger, so enable only for diagnostic runs."
+        },
+    )
     dump_train_traces: bool = field(
         default=False,
         metadata={"help": "Whether to dump per-question rollout traces during train mode as well."},

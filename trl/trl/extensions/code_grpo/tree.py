@@ -464,6 +464,7 @@ class CodeGRPOTreeRunner:
         reasoning = parent.reasoning or ""
         trace_max_chars = max(self.args.error_max_chars * 4, self.args.error_max_chars)
         trace_max_lines = max(self.args.error_max_lines * 4, self.args.error_max_lines)
+        trace_store_full_text = bool(getattr(self.args, "trace_store_full_text", False))
 
         logic_scores: list[float] = []
         logic_match_scores: list[float] = []
@@ -1612,6 +1613,15 @@ class CodeGRPOTreeRunner:
                     "parsed_reason": summarize_error(parsed_reason, trace_max_chars, trace_max_lines),
                     "parsed_logic_prediction": _safe_preview(parsed_logic_prediction, max_chars=400),
                     "parsed_exec_prediction": _safe_preview(parsed_exec_prediction, max_chars=400),
+                    **(
+                        {
+                            "full_prompt_raw": prompt_text_raw,
+                            "full_prompt_rendered": prompt_text,
+                            "full_raw_output": raw_output,
+                        }
+                        if trace_store_full_text
+                        else {}
+                    ),
                 },
                 "logic_audit": logic_audit_details,
                 "logic_train_samples": logic_train_samples,
