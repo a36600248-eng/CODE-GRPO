@@ -161,6 +161,12 @@ class CodeGRPOTrainer(GRPOTrainer):
             return
         if not hasattr(self, "vllm_generation") or not hasattr(self, "_last_loaded_step"):
             return
+        if (
+            getattr(self.vllm_generation, "mode", None) == "server"
+            and not getattr(self.vllm_generation, "enable_server_weight_sync", True)
+        ):
+            self._last_loaded_step = self.state.global_step
+            return
         # Standalone eval can route adapters to vLLM via request-level dynamic LoRA.
         # In that mode, syncing HF-side weights into the colocated engine is both
         # unnecessary and harmful because it re-enters the old merge/load_weights path.

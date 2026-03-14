@@ -246,6 +246,7 @@ class VLLMGeneration:
         server_port: int = 8000,
         server_timeout: float = 240.0,
         group_port: int = 51216,
+        enable_server_weight_sync: bool = True,
         # Colocate mode configuration
         tensor_parallel_size: int = 1,
         gpu_memory_utilization: float = 0.9,
@@ -287,6 +288,7 @@ class VLLMGeneration:
         self.server_port = server_port
         self.group_port = group_port
         self.server_timeout = server_timeout
+        self.enable_server_weight_sync = bool(enable_server_weight_sync)
 
         # Colocate mode configuration
         self.tensor_parallel_size = tensor_parallel_size
@@ -340,7 +342,8 @@ class VLLMGeneration:
                 self.vllm_client = VLLMClient(
                     base_url=base_url, group_port=self.group_port, connection_timeout=self.server_timeout
                 )
-                self.vllm_client.init_communicator(device=torch.cuda.current_device())
+                if self.enable_server_weight_sync:
+                    self.vllm_client.init_communicator(device=torch.cuda.current_device())
 
         elif self.mode == "colocate":
             # Make sure tensor_parallel_size group size evenly divides the world size - each group should have
@@ -602,6 +605,9 @@ class VLLMGeneration:
 
         Handles FSDP, DeepSpeed, PEFT weight synchronization.
         """
+        if self.mode == "server" and not self.enable_server_weight_sync:
+            return
+
         # In dynamic LoRA mode, the evaluated adapter is attached request-by-request and
         # we must not push HF-side weights through the colocated merge/load path.
         if self.vllm_dynamic_lora_path:

@@ -706,6 +706,7 @@ class GRPOTrainer(_BaseTrainer):
         if self.use_vllm:
             online_dynamic_lora_path = getattr(args, "vllm_dynamic_lora_path", None)
             online_dynamic_lora_refresh = False
+            enable_server_weight_sync = True
             if (
                 online_dynamic_lora_path is None
                 and self.vllm_mode == "colocate"
@@ -723,6 +724,11 @@ class GRPOTrainer(_BaseTrainer):
                     "snapshots for rollout/eval to avoid the stale HF->vLLM merge/load sync path. Adapter dir: %s",
                     online_dynamic_lora_path,
                 )
+            if self.vllm_mode == "server":
+                if online_dynamic_lora_path is not None and not online_dynamic_lora_refresh:
+                    enable_server_weight_sync = False
+                elif getattr(args, "codegrpo_mode", None) == "test" and not is_peft_model(self.model):
+                    enable_server_weight_sync = False
             # Initialize vLLM generation backend
             # Wrap rollout_func to capture trainer context if provided
             rollout_func = None
@@ -745,6 +751,7 @@ class GRPOTrainer(_BaseTrainer):
                 server_port=args.vllm_server_port,
                 group_port=args.vllm_group_port,
                 server_timeout=args.vllm_server_timeout,
+                enable_server_weight_sync=enable_server_weight_sync,
                 # Colocate mode configuration
                 tensor_parallel_size=args.vllm_tensor_parallel_size,
                 gpu_memory_utilization=args.vllm_gpu_memory_utilization,
