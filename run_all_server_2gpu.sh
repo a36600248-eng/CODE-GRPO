@@ -35,6 +35,7 @@ trap cleanup EXIT
 echo "Starting official TRL vLLM server sync path on GPU0, port=${PORT}"
 CUDA_VISIBLE_DEVICES=0 python -m trl.cli.main vllm-serve \
   --model "${MODEL_PATH}" \
+  --tokenizer "${MODEL_PATH}" \
   --host 127.0.0.1 \
   --port "${PORT}" \
   --tensor_parallel_size 1 \

@@ -220,6 +220,8 @@ class ScriptArguments:
             Model name or path to load the model from.
         revision (`str`, *optional*):
             Revision to use for the model. If not specified, the default branch will be used.
+        tokenizer (`str`, *optional*):
+            Tokenizer name or path. If not specified, defaults to `model`.
         tensor_parallel_size (`int`, *optional*, defaults to `1`):
             Number of tensor parallel workers to use.
         data_parallel_size (`int`, *optional*, defaults to `1`):
@@ -266,6 +268,10 @@ class ScriptArguments:
     revision: str | None = field(
         default=None,
         metadata={"help": "Revision to use for the model. If not specified, the default branch will be used."},
+    )
+    tokenizer: str | None = field(
+        default=None,
+        metadata={"help": "Tokenizer name or path to load. Defaults to the model path when unset."},
     )
     tensor_parallel_size: int = field(
         default=1,
@@ -363,6 +369,7 @@ def llm_worker(
 
     llm = LLM(
         model=script_args.model,
+        tokenizer=script_args.tokenizer or script_args.model,
         revision=script_args.revision,
         tensor_parallel_size=script_args.tensor_parallel_size,
         gpu_memory_utilization=script_args.gpu_memory_utilization,
