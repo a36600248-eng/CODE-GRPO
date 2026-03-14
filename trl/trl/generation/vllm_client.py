@@ -452,8 +452,11 @@ class VLLMClient:
         else:
             client_device_uuid = str(torch.cuda.get_device_properties(device).uuid)
 
-        # Set the weight update group's host to "0.0.0.0" so that
-        # clients from different IPs can send updated weights
+        # Use the same rendezvous host on both client and server sides.
+        # In single-node server mode, sending "0.0.0.0" here can leave the
+        # server worker listening on an unspecified address while the client
+        # tries to join via a concrete host (for example 127.0.0.1), which
+        # may hang communicator setup.
         logger.info(
             "Requesting server communicator init: base_url=%s group_port=%s rank=%s world_size=%s",
             self.base_url,
@@ -464,7 +467,7 @@ class VLLMClient:
         response = self.session.post(
             url,
             json={
-                "host": "0.0.0.0",
+                "host": self.host,
                 "port": self.group_port,
                 "world_size": world_size,
                 "client_device_uuid": client_device_uuid,

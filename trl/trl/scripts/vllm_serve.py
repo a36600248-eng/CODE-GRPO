@@ -132,6 +132,14 @@ class WeightSyncWorkerExtension:
         if self.communicator is not None:
             raise RuntimeError("Weight update group already initialized. Call close_communicator first.")
 
+        logger.info(
+            "Server worker init_communicator start: host=%s port=%s world_size=%s client_uuid=%s",
+            host,
+            port,
+            world_size,
+            client_device_uuid,
+        )
+
         # TODO: will remove after torch xpu 2.9 support uuid in get_device_properties
         if torch.cuda.is_available() or (
             is_torch_xpu_available() and hasattr(torch.xpu.get_device_properties(self.device), "uuid")
@@ -165,6 +173,14 @@ class WeightSyncWorkerExtension:
 
         # The client process that sends updated weights has the highest rank (world_size - 1).
         self.client_rank = world_size - 1
+        logger.info(
+            "Server worker communicator ready: host=%s port=%s world_size=%s rank=%s client_rank=%s",
+            host,
+            port,
+            world_size,
+            rank,
+            self.client_rank,
+        )
 
     def update_named_param(self, name: str, dtype: str, shape: Sequence[int]) -> None:
         """
