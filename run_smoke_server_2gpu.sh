@@ -68,12 +68,12 @@ choose_stage_port() {
   local candidate="$1"
   while true; do
     if healthcheck "$candidate"; then
-      log "Port ${candidate} already has a live server, trying next port"
+      log "Port ${candidate} already has a live server, trying next port" >&2
       candidate=$((candidate + 1))
       continue
     fi
     if port_in_use "$candidate"; then
-      log "Port ${candidate} is already in use, trying next port"
+      log "Port ${candidate} is already in use, trying next port" >&2
       candidate=$((candidate + 1))
       continue
     fi
