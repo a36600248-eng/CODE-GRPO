@@ -56,12 +56,13 @@ def _compute_code_reward(
     compile_scale: float,
     generation_format_score: float,
     generation_format_scale: float,
+    aux_reward_scale: float = 1.0,
 ) -> float:
     """Linear additive main-generation reward."""
     return _clamp01(
         pass_rate
-        + _clamp01(lambda_soft) * _clamp01(r_soft)
-        + _clamp01(compile_scale) * _clamp01(compile_score)
+        + _clamp01(aux_reward_scale) * _clamp01(lambda_soft) * _clamp01(r_soft)
+        + _clamp01(aux_reward_scale) * _clamp01(compile_scale) * _clamp01(compile_score)
         + _clamp01(generation_format_scale) * _clamp01(generation_format_score)
     )
 
@@ -77,6 +78,45 @@ def _apply_format_shaping(correct_score: float, format_ok: bool, penalty: float,
     # This avoids coupling format compliance to task correctness via multiplication.
     format_term = _clamp01(bonus) if format_ok else -_clamp01(penalty)
     return _clamp01(correct_score + format_term)
+
+
+def _format_term(format_ok: bool, penalty: float, bonus: float = 0.0) -> float:
+    return _clamp01(bonus) if format_ok else -_clamp01(penalty)
+
+
+def _compute_logic_reason_score(
+    *,
+    logic_correct: float,
+    format_ok: bool,
+    penalty: float,
+    bonus: float,
+    format_scale: float,
+    match_scale: float,
+    confirmed_bonus: float,
+    confirmed: bool,
+) -> tuple[float, float]:
+    format_reward = _format_term(format_ok, penalty=penalty, bonus=bonus)
+    if not format_ok:
+        return 0.0, format_reward
+    score = (
+        _clamp01(format_scale) * format_reward
+        + _clamp01(match_scale) * _clamp01(logic_correct)
+        + (_clamp01(confirmed_bonus) if confirmed and logic_correct > 0.0 else 0.0)
+    )
+    return _clamp01(score), format_reward
+
+
+def _compute_exec_reason_score(
+    *,
+    exec_correct: float,
+    format_ok: bool,
+    penalty: float,
+    bonus: float,
+) -> tuple[float, float]:
+    format_reward = _format_term(format_ok, penalty=penalty, bonus=bonus)
+    if not format_ok:
+        return 0.0, format_reward
+    return _apply_format_shaping(exec_correct, True, penalty=penalty, bonus=bonus), format_reward
 
 
 def _safe_preview(value: Any, max_chars: int = 200) -> str:
@@ -516,14 +556,17 @@ class CodeGRPOTreeRunner:
                 )
 
                 logic_correct = 1.0 if values_equal(exec_prediction, case["output"]) else 0.0
-                logic_format_term = self.args.format_bonus_logic if format_ok else -self.args.format_penalty_logic
-                logic_score = _apply_format_shaping(
-                    logic_correct,
-                    format_ok,
+                logic_score, logic_format_term = _compute_logic_reason_score(
+                    logic_correct=logic_correct,
+                    format_ok=format_ok,
                     penalty=self.args.format_penalty_logic,
                     bonus=self.args.format_bonus_logic,
+                    format_scale=self.args.logic_format_reward_scale,
+                    match_scale=self.args.logic_match_reward_scale,
+                    confirmed_bonus=self.args.logic_confirmed_bonus,
+                    confirmed=bool(logic_correct),
                 )
-                logic_scores.append(logic_score)
+                logic_scores.append(logic_correct)
                 logic_match_scores.append(logic_correct)
                 logic_format_flags.append(1.0 if format_ok else 0.0)
                 logic_completion_text = unified_output.strip() or _build_logic_audit_completion(exec_reason, exec_prediction)
@@ -559,14 +602,13 @@ class CodeGRPOTreeRunner:
                 )
 
                 exec_correct = 1.0 if is_match(exec_prediction, actual) else 0.0
-                exec_format_term = self.args.format_bonus_exec if format_ok else -self.args.format_penalty_exec
-                exec_raw_correct_flags.append(exec_correct)
-                exec_score = _apply_format_shaping(
-                    exec_correct,
-                    format_ok,
+                exec_score, exec_format_term = _compute_exec_reason_score(
+                    exec_correct=exec_correct,
+                    format_ok=format_ok,
                     penalty=self.args.format_penalty_exec,
                     bonus=self.args.format_bonus_exec,
                 )
+                exec_raw_correct_flags.append(exec_correct)
                 exec_scores.append(exec_score)
                 exec_format_flags.append(1.0 if format_ok else 0.0)
                 exec_completion_text = unified_output.strip() or _build_exec_audit_completion(exec_reason, exec_prediction)
@@ -1323,14 +1365,17 @@ class CodeGRPOTreeRunner:
                     )
 
                     logic_correct = 1.0 if values_equal(exec_prediction, case["output"]) else 0.0
-                    logic_format_term = self.args.format_bonus_logic if format_ok else -self.args.format_penalty_logic
-                    logic_score = _apply_format_shaping(
-                        logic_correct,
-                        format_ok,
+                    logic_score, logic_format_term = _compute_logic_reason_score(
+                        logic_correct=logic_correct,
+                        format_ok=format_ok,
                         penalty=self.args.format_penalty_logic,
                         bonus=self.args.format_bonus_logic,
+                        format_scale=self.args.logic_format_reward_scale,
+                        match_scale=self.args.logic_match_reward_scale,
+                        confirmed_bonus=self.args.logic_confirmed_bonus,
+                        confirmed=bool(pass_rate == 1.0 and logic_correct),
                     )
-                    logic_scores.append(logic_score)
+                    logic_scores.append(logic_correct)
                     logic_match_scores.append(logic_correct)
                     logic_format_flags.append(1.0 if format_ok else 0.0)
                     logic_completion_text = unified_output.strip() or _build_logic_audit_completion(exec_reason, exec_prediction)
@@ -1366,14 +1411,13 @@ class CodeGRPOTreeRunner:
                     )
 
                     exec_correct = 1.0 if is_match(exec_prediction, actual) else 0.0
-                    exec_format_term = self.args.format_bonus_exec if format_ok else -self.args.format_penalty_exec
-                    exec_raw_correct_flags.append(exec_correct)
-                    exec_score = _apply_format_shaping(
-                        exec_correct,
-                        format_ok,
+                    exec_score, exec_format_term = _compute_exec_reason_score(
+                        exec_correct=exec_correct,
+                        format_ok=format_ok,
                         penalty=self.args.format_penalty_exec,
                         bonus=self.args.format_bonus_exec,
                     )
+                    exec_raw_correct_flags.append(exec_correct)
                     exec_scores.append(exec_score)
                     exec_format_flags.append(1.0 if format_ok else 0.0)
                     exec_completion_text = unified_output.strip() or _build_exec_audit_completion(exec_reason, exec_prediction)
@@ -1428,14 +1472,17 @@ class CodeGRPOTreeRunner:
                         allow_outside_noise_chars=self.args.format_outside_noise_chars,
                     )
                     logic_correct = 1.0 if values_equal(logic_prediction, case["output"]) else 0.0
-                    logic_format_term = self.args.format_bonus_logic if logic_format_ok else -self.args.format_penalty_logic
-                    logic_score = _apply_format_shaping(
-                        logic_correct,
-                        logic_format_ok,
+                    logic_score, logic_format_term = _compute_logic_reason_score(
+                        logic_correct=logic_correct,
+                        format_ok=logic_format_ok,
                         penalty=self.args.format_penalty_logic,
                         bonus=self.args.format_bonus_logic,
+                        format_scale=self.args.logic_format_reward_scale,
+                        match_scale=self.args.logic_match_reward_scale,
+                        confirmed_bonus=self.args.logic_confirmed_bonus,
+                        confirmed=bool(pass_rate == 1.0 and logic_correct),
                     )
-                    logic_scores.append(logic_score)
+                    logic_scores.append(logic_correct)
                     logic_match_scores.append(logic_correct)
                     logic_format_flags.append(1.0 if logic_format_ok else 0.0)
                     logic_completion_text = logic_output.strip() or _build_logic_audit_completion(logic_reason, logic_prediction)
@@ -1488,14 +1535,13 @@ class CodeGRPOTreeRunner:
                         allow_outside_noise_chars=self.args.format_outside_noise_chars,
                     )
                     exec_correct = 1.0 if is_match(exec_prediction, actual) else 0.0
-                    exec_format_term = self.args.format_bonus_exec if exec_format_ok else -self.args.format_penalty_exec
-                    exec_raw_correct_flags.append(exec_correct)
-                    exec_score = _apply_format_shaping(
-                        exec_correct,
-                        exec_format_ok,
+                    exec_score, exec_format_term = _compute_exec_reason_score(
+                        exec_correct=exec_correct,
+                        format_ok=exec_format_ok,
                         penalty=self.args.format_penalty_exec,
                         bonus=self.args.format_bonus_exec,
                     )
+                    exec_raw_correct_flags.append(exec_correct)
                     exec_scores.append(exec_score)
                     exec_format_flags.append(1.0 if exec_format_ok else 0.0)
                     exec_completion_text = exec_output.strip() or _build_exec_audit_completion(exec_reason, exec_prediction)
@@ -1541,6 +1587,7 @@ class CodeGRPOTreeRunner:
         soft_reward_eligible = status_code != "SYNTAX_ERROR" and _has_solve_entrypoint(code)
         soft_scale = 1.0 if soft_reward_eligible else self.args.soft_reward_ineligible_scale
         R_soft_effective = _clamp01(R_soft * soft_scale)
+        code_aux_reward_scale = 1.0 if generation_format_ok else self.args.code_aux_reward_without_format_scale
         R_code = _compute_code_reward(
             pass_rate=pass_rate,
             r_soft=R_soft_effective,
@@ -1549,6 +1596,7 @@ class CodeGRPOTreeRunner:
             compile_scale=self.args.code_compile_reward_scale,
             generation_format_score=generation_format_score,
             generation_format_scale=self.args.code_format_reward_scale,
+            aux_reward_scale=code_aux_reward_scale,
         )
 
         if can_reuse_reason:
@@ -1706,7 +1754,7 @@ class CodeGRPOTreeRunner:
                 base_score = float(item.get("score", 0.0))
                 terminal_bonus = float(item.get("terminal_bonus", 0.0))
                 confirmed = bool(item.get("confirmed", False))
-                score = base_score + terminal_bonus if confirmed else 0.0
+                score = base_score + (terminal_bonus if confirmed else 0.0)
                 logic_groups.setdefault(case_index, []).append((item, score))
         for rows in logic_groups.values():
             vals = [score for _, score in rows]

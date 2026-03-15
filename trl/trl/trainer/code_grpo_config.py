@@ -40,9 +40,26 @@ class CodeGRPOConfig(GRPOConfig):
         default=0.05,
         metadata={"help": "Residual reward scale for main-generation format compliance signal."},
     )
+    code_aux_reward_without_format_scale: float = field(
+        default=0.25,
+        metadata={
+            "help": (
+                "Scale applied to compile/soft auxiliary code rewards when the main code response format is invalid. "
+                "pass_rate is kept unchanged."
+            )
+        },
+    )
     logic_format_reward_scale: float = field(
         default=0.1,
         metadata={"help": "Additive scale for logic-audit format signal in reason reward."},
+    )
+    logic_match_reward_scale: float = field(
+        default=1.0,
+        metadata={"help": "Reward scale for logic-audit answer match in reason reward."},
+    )
+    logic_confirmed_bonus: float = field(
+        default=0.25,
+        metadata={"help": "Extra bonus for logic-audit answer match when the child code already passes."},
     )
     exec_case_baseline_ema_alpha: float = field(
         default=0.1,
@@ -197,6 +214,15 @@ class CodeGRPOConfig(GRPOConfig):
     )
     beta_reason: float = field(default=1.0, metadata={"help": "Reason loss coefficient."})
     gamma_shrink: float = field(default=0.1, metadata={"help": "Advantage shrink factor for fully-correct nodes."})
+    async_rollout_prefetch: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable one-batch-ahead asynchronous rollout prefetch for single-process vLLM training. "
+                "The next tree rollout is prepared in a background thread while the current batch trains."
+            )
+        },
+    )
 
     error_max_chars: int = field(default=800, metadata={"help": "Maximum error summary character length."})
     error_max_lines: int = field(default=20, metadata={"help": "Maximum error summary line count."})
@@ -381,10 +407,21 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError(
                 f"code_format_reward_scale must be in [0, 1], got: {self.code_format_reward_scale}"
             )
+        if not (0.0 <= self.code_aux_reward_without_format_scale <= 1.0):
+            raise ValueError(
+                "code_aux_reward_without_format_scale must be in [0, 1], "
+                f"got: {self.code_aux_reward_without_format_scale}"
+            )
         if not (0.0 <= self.logic_format_reward_scale <= 1.0):
             raise ValueError(
                 f"logic_format_reward_scale must be in [0, 1], got: {self.logic_format_reward_scale}"
             )
+        if not (0.0 <= self.logic_match_reward_scale <= 1.0):
+            raise ValueError(
+                f"logic_match_reward_scale must be in [0, 1], got: {self.logic_match_reward_scale}"
+            )
+        if not (0.0 <= self.logic_confirmed_bonus <= 1.0):
+            raise ValueError(f"logic_confirmed_bonus must be in [0, 1], got: {self.logic_confirmed_bonus}")
         if not (0.0 <= self.exec_case_baseline_ema_alpha <= 1.0):
             raise ValueError(
                 f"exec_case_baseline_ema_alpha must be in [0, 1], got: {self.exec_case_baseline_ema_alpha}"

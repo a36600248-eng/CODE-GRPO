@@ -1,17 +1,17 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_server_2gpu
+﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_server_2gpu
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-SERVER-2GPU
-logging_steps: 5
+logging_steps: 20
 
 disable_tqdm: false
 save_strategy: "steps"
-save_steps: 60
+save_steps: 180
 save_total_limit: 2
 load_best_model_at_end: true
 metric_for_best_model: eval_pass_at_1
 greater_is_better: true
 eval_strategy: "steps"
-eval_steps: 60
+eval_steps: 180
 push_to_hub: false
 seed: 42
 data_seed: 42
@@ -43,6 +43,7 @@ vllm_mode: server
 vllm_server_base_url: http://127.0.0.1:8000
 vllm_server_timeout: 600.0
 vllm_sync_steps: 5
+async_rollout_prefetch: true
 
 num_train_epochs: 2
 max_steps: -1
@@ -53,7 +54,7 @@ weight_decay: 0.0
 beta: 0.001
 gradient_checkpointing: true
 gradient_accumulation_steps: 1
-generation_batch_size: 2
+generation_batch_size: 4
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 max_completion_length: 128
@@ -72,15 +73,17 @@ num_generations_eval: 1
 eval_code_only_single_trajectory: true
 reward_window_bins: 10
 T_max: 2
-eval_T_max_override: 5
+eval_T_max_override: 2
 N_max: 4
-M_audit: 3
+M_audit: 1
 M_retry: 1
 context_round_window: 2
 lambda_soft: 0.10
-code_compile_reward_scale: 0.1
-code_format_reward_scale: 0.12
-logic_format_reward_scale: 0.12
+code_compile_reward_scale: 0.05
+code_format_reward_scale: 0.05
+logic_format_reward_scale: 0.05
+logic_match_reward_scale: 1.0
+logic_confirmed_bonus: 0.25
 exec_case_baseline_ema_alpha: 0.1
 soft_reward_ineligible_scale: 0.2
 format_bonus_logic: 0.05
@@ -92,7 +95,7 @@ terminal_logic_backprop_max_depth: 6
 terminal_backprop_code_similarity_threshold: 0.75
 frozen_reason_one_shot: true
 unify_reason_when_code_frozen: true
-beta_reason: 1.0
+beta_reason: 0.5
 gamma_shrink: 0.1
 format_outside_noise_chars: 80
 generation_outside_noise_chars: 0
@@ -116,6 +119,7 @@ debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 120
 max_train_trace_files: 4
 review_bundle_trace_sample_size: 2
+
 
 
 

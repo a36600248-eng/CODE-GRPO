@@ -1,17 +1,17 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k8_server_2gpu
+﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k8_server_2gpu
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K8-SERVER-2GPU
-logging_steps: 5
+logging_steps: 20
 
 disable_tqdm: false
 save_strategy: "steps"
-save_steps: 60
+save_steps: 180
 save_total_limit: 2
 load_best_model_at_end: true
 metric_for_best_model: eval_pass_at_1
 greater_is_better: true
 eval_strategy: "steps"
-eval_steps: 60
+eval_steps: 180
 push_to_hub: false
 seed: 42
 data_seed: 42
@@ -43,6 +43,7 @@ vllm_mode: server
 vllm_server_base_url: http://127.0.0.1:8000
 vllm_server_timeout: 600.0
 vllm_sync_steps: 5
+async_rollout_prefetch: true
 
 num_train_epochs: 2
 max_steps: -1
@@ -116,6 +117,7 @@ debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 120
 max_train_trace_files: 4
 review_bundle_trace_sample_size: 1
+
 
 
 

@@ -1,9 +1,12 @@
+import copy
 import json
 import math
 import os
 import random
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -29,6 +32,55 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _CodeGRPOLookaheadBatch:
+    current_batch: Any
+    next_batch: Any | None = None
+
+
+@dataclass
+class _CodeGRPORolloutResult:
+    mode: str
+    batch: dict[str, torch.Tensor | Any]
+    rollouts: list[Any]
+    metric_updates: dict[str, float]
+    eval_metric_snapshot: dict[str, float]
+    train_sample_count: int
+    examples_count: int
+
+
+class _CodeGRPOLookaheadLoader:
+    def __init__(self, base_loader):
+        self._base_loader = base_loader
+
+    def __len__(self):
+        return len(self._base_loader)
+
+    def __getattr__(self, name):
+        return getattr(self._base_loader, name)
+
+    def __iter__(self):
+        iterator = iter(self._base_loader)
+        try:
+            current_batch = next(iterator)
+        except StopIteration:
+            return
+        try:
+            next_batch = next(iterator)
+        except StopIteration:
+            next_batch = None
+
+        while True:
+            yield _CodeGRPOLookaheadBatch(current_batch=current_batch, next_batch=next_batch)
+            if next_batch is None:
+                break
+            current_batch = next_batch
+            try:
+                next_batch = next(iterator)
+            except StopIteration:
+                next_batch = None
 
 
 class CodeGRPOTrainer(GRPOTrainer):
@@ -146,6 +198,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._trace_dump_counter = 0
         self._train_trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
+        self._async_rollout_executor: ThreadPoolExecutor | None = None
+        self._prefetched_rollout_future: Future | None = None
+        self._prefetched_rollout_batch_id: int | None = None
+        self._async_rollout_prefetch_enabled = self._resolve_async_rollout_prefetch_enabled()
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
@@ -159,6 +215,56 @@ class CodeGRPOTrainer(GRPOTrainer):
         if isinstance(eval_steps, int) and eval_steps > 0:
             return eval_steps
         return 0
+
+    def _resolve_async_rollout_prefetch_enabled(self) -> bool:
+        enabled = bool(getattr(self.args, "async_rollout_prefetch", False))
+        if not enabled:
+            return False
+        if not bool(getattr(self.args, "use_vllm", False)) or str(getattr(self.args, "backend", "hf")) != "vllm":
+            logger.warning("Disabling async_rollout_prefetch because it requires use_vllm=true and backend='vllm'.")
+            return False
+        if int(getattr(self.accelerator, "num_processes", 1) or 1) != 1:
+            logger.warning("Disabling async_rollout_prefetch because it currently supports single-process training only.")
+            return False
+        return True
+
+    def _ensure_async_rollout_executor(self) -> ThreadPoolExecutor:
+        if self._async_rollout_executor is None:
+            self._async_rollout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="codegrpo-rollout")
+        return self._async_rollout_executor
+
+    def _shutdown_async_rollout_prefetch(self, wait: bool = False) -> None:
+        future = self._prefetched_rollout_future
+        executor = self._async_rollout_executor
+        self._prefetched_rollout_future = None
+        self._prefetched_rollout_batch_id = None
+        self._async_rollout_executor = None
+        if future is not None and not future.done():
+            future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=True)
+
+    def _submit_async_rollout_prefetch(self, raw_batch: list[dict[str, Any]]) -> None:
+        if not self._async_rollout_prefetch_enabled:
+            return
+        self._maybe_sync_vllm_weights()
+        executor = self._ensure_async_rollout_executor()
+        batch_copy = copy.deepcopy(raw_batch)
+        self._prefetched_rollout_future = executor.submit(self._compute_rollout_result, batch_copy, "train")
+        self._prefetched_rollout_batch_id = id(raw_batch)
+
+    def _pop_prefetched_rollout_result(self, raw_batch: list[dict[str, Any]]) -> _CodeGRPORolloutResult | None:
+        if self._prefetched_rollout_batch_id != id(raw_batch) or self._prefetched_rollout_future is None:
+            return None
+        future = self._prefetched_rollout_future
+        self._prefetched_rollout_future = None
+        self._prefetched_rollout_batch_id = None
+        try:
+            return future.result()
+        except Exception:
+            logger.exception("Async rollout prefetch failed; falling back to synchronous rollout generation.")
+            self._shutdown_async_rollout_prefetch(wait=False)
+            return None
 
     @staticmethod
     def _window_mean(values: list[float]) -> float:
@@ -228,6 +334,18 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
             self._signature_columns = ["question_id", "prompt", "test_cases"]
+
+    def get_train_dataloader(self):
+        train_loader = super().get_train_dataloader()
+        if not self._async_rollout_prefetch_enabled:
+            return train_loader
+        return _CodeGRPOLookaheadLoader(train_loader)
+
+    def train(self, *args, **kwargs):
+        try:
+            return super().train(*args, **kwargs)
+        finally:
+            self._shutdown_async_rollout_prefetch(wait=False)
 
     @staticmethod
     def _mean(values: list[float]) -> float:
@@ -451,8 +569,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         mode = "eval" if split in {"eval", "test", "baseline_eval"} else "train"
         return self._filter_public_logs(dict(metrics), mode=mode)
 
-    def _build_training_batch(self, train_samples: list) -> dict[str, torch.Tensor]:
-        device = self.accelerator.device
+    def _build_training_batch(self, train_samples: list, to_device: bool = True) -> dict[str, torch.Tensor]:
         prompt_ids_tensors = []
         prompt_masks = []
         completion_ids_tensors = []
@@ -507,43 +624,41 @@ class CodeGRPOTrainer(GRPOTrainer):
             padding_value=self.pad_token_id,
             padding_side="left",
             pad_to_multiple_of=self.pad_to_multiple_of,
-        ).to(device)
+        )
         prompt_mask = pad(
             prompt_masks,
             padding_value=0,
             padding_side="left",
             pad_to_multiple_of=self.pad_to_multiple_of,
-        ).to(device)
+        )
         completion_ids = pad(
             completion_ids_tensors,
             padding_value=self.pad_token_id,
             padding_side="right",
             pad_to_multiple_of=self.pad_to_multiple_of,
-        ).to(device)
+        )
         completion_mask = pad(
             completion_masks,
             padding_value=0,
             padding_side="right",
             pad_to_multiple_of=self.pad_to_multiple_of,
-        ).to(device)
-        code_token_mask = pad(code_masks, padding_value=0.0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of).to(
-            device
         )
+        code_token_mask = pad(code_masks, padding_value=0.0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of)
         reason_token_mask = pad(
             reason_masks, padding_value=0.0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of
-        ).to(device)
+        )
 
-        return {
+        batch = {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
             "completion_ids": completion_ids,
             "completion_mask": completion_mask,
             "code_token_mask": code_token_mask,
             "reason_token_mask": reason_token_mask,
-            "advantages_code": torch.tensor(advantages_code, dtype=torch.float32, device=device),
-            "advantages_reason": torch.tensor(advantages_reason, dtype=torch.float32, device=device),
-            "r_code": torch.tensor(r_code, dtype=torch.float32, device=device),
-            "pass_rate": torch.tensor(pass_rates, dtype=torch.float32, device=device),
+            "advantages_code": torch.tensor(advantages_code, dtype=torch.float32),
+            "advantages_reason": torch.tensor(advantages_reason, dtype=torch.float32),
+            "r_code": torch.tensor(r_code, dtype=torch.float32),
+            "pass_rate": torch.tensor(pass_rates, dtype=torch.float32),
             "num_items_in_batch": completion_mask.sum(),
             **(
                 {
@@ -552,12 +667,25 @@ class CodeGRPOTrainer(GRPOTrainer):
                         padding_value=0.0,
                         padding_side="right",
                         pad_to_multiple_of=self.pad_to_multiple_of,
-                    ).to(device)
+                    )
                 }
                 if has_old_logprobs and old_logprobs
                 else {}
             ),
         }
+        if to_device:
+            batch = self._move_batch_to_device(batch)
+        return batch
+
+    def _move_batch_to_device(self, batch: dict[str, torch.Tensor | Any]) -> dict[str, torch.Tensor | Any]:
+        device = self.accelerator.device
+        moved: dict[str, torch.Tensor | Any] = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                moved[key] = value.to(device)
+            else:
+                moved[key] = value
+        return moved
 
     def _attach_old_per_token_logps(self, batch: dict[str, torch.Tensor | Any]) -> None:
         if "old_per_token_logps" in batch:
@@ -582,12 +710,9 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         batch["old_per_token_logps"] = old_per_token_logps.detach()
 
-    def _generate_and_score_completions(self, inputs: list[dict[str, Any]]) -> dict[str, torch.Tensor | Any]:
-        mode = "train" if self.model.training else "eval"
+    def _compute_rollout_result(self, inputs: list[dict[str, Any]], mode: str) -> _CodeGRPORolloutResult:
         examples = self._unique_examples(inputs)
         rollout_t0 = time.perf_counter()
-        self._maybe_sync_vllm_weights()
-
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
 
@@ -639,9 +764,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         if not train_samples:
             raise ValueError("CodeGRPOTrainer received an empty generation batch and could not create fallback samples.")
 
-        batch = self._build_training_batch(train_samples)
-        if mode == "train":
-            self._attach_old_per_token_logps(batch)
+        batch = self._build_training_batch(train_samples, to_device=False)
 
         mean_r_code = self._mean([rollout.mean_R_code for rollout in rollouts])
         mean_r_reason = self._mean([rollout.mean_R_reason for rollout in rollouts])
@@ -651,16 +774,18 @@ class CodeGRPOTrainer(GRPOTrainer):
         node_count = float(sum(rollout.node_count for rollout in rollouts))
         resample_count = float(sum(rollout.resample_count for rollout in rollouts))
 
-        self._metrics[mode]["mean_R_code"].append(mean_r_code)
-        self._metrics[mode]["mean_R_reason"].append(mean_r_reason)
-        self._metrics[mode]["mean_pass_rate"].append(mean_pass_rate)
-        self._metrics[mode]["std_R_code"].append(std_r_code)
-        self._metrics[mode]["std_R_reason"].append(std_r_reason)
-        self._metrics[mode]["node_count"].append(node_count)
-        self._metrics[mode]["resample_count"].append(resample_count)
-        self._metrics[mode]["rollout_time_s"].append(float(rollout_time_s))
-        self._metrics[mode]["rollout_nodes_per_s"].append(float(node_count / rollout_time_s))
-        self._metrics[mode]["rollout_questions_per_s"].append(float(len(examples) / rollout_time_s))
+        metric_updates: dict[str, float] = {
+            "mean_R_code": mean_r_code,
+            "mean_R_reason": mean_r_reason,
+            "mean_pass_rate": mean_pass_rate,
+            "std_R_code": std_r_code,
+            "std_R_reason": std_r_reason,
+            "node_count": node_count,
+            "resample_count": resample_count,
+            "rollout_time_s": float(rollout_time_s),
+            "rollout_nodes_per_s": float(node_count / rollout_time_s),
+            "rollout_questions_per_s": float(len(examples) / rollout_time_s),
+        }
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
@@ -678,43 +803,18 @@ class CodeGRPOTrainer(GRPOTrainer):
                 per_repeat_metric_values[key] = repeat_means
                 value = self._mean(repeat_means)
                 value_std = self._std(repeat_means)
-                self._metrics[mode][key].append(value)
-                self._metrics[mode][f"{key}_std"].append(value_std)
+                metric_updates[key] = value
+                metric_updates[f"{key}_std"] = value_std
                 merged_eval_metrics[key] = value
                 merged_eval_metrics[f"{key}_std"] = value_std
         else:
             for key in metric_keys:
                 value = self._mean([rollout.eval_metrics.get(key, 0.0) for rollout in rollouts])
-                self._metrics[mode][key].append(value)
+                metric_updates[key] = value
                 merged_eval_metrics[key] = value
 
-        if self.args.codegrpo_mode == "test":
-            selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="test")
-            self._dump_rollout_traces(selected_rollouts)
-            if bool(getattr(self.args, "log_trace_dump_events", False)):
-                logger.info("[TEST] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
-        elif mode == "eval":
-            if self.args.dump_eval_traces:
-                selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="eval")
-                self._dump_rollout_traces(selected_rollouts)
-                if bool(getattr(self.args, "log_trace_dump_events", False)):
-                    logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
-        else:
-            if self._should_dump_train_traces():
-                selected_rollouts = self._select_rollouts_for_trace(rollouts, mode="train")
-                max_files = int(getattr(self.args, "max_train_trace_files", 0) or 0)
-                if max_files > 0:
-                    remaining = max(0, max_files - self._train_trace_dump_counter)
-                    selected_rollouts = selected_rollouts[:remaining]
-                self._dump_rollout_traces(selected_rollouts)
-                self._train_trace_dump_counter += len(selected_rollouts)
-                if bool(getattr(self.args, "log_trace_dump_events", False)):
-                    logger.info("[TRAIN] dumped %d/%d rollout trace files", len(selected_rollouts), len(rollouts))
-            if bool(getattr(self.args, "log_train_rollout_details", False)):
-                logger.info("[TRAIN] built %d training samples from %d questions", len(train_samples), len(examples))
-
-        if mode == "eval":
-            self._last_eval_metrics = {
+        eval_metric_snapshot = (
+            {
                 "mean_R_code": mean_r_code,
                 "mean_R_reason": mean_r_reason,
                 "mean_pass_rate": mean_pass_rate,
@@ -724,11 +824,79 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "resample_count": resample_count,
                 **merged_eval_metrics,
             }
-        self._append_rollout_summaries(rollouts, mode=mode)
+            if mode == "eval"
+            else {}
+        )
 
+        return _CodeGRPORolloutResult(
+            mode=mode,
+            batch=batch,
+            rollouts=rollouts,
+            metric_updates=metric_updates,
+            eval_metric_snapshot=eval_metric_snapshot,
+            train_sample_count=len(train_samples),
+            examples_count=len(examples),
+        )
+
+    def _finalize_rollout_result(self, result: _CodeGRPORolloutResult) -> dict[str, torch.Tensor | Any]:
+        mode = result.mode
+        batch = self._move_batch_to_device(result.batch)
+        if mode == "train":
+            self._attach_old_per_token_logps(batch)
+
+        for key, value in result.metric_updates.items():
+            self._metrics[mode][key].append(value)
+
+        if self.args.codegrpo_mode == "test":
+            selected_rollouts = self._select_rollouts_for_trace(result.rollouts, mode="test")
+            self._dump_rollout_traces(selected_rollouts)
+            if bool(getattr(self.args, "log_trace_dump_events", False)):
+                logger.info("[TEST] dumped %d/%d rollout trace files", len(selected_rollouts), len(result.rollouts))
+        elif mode == "eval":
+            if self.args.dump_eval_traces:
+                selected_rollouts = self._select_rollouts_for_trace(result.rollouts, mode="eval")
+                self._dump_rollout_traces(selected_rollouts)
+                if bool(getattr(self.args, "log_trace_dump_events", False)):
+                    logger.info("[EVAL] dumped %d/%d rollout trace files", len(selected_rollouts), len(result.rollouts))
+            self._last_eval_metrics = dict(result.eval_metric_snapshot)
+        else:
+            if self._should_dump_train_traces():
+                selected_rollouts = self._select_rollouts_for_trace(result.rollouts, mode="train")
+                max_files = int(getattr(self.args, "max_train_trace_files", 0) or 0)
+                if max_files > 0:
+                    remaining = max(0, max_files - self._train_trace_dump_counter)
+                    selected_rollouts = selected_rollouts[:remaining]
+                self._dump_rollout_traces(selected_rollouts)
+                self._train_trace_dump_counter += len(selected_rollouts)
+                if bool(getattr(self.args, "log_trace_dump_events", False)):
+                    logger.info("[TRAIN] dumped %d/%d rollout trace files", len(selected_rollouts), len(result.rollouts))
+            if bool(getattr(self.args, "log_train_rollout_details", False)):
+                logger.info(
+                    "[TRAIN] built %d training samples from %d questions",
+                    result.train_sample_count,
+                    result.examples_count,
+                )
+
+        self._append_rollout_summaries(result.rollouts, mode=mode)
         return batch
 
+    def _generate_and_score_completions(self, inputs: list[dict[str, Any]]) -> dict[str, torch.Tensor | Any]:
+        mode = "train" if self.model.training else "eval"
+        if mode == "train":
+            self._maybe_sync_vllm_weights()
+        result = self._compute_rollout_result(inputs, mode)
+        return self._finalize_rollout_result(result)
+
     def _prepare_inputs(self, generation_batch: dict[str, torch.Tensor | Any]) -> dict[str, torch.Tensor | Any]:
+        if self.model.training and isinstance(generation_batch, _CodeGRPOLookaheadBatch):
+            current_batch = generation_batch.current_batch
+            result = self._pop_prefetched_rollout_result(current_batch)
+            if result is None:
+                self._maybe_sync_vllm_weights()
+                result = self._compute_rollout_result(current_batch, "train")
+            if generation_batch.next_batch is not None:
+                self._submit_async_rollout_prefetch(generation_batch.next_batch)
+            return self._finalize_rollout_result(result)
         # CodeGRPO uses tree rollout per incoming batch directly; avoid GRPO buffered slicing assumptions.
         return self._generate_and_score_completions(generation_batch)
 
@@ -814,6 +982,8 @@ class CodeGRPOTrainer(GRPOTrainer):
         return loss
 
     def evaluate(self, *args, **kwargs):
+        if self._async_rollout_prefetch_enabled:
+            self._shutdown_async_rollout_prefetch(wait=True)
         metrics = super().evaluate(*args, **kwargs)
         if self._last_eval_metrics:
             normalized_metrics = {}
