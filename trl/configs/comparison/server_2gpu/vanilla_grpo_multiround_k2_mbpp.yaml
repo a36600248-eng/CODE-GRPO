@@ -1,4 +1,4 @@
-﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k2_server_2gpu
+output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k2_server_2gpu
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K2-SERVER-2GPU
 logging_steps: 5
@@ -103,7 +103,7 @@ eval_round_n: 1
 eval_k_list: [1, 2]
 
 dump_train_traces: true
-trace_store_full_text: true
+trace_store_full_text: false
 dump_eval_traces: false
 log_eval_trajectories: false
 log_train_rollout_details: false
@@ -112,8 +112,10 @@ log_reward_losses: false
 log_trace_dump_events: false
 debug_trace_dir: traces/rollout
 debug_trace_sample_size: 1
-dump_train_trace_interval_steps: 20
-max_train_trace_files: 8
+dump_train_trace_interval_steps: 120
+max_train_trace_files: 4
 review_bundle_trace_sample_size: 1
+
+
 
 

@@ -443,7 +443,8 @@ class CodeGRPOTrainer(GRPOTrainer):
         return {
             key: value
             for key, value in logs.items()
-            if key in self._EVAL_LOG_KEYS or any(key.startswith(prefix) for prefix in self._EVAL_LOG_PREFIXES)
+            if not key.endswith("_std")
+            and (key in self._EVAL_LOG_KEYS or any(key.startswith(prefix) for prefix in self._EVAL_LOG_PREFIXES))
         }
 
     def public_metrics(self, metrics: dict[str, float], split: str) -> dict[str, float]:

@@ -1,5 +1,6 @@
-﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_eval_server_2gpu
-report_to: none
+output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_eval_server_2gpu
+report_to: tensorboard
+tensorboard_root_dir: /root/tf-logs/CODE-GRPO-RAW-EVAL-SERVER-2GPU
 logging_steps: 50
 disable_tqdm: false
 save_strategy: "no"
@@ -32,7 +33,7 @@ vllm_mode: server
 vllm_server_base_url: http://127.0.0.1:8000
 vllm_server_timeout: 600.0
 
-generation_batch_size: 1
+generation_batch_size: 2
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 max_completion_length: 128
@@ -77,6 +78,7 @@ eval_round_n: 1
 eval_k_list: [1, 2, 3, 4, 5]
 
 dump_train_traces: false
+trace_store_full_text: false
 dump_eval_traces: false
 log_eval_trajectories: false
 log_train_rollout_details: false
@@ -85,6 +87,10 @@ log_reward_losses: false
 log_trace_dump_events: false
 debug_trace_dir: traces/rollout
 debug_trace_sample_size: 1
-review_bundle_trace_sample_size: 1
+review_bundle_trace_sample_size: 0
+
+
+
+
 
 
