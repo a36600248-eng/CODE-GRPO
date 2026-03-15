@@ -838,4 +838,6 @@ class CodeGRPOTrainer(GRPOTrainer):
 
     def log_metrics(self, split: str, metrics: dict[str, float]) -> None:
         public_metrics = self.public_metrics(metrics, split=split)
+        if not public_metrics:
+            return
         super().log_metrics(split, public_metrics)
