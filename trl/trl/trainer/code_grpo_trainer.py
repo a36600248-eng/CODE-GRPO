@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 import torch
+import transformers
 from accelerate.logging import get_logger
 from datasets import Dataset, IterableDataset
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, TrainerCallback
@@ -77,6 +78,13 @@ class CodeGRPOTrainer(GRPOTrainer):
             model_name = model if isinstance(model, str) else get_config_model_id(model.config)
             model_name = model_name.split("/")[-1]
             args = CodeGRPOConfig(f"{model_name}-CodeGRPO")
+
+        # CodeGRPO currently relies on repeated model forwards around tree rollouts. With PEFT models, the
+        # non-reentrant checkpoint path has been fragile in practice on Qwen2-class models; keep the safer
+        # reentrant behavior unless the caller explicitly overrides it.
+        if peft_config is not None and getattr(args, "gradient_checkpointing", False):
+            args.gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
+            args.gradient_checkpointing_kwargs.setdefault("use_reentrant", True)
 
         def _dummy_reward(prompts, completions, **kwargs):
             del completions, kwargs

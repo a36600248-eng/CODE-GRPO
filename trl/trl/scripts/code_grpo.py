@@ -687,19 +687,23 @@ def main(script_args, training_args, model_args, dataset_args):
         trainer.accelerator.print("CodeGRPO test mode completed.")
         return
 
-    train_result = trainer.train()
-    trainer.log_metrics("train", train_result.metrics)
-    trainer.save_metrics("train", train_result.metrics)
-    trainer.save_state()
-    trainer.accelerator.print("CodeGRPO training completed.")
-    trainer.save_model(training_args.output_dir)
-    trainer.accelerator.print(f"Model saved to {training_args.output_dir}.")
-    if rank == 0:
-        _build_review_bundle(
-            run_layout,
-            rank,
-            trace_sample_size=int(getattr(training_args, "review_bundle_trace_sample_size", 2)),
-        )
+    try:
+        train_result = trainer.train()
+        trainer.log_metrics("train", train_result.metrics)
+        trainer.save_metrics("train", train_result.metrics)
+        trainer.save_state()
+        trainer.accelerator.print("CodeGRPO training completed.")
+        trainer.save_model(training_args.output_dir)
+        trainer.accelerator.print(f"Model saved to {training_args.output_dir}.")
+        if rank == 0:
+            _build_review_bundle(
+                run_layout,
+                rank,
+                trace_sample_size=int(getattr(training_args, "review_bundle_trace_sample_size", 2)),
+            )
+    except Exception:
+        logger.exception("[RUN] training failed")
+        raise
 
     if training_args.push_to_hub:
         trainer.push_to_hub(dataset_name=script_args.dataset_name)
