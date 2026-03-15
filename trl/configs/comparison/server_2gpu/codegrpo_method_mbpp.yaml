@@ -1,7 +1,8 @@
 output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_server_2gpu
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-SERVER-2GPU
-logging_steps: 5
+logging_steps: 5
+
 disable_tqdm: false
 save_strategy: "steps"
 save_steps: 60
@@ -115,8 +116,6 @@ debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 120
 max_train_trace_files: 4
 review_bundle_trace_sample_size: 2
-tensorboard_enabled: true
-log_reward_windows_to_tensorboard: true
 
 
 
