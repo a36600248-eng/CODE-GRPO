@@ -286,6 +286,9 @@ class GRPOTrainer(_BaseTrainer):
         # Model
         if isinstance(model, str):
             model_init_kwargs = args.model_init_kwargs or {}
+            # Training a PEFT/GRPO model with device_map="auto" leaves hf_device_map hooks on the model and can break
+            # gradient checkpointing. Default to a normal single-device load unless the user explicitly overrides it.
+            model_init_kwargs.setdefault("device_map", None)
             # Distributed training requires device_map=None ("auto" fails)
             if args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
                 model_init_kwargs["device_map"] = None
@@ -347,6 +350,15 @@ class GRPOTrainer(_BaseTrainer):
         if peft_config is not None:
             model = get_peft_model(model, peft_config)
 
+        hf_device_map = getattr(model, "hf_device_map", None)
+        if args.gradient_checkpointing and isinstance(hf_device_map, dict):
+            distinct_devices = {str(device) for device in hf_device_map.values()}
+            if len(distinct_devices) > 1:
+                raise ValueError(
+                    "gradient_checkpointing is incompatible with a trainable model loaded across multiple devices "
+                    f"via hf_device_map={hf_device_map}. Reload the training model with device_map=None."
+                )
+
         # When using gradient checkpointing with PEFT, we need to enable input gradients. transformers.Trainer normally
         # handles this, but a bug currently prevents it; see https://github.com/huggingface/transformers/issues/42489
         if is_peft_available() and is_peft_model(model) and args.gradient_checkpointing:
@@ -369,6 +381,7 @@ class GRPOTrainer(_BaseTrainer):
         for i, reward_func in enumerate(reward_funcs):
             if isinstance(reward_func, str):
                 model_init_kwargs = args.model_init_kwargs or {}
+                model_init_kwargs.setdefault("device_map", None)
                 # Distributed training requires device_map=None ("auto" fails)
                 if args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
                     model_init_kwargs["device_map"] = None
@@ -623,6 +636,7 @@ class GRPOTrainer(_BaseTrainer):
         else:
             # For deepspeed, fsdp or non-distributed models, create a reference model from scratch
             model_init_kwargs = args.model_init_kwargs or {}
+            model_init_kwargs.setdefault("device_map", None)
             # Distributed training requires device_map=None ("auto" fails)
             if self.args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
                 model_init_kwargs["device_map"] = None

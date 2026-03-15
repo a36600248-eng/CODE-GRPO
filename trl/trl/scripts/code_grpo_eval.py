@@ -114,6 +114,7 @@ def main(script_args, training_args, model_args, dataset_args):
         "revision": model_args.model_revision,
         "attn_implementation": model_args.attn_implementation,
         "dtype": dtype,
+        "device_map": None,
     }
     quantization_config = get_quantization_config(model_args)
     if quantization_config is not None:
