@@ -39,6 +39,31 @@ class _CodeGRPOLookaheadBatch:
     current_batch: Any
     next_batch: Any | None = None
 
+    def __contains__(self, key):
+        if isinstance(self.current_batch, dict):
+            return key in self.current_batch
+        return False
+
+    def __getitem__(self, key):
+        if isinstance(self.current_batch, dict):
+            return self.current_batch[key]
+        raise KeyError(key)
+
+    def __iter__(self):
+        if isinstance(self.current_batch, dict):
+            return iter(self.current_batch)
+        return iter(())
+
+    def __len__(self):
+        if isinstance(self.current_batch, dict):
+            return len(self.current_batch)
+        return 0
+
+    def get(self, key, default=None):
+        if isinstance(self.current_batch, dict):
+            return self.current_batch.get(key, default)
+        return default
+
 
 @dataclass
 class _CodeGRPORolloutResult:
