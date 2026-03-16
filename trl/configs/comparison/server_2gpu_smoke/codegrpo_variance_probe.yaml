@@ -1,18 +1,23 @@
-﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k2_server_2gpu
+# ============================================================
+# 快速方差验证配置 — server 2gpu 模式
+# 训练集 80 题 / 验证集 30 题 / 60 steps / eval 每 20 步
+# 预计双 GPU 运行 ~20-40 分钟
+# 目的：确认方差优化后 reward/loss 曲线是否平滑
+# ============================================================
+output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_variance_probe
 report_to: tensorboard
-tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K2-SERVER-2GPU
-logging_steps: 5
-save_strategy: "steps"
-save_steps: 60
-save_total_limit: 2
-load_best_model_at_end: true
-metric_for_best_model: eval_pass_at_1
-greater_is_better: true
+tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VARIANCE-PROBE
+logging_steps: 1
+disable_tqdm: false
+save_strategy: "no"
 eval_strategy: "steps"
-eval_steps: 60
+eval_steps: 20
 push_to_hub: false
 seed: 42
 data_seed: 42
+# 80 题训练：覆盖足够多样性；30 题验证：3 次 eval 看波动
+max_train_samples: 80
+max_eval_samples: 30
 run_base_model_baseline_eval: false
 eval_repeat_count: 1
 
@@ -40,16 +45,19 @@ use_vllm: true
 vllm_mode: server
 vllm_server_base_url: http://127.0.0.1:8000
 vllm_server_timeout: 600.0
+vllm_sync_steps: 5
+async_rollout_prefetch: true
 
-num_train_epochs: 2
-max_steps: -1
+num_train_epochs: 1
+max_steps: 60
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
 weight_decay: 0.0
+beta: 0.001
 gradient_checkpointing: true
 gradient_accumulation_steps: 1
-generation_batch_size: 2
+generation_batch_size: 4
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 max_completion_length: 128
@@ -66,29 +74,31 @@ K_reason: 1
 num_generations: 2
 num_generations_eval: 1
 eval_code_only_single_trajectory: true
-reward_window_bins: 10
+reward_window_bins: 5
 T_max: 2
-eval_T_max_override: 5
+eval_T_max_override: 2
 N_max: 4
-M_audit: 0
+M_audit: 3
 M_retry: 1
 context_round_window: 2
-lambda_soft: 0.0
-code_compile_reward_scale: 0.1
-code_format_reward_scale: 0.12
-logic_format_reward_scale: 0.0
+lambda_soft: 0.10
+code_compile_reward_scale: 0.05
+code_format_reward_scale: 0.05
+logic_format_reward_scale: 0.05
+logic_match_reward_scale: 1.0
+logic_confirmed_bonus: 0.25
 exec_case_baseline_ema_alpha: 0.1
-soft_reward_ineligible_scale: 0.0
-format_bonus_logic: 0.0
-format_bonus_exec: 0.0
+soft_reward_ineligible_scale: 0.2
+format_bonus_logic: 0.05
+format_bonus_exec: 0.05
 use_chat_template_for_codegrpo: true
-terminal_logic_backprop_bonus: 0.0
-terminal_logic_backprop_decay: 0.0
-terminal_logic_backprop_max_depth: 0
-terminal_backprop_code_similarity_threshold: 1.0
-frozen_reason_one_shot: false
-unify_reason_when_code_frozen: false
-beta_reason: 0.0
+terminal_logic_backprop_bonus: 0.1
+terminal_logic_backprop_decay: 0.7
+terminal_logic_backprop_max_depth: 6
+terminal_backprop_code_similarity_threshold: 0.75
+frozen_reason_one_shot: true
+unify_reason_when_code_frozen: true
+beta_reason: 0.5
 gamma_shrink: 0.1
 format_outside_noise_chars: 80
 generation_outside_noise_chars: 0
@@ -99,7 +109,15 @@ code_timeout_seconds: 1.0
 eval_round_n: 1
 eval_k_list: [1, 2]
 
-dump_train_traces: false
+# --- 方差优化开关（与正式训练一致） ---
+advantage_base: pass_rate
+advantage_mode: mean_only
+code_grpo_loss_type: token_mean
+
+# --- logging / trace ---
+# compact_logging 默认 true：控制台精简 8 指标，TensorBoard 全量 30+ 指标
+dump_train_traces: true
+trace_store_full_text: false
 dump_eval_traces: false
 log_eval_trajectories: false
 log_train_rollout_details: false
@@ -107,8 +125,7 @@ write_trainer_text_log: false
 log_reward_losses: false
 log_trace_dump_events: false
 debug_trace_dir: traces/rollout
-debug_trace_sample_size: 1
-dump_train_trace_interval_steps: 999999
-max_train_trace_files: 0
-review_bundle_trace_sample_size: 1
-
+debug_trace_sample_size: 2
+dump_train_trace_interval_steps: 20
+max_train_trace_files: 6
+review_bundle_trace_sample_size: 2

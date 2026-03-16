@@ -113,8 +113,23 @@ class CodeGRPOTrainer(GRPOTrainer):
 
     _tag_names = ["trl", "code_grpo"]
     _name = "CodeGRPO"
+    # --- 控制台只打核心进度指标（保持简洁） ---
+    _CONSOLE_TRAIN_KEYS = frozenset(
+        {
+            "loss",
+            "loss_code",
+            "loss_reason",
+            "learning_rate",
+            "grad_norm",
+            "mean_R_code",
+            "mean_pass_rate",
+            "reward/tie_rate",
+        }
+    )
+    # --- TensorBoard 写入全量诊断指标 ---
     _TRAIN_LOG_KEYS = frozenset(
         {
+            # 核心进度
             "loss",
             "loss_code",
             "loss_reason",
@@ -125,34 +140,59 @@ class CodeGRPOTrainer(GRPOTrainer):
             "mean_R_reason",
             "mean_pass_rate",
             "rollout_time_s",
-            # [诊断面板] 方差诊断核心指标
+            # reward 诊断
             "reward/tie_rate",
             "reward/R_code_min",
             "reward/R_code_max",
             "std_R_code",
+            # advantage 诊断
             "advantage/code_nonzero_rate",
             "advantage/code_std",
+            "nonzero_A_code_rate",
+            "mean_abs_A_code",
+            # ratio 诊断
             "ratio/mean",
             "ratio/max",
             "clip_low_rate",
             "clip_high_rate",
+            # batch/length 诊断
             "completion_len/code_mean",
             "tokens_per_update",
             "effective_prompts_per_update",
             "effective_rollouts_per_update",
             # tree-level 诊断
-            "nonzero_A_code_rate",
             "sibling_group_zero_std_R_code_rate",
             "sibling_group_both_R_code_1_rate",
             "sibling_group_mean_pass_rate_gap",
-            "mean_abs_A_code",
+            # reward window 滑动均值
+            "window/mean_R_code",
+            "window/mean_R_reason",
+            "window/mean_R_soft_effective",
+            "window/steps",
+            "window/end_step",
         }
     )
+    # --- 控制台 eval 只打核心结果 ---
+    _CONSOLE_EVAL_KEYS = frozenset(
+        {
+            "eval_loss",
+            "eval_pass_at_1",
+            "eval_best_pass_rate_overall",
+            "eval_mean_R_code",
+            "eval_mean_pass_rate",
+        }
+    )
+    # --- TensorBoard eval 全量写入 ---
     _EVAL_LOG_KEYS = frozenset(
         {
+            "eval_loss",
             "eval_kl",
             "eval_pass_at_1",
             "eval_best_pass_rate_overall",
+            "eval_mean_R_code",
+            "eval_mean_R_reason",
+            "eval_mean_pass_rate",
+            "eval_std_R_code",
             "eval_generation_format_ok_rate",
             "eval_compile_ok_rate",
             "eval_syntax_error_rate",
@@ -598,10 +638,20 @@ class CodeGRPOTrainer(GRPOTrainer):
             )
         return ref_per_token_logps
 
-    def _filter_public_logs(self, logs: dict[str, float], mode: str) -> dict[str, float]:
+    def _filter_console_logs(self, logs: dict[str, float], mode: str) -> dict[str, float]:
+        """控制台精简过滤：只保留核心进度指标，避免刷屏。"""
         if not bool(getattr(self.args, "compact_logging", True)):
             return logs
+        if mode == "train":
+            return {key: value for key, value in logs.items() if key in self._CONSOLE_TRAIN_KEYS}
+        return {
+            key: value
+            for key, value in logs.items()
+            if key in self._CONSOLE_EVAL_KEYS or any(key.startswith(prefix) for prefix in self._EVAL_LOG_PREFIXES)
+        }
 
+    def _filter_tb_logs(self, logs: dict[str, float], mode: str) -> dict[str, float]:
+        """TensorBoard 全量过滤：写入所有诊断指标供离线分析。"""
         if mode == "train":
             return {key: value for key, value in logs.items() if key in self._TRAIN_LOG_KEYS}
         return {
@@ -612,8 +662,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         }
 
     def public_metrics(self, metrics: dict[str, float], split: str) -> dict[str, float]:
+        """eval summary 打印用控制台精简版。"""
         mode = "eval" if split in {"eval", "test", "baseline_eval"} else "train"
-        return self._filter_public_logs(dict(metrics), mode=mode)
+        return self._filter_console_logs(dict(metrics), mode=mode)
 
     def _build_training_batch(self, train_samples: list, to_device: bool = True) -> dict[str, torch.Tensor]:
         prompt_ids_tensors = []
@@ -1115,6 +1166,18 @@ class CodeGRPOTrainer(GRPOTrainer):
             metrics.update(normalized_metrics)
         return metrics
 
+    def _get_tb_writer(self):
+        """懒获取 TensorBoard SummaryWriter，缓存结果。"""
+        if hasattr(self, "_tb_writer_cache"):
+            return self._tb_writer_cache
+        writer = None
+        for cb in self.callback_handler.callbacks:
+            if hasattr(cb, "tb_writer") and cb.tb_writer is not None:
+                writer = cb.tb_writer
+                break
+        self._tb_writer_cache = writer
+        return writer
+
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         mode = "train" if self.model.training else "eval"
         metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}
@@ -1125,9 +1188,25 @@ class CodeGRPOTrainer(GRPOTrainer):
             metrics = {f"eval_{key}": val for key, val in metrics.items()}
             self._last_eval_metrics = dict(metrics)
 
-        logs = self._filter_public_logs({**logs, **metrics}, mode=mode)
+        all_logs = {**logs, **metrics}
         self._metrics[mode].clear()
-        super().log(logs, start_time)
+
+        # --- 分层输出：TensorBoard 全量诊断，控制台只打核心进度 ---
+        # 1) 手动写 TensorBoard 全量指标（绕过 callback 链路）
+        tb_logs = self._filter_tb_logs(all_logs, mode=mode)
+        tb_writer = self._get_tb_writer()
+        if tb_writer is not None:
+            step = self.state.global_step
+            for key, value in tb_logs.items():
+                if isinstance(value, (int, float)):
+                    tb_writer.add_scalar(key, value, step)
+            tb_writer.flush()
+
+        # 2) Console: 精简版走 super().log()（ProgressCallback 打印这个）
+        #    注意：super().log() 内部也会触发 TensorBoardCallback.on_log()，
+        #    但只传精简版 key，不会覆盖已写入的全量指标（TB 是 append 不是 replace）
+        console_logs = self._filter_console_logs(all_logs, mode=mode)
+        super().log(console_logs, start_time)
 
     def log_metrics(self, split: str, metrics: dict[str, float]) -> None:
         public_metrics = self.public_metrics(metrics, split=split)
