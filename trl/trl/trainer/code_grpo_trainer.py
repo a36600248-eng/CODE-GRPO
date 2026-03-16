@@ -125,6 +125,27 @@ class CodeGRPOTrainer(GRPOTrainer):
             "mean_R_reason",
             "mean_pass_rate",
             "rollout_time_s",
+            # [诊断面板] 方差诊断核心指标
+            "reward/tie_rate",
+            "reward/R_code_min",
+            "reward/R_code_max",
+            "std_R_code",
+            "advantage/code_nonzero_rate",
+            "advantage/code_std",
+            "ratio/mean",
+            "ratio/max",
+            "clip_low_rate",
+            "clip_high_rate",
+            "completion_len/code_mean",
+            "tokens_per_update",
+            "effective_prompts_per_update",
+            "effective_rollouts_per_update",
+            # tree-level 诊断
+            "nonzero_A_code_rate",
+            "sibling_group_zero_std_R_code_rate",
+            "sibling_group_both_R_code_1_rate",
+            "sibling_group_mean_pass_rate_gap",
+            "mean_abs_A_code",
         }
     )
     _EVAL_LOG_KEYS = frozenset(
@@ -812,6 +833,30 @@ class CodeGRPOTrainer(GRPOTrainer):
             "rollout_questions_per_s": float(len(examples) / rollout_time_s),
         }
 
+        # [诊断面板] rollout 层面的 reward / advantage / batch 诊断
+        all_r_codes = [s.R_code for s in train_samples if hasattr(s, "R_code")]
+        all_pass_rates = [s.pass_rate for s in train_samples if hasattr(s, "pass_rate")]
+        all_a_codes = [s.A_code for s in train_samples if hasattr(s, "A_code")]
+        if all_r_codes:
+            metric_updates["reward/R_code_min"] = min(all_r_codes)
+            metric_updates["reward/R_code_max"] = max(all_r_codes)
+            # [诊断面板] reward tie rate: 一组 sibling 的 R_code 相同的比例
+            pair_diffs = []
+            for rollout in rollouts:
+                for sample in rollout.train_samples:
+                    if hasattr(sample, "R_code"):
+                        pair_diffs.append(sample.R_code)
+            # tie_rate 从 advantage 视角：A_code == 0 的样本比例
+            if all_a_codes:
+                tie_count = sum(1 for a in all_a_codes if abs(a) < 1e-8)
+                metric_updates["reward/tie_rate"] = tie_count / len(all_a_codes)
+        if all_pass_rates:
+            metric_updates["reward/pass_rate_min"] = min(all_pass_rates)
+            metric_updates["reward/pass_rate_max"] = max(all_pass_rates)
+        # [诊断面板] effective prompts per update
+        metric_updates["effective_prompts_per_update"] = float(len(examples))
+        metric_updates["effective_rollouts_per_update"] = float(len(train_samples))
+
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
         per_repeat_metric_values: dict[str, list[float]] = {}
@@ -963,10 +1008,20 @@ class CodeGRPOTrainer(GRPOTrainer):
         per_token_code_loss = -torch.min(coef_1 * advantages_code, coef_2 * advantages_code)
         per_token_reason_loss = -torch.min(coef_1 * advantages_reason, coef_2 * advantages_reason)
 
-        loss_code_per_seq = (per_token_code_loss * code_mask).sum(dim=1) / code_mask.sum(dim=1).clamp(min=1.0)
-        loss_reason_per_seq = (per_token_reason_loss * reason_mask).sum(dim=1) / reason_mask.sum(dim=1).clamp(min=1.0)
-        loss_code = loss_code_per_seq.mean()
-        loss_reason = loss_reason_per_seq.mean()
+        # [降低 length bias] code_grpo_loss_type 选择 loss 聚合方式
+        # seq_mean: 原始实现，每个序列按长度归一化再取 batch mean → 短序列与长序列等权 → length bias
+        # token_mean: 所有 token loss 之和 / 总 active token 数 → 每个 token 等权 → 无 length bias（DAPO/Dr.GRPO）
+        loss_type = getattr(self.args, "code_grpo_loss_type", "seq_mean")
+        if loss_type == "token_mean":
+            code_active_tokens = code_mask.sum().clamp(min=1.0)
+            reason_active_tokens = reason_mask.sum().clamp(min=1.0)
+            loss_code = (per_token_code_loss * code_mask).sum() / code_active_tokens
+            loss_reason = (per_token_reason_loss * reason_mask).sum() / reason_active_tokens
+        else:
+            loss_code_per_seq = (per_token_code_loss * code_mask).sum(dim=1) / code_mask.sum(dim=1).clamp(min=1.0)
+            loss_reason_per_seq = (per_token_reason_loss * reason_mask).sum(dim=1) / reason_mask.sum(dim=1).clamp(min=1.0)
+            loss_code = loss_code_per_seq.mean()
+            loss_reason = loss_reason_per_seq.mean()
         loss = loss_code + self.args.beta_reason * loss_reason
         if self.beta != 0.0:
             ref_per_token_logps = self._get_reference_per_token_logps(
@@ -988,6 +1043,48 @@ class CodeGRPOTrainer(GRPOTrainer):
         gathered_loss_reason = self.accelerator.gather(loss_reason.detach()).float().mean().item()
         self._metrics[mode]["loss_code"].append(gathered_loss_code)
         self._metrics[mode]["loss_reason"].append(gathered_loss_reason)
+
+        # [诊断面板] importance ratio 方差监控
+        with torch.no_grad():
+            flat_ratio = coef_1[completion_mask.bool()]
+            if flat_ratio.numel() > 0:
+                self._metrics[mode]["ratio/mean"].append(flat_ratio.mean().item())
+                self._metrics[mode]["ratio/std"].append(flat_ratio.std().item())
+                self._metrics[mode]["ratio/max"].append(flat_ratio.max().item())
+                # [诊断面板] clip 比率：正 advantage 被 high clip，负 advantage 被 low clip
+                is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (advantages_code < 0)
+                is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages_code > 0)
+                clip_mask = completion_mask.bool()
+                if clip_mask.any():
+                    self._metrics[mode]["clip_low_rate"].append(
+                        is_low_clipped[clip_mask].float().mean().item()
+                    )
+                    self._metrics[mode]["clip_high_rate"].append(
+                        is_high_clipped[clip_mask].float().mean().item()
+                    )
+            # [诊断面板] 完成长度分布：code vs reason
+            code_lens = code_mask.sum(dim=1)
+            reason_lens = reason_mask.sum(dim=1)
+            code_active = code_lens[code_lens > 0]
+            reason_active = reason_lens[reason_lens > 0]
+            if code_active.numel() > 0:
+                self._metrics[mode]["completion_len/code_mean"].append(code_active.float().mean().item())
+            if reason_active.numel() > 0:
+                self._metrics[mode]["completion_len/reason_mean"].append(reason_active.float().mean().item())
+            # [诊断面板] advantage 分布
+            adv_code_flat = advantages_code.squeeze()
+            if adv_code_flat.numel() > 0:
+                self._metrics[mode]["advantage/code_mean"].append(adv_code_flat.mean().item())
+                self._metrics[mode]["advantage/code_std"].append(adv_code_flat.std().item())
+                self._metrics[mode]["advantage/code_nonzero_rate"].append(
+                    (adv_code_flat.abs() > 1e-8).float().mean().item()
+                )
+            adv_reason_flat = advantages_reason.squeeze()
+            if adv_reason_flat.numel() > 0:
+                self._metrics[mode]["advantage/reason_mean"].append(adv_reason_flat.mean().item())
+                self._metrics[mode]["advantage/reason_std"].append(adv_reason_flat.std().item())
+            # [诊断面板] effective tokens per update
+            self._metrics[mode]["tokens_per_update"].append(completion_mask.sum().item())
         kl_value = self._compute_reference_kl_metric(
             per_token_logps=per_token_logps,
             input_ids=input_ids,

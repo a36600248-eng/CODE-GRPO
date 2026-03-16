@@ -106,6 +106,11 @@ code_timeout_seconds: 1.0
 eval_round_n: 1
 eval_k_list: [1, 2]
 
+# --- 方差优化开关（正式训练推荐） ---
+advantage_base: pass_rate
+advantage_mode: mean_only
+code_grpo_loss_type: token_mean
+
 dump_train_traces: true
 trace_store_full_text: false
 dump_eval_traces: false

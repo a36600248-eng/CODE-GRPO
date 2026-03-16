@@ -214,6 +214,39 @@ class CodeGRPOConfig(GRPOConfig):
     )
     beta_reason: float = field(default=1.0, metadata={"help": "Reason loss coefficient."})
     gamma_shrink: float = field(default=0.1, metadata={"help": "Advantage shrink factor for fully-correct nodes."})
+
+    # --- Variance reduction options (K=2 specific) ---
+    advantage_base: str = field(
+        default="R_code",
+        metadata={
+            "help": (
+                "Which reward signal to use for computing A_code sibling advantages. "
+                "'R_code': full composite reward (default, may saturate at 1 with clamp01). "
+                "'pass_rate': raw pass_rate only (avoids clamp01 saturation when soft/compile/format push R_code to 1)."
+            )
+        },
+    )
+    advantage_mode: str = field(
+        default="zscore",
+        metadata={
+            "help": (
+                "How to compute sibling group advantages. "
+                "'zscore': (r - mean) / (std + eps), standard GRPO (default). "
+                "'sign': pairwise sign advantage: +1/-1/0 based on reward comparison (reduces K=2 scale noise). "
+                "'mean_only': (r - mean), no std normalization (Dr.GRPO style, preserves reward gap magnitude)."
+            )
+        },
+    )
+    code_grpo_loss_type: str = field(
+        default="seq_mean",
+        metadata={
+            "help": (
+                "Loss aggregation for code_grpo orthogonal loss. "
+                "'seq_mean': per-sequence mean then batch mean (current default, known length bias). "
+                "'token_mean': sum all token losses / total active tokens (DAPO/Dr.GRPO style, no length bias). "
+            )
+        },
+    )
     async_rollout_prefetch: bool = field(
         default=False,
         metadata={
@@ -379,6 +412,14 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError(f"codegrpo_mode must be one of ['train', 'test'], got: {self.codegrpo_mode}")
         if self.backend not in {"hf", "vllm"}:
             raise ValueError(f"backend must be one of ['hf', 'vllm'], got: {self.backend}")
+        if self.advantage_base not in {"R_code", "pass_rate"}:
+            raise ValueError(f"advantage_base must be 'R_code' or 'pass_rate', got: {self.advantage_base}")
+        if self.advantage_mode not in {"zscore", "sign", "mean_only"}:
+            raise ValueError(f"advantage_mode must be 'zscore', 'sign', or 'mean_only', got: {self.advantage_mode}")
+        if self.code_grpo_loss_type not in {"seq_mean", "token_mean"}:
+            raise ValueError(
+                f"code_grpo_loss_type must be 'seq_mean' or 'token_mean', got: {self.code_grpo_loss_type}"
+            )
         if self.K < 2:
             raise ValueError("K must be >= 2 for sibling-group GRPO.")
         if self.K_reason < 1:

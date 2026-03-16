@@ -162,6 +162,19 @@ def _compute_advantage_diagnostics(nodes: list[Node], eps: float = 1e-12) -> dic
         "sibling_group_all_fail_rate": _mean(
             [1.0 if all(float(node.pass_rate) < 1.0 for node in group) else 0.0 for group in groups]
         ),
+        # [诊断面板] pass_rate pair gap: sibling 间 pass_rate 差的均值，反映 K=2 下有效梯度信号强度
+        "sibling_group_mean_pass_rate_gap": _mean(
+            [
+                max((float(n.pass_rate) for n in group), default=0.0) - min((float(n.pass_rate) for n in group), default=0.0)
+                for group in groups
+            ]
+        ),
+        # [诊断面板] R_code clamp 饱和率: 两个 sibling 的 R_code 都 == 1.0 的比例
+        "sibling_group_both_R_code_1_rate": _mean(
+            [1.0 if all(abs(float(n.R_code) - 1.0) < eps for n in group) else 0.0 for group in groups]
+        ),
+        # [诊断面板] A_code 绝对值均值：反映梯度尺度
+        "mean_abs_A_code": _mean([abs(float(node.A_code)) for node in code_nodes]) if code_nodes else 0.0,
     }
 
 
@@ -1731,12 +1744,42 @@ class CodeGRPOTreeRunner:
         return child
 
     def _assign_group_advantages(self, siblings: list[Node], update_exec_baseline: bool = True) -> None:
-        code_vals = [node.R_code for node in siblings]
+        # [降低 reward variance] advantage_base: 选择用 R_code 还是 pass_rate 做 sibling 比较
+        # R_code 包含 soft/compile/format 加法项后 clamp01，K=2 高分区两者都饱和到 1 → std=0 → 零梯度
+        # pass_rate 不受辅助项影响，高分区仍有区分度（如 0.75 vs 1.0）
+        advantage_base = getattr(self.args, "advantage_base", "R_code")
+        advantage_mode = getattr(self.args, "advantage_mode", "zscore")
+        if advantage_base == "pass_rate":
+            code_vals = [node.pass_rate for node in siblings]
+        else:
+            code_vals = [node.R_code for node in siblings]
         mean_code = _mean(code_vals)
         std_code = _std(code_vals)
         eps = 1e-8
+
+        # [降低 batch variance] advantage_mode: 选择 zscore / sign / mean_only
+        # zscore: K=2 下退化为固定 ±1（std 为 |r1-r2|/2），reward gap 信息丢失
+        # sign: 显式 pairwise +1/-1/0，语义等价于 zscore 但无 eps 数值噪声
+        # mean_only: (r - mean)，保留 reward gap 绝对值，Dr.GRPO 风格
         for node in siblings:
-            node.A_code = (node.R_code - mean_code) / (std_code + eps)
+            if advantage_base == "pass_rate":
+                val = node.pass_rate
+            else:
+                val = node.R_code
+            if advantage_mode == "sign":
+                # [降低 batch variance] pairwise sign: 两个 sibling 直接比较方向
+                if std_code <= eps:
+                    node.A_code = 0.0
+                elif val > mean_code:
+                    node.A_code = 1.0
+                else:
+                    node.A_code = -1.0
+            elif advantage_mode == "mean_only":
+                # [降低 reward variance] Dr.GRPO 风格: 只减均值，不除 std，保留 reward gap 信息量
+                node.A_code = val - mean_code
+            else:
+                # zscore: 原始实现
+                node.A_code = (val - mean_code) / (std_code + eps)
 
         # Reset per-case advantages.
         for node in siblings:
@@ -1761,7 +1804,20 @@ class CodeGRPOTreeRunner:
             mean_v = _mean(vals)
             std_v = _std(vals)
             for item, score in rows:
-                item["advantage"] = (score - mean_v) / (std_v + eps) if len(rows) > 1 else 0.0
+                if len(rows) <= 1:
+                    item["advantage"] = 0.0
+                elif advantage_mode == "sign":
+                    # [降低 batch variance] pairwise sign for case-level logic advantages
+                    if std_v <= eps:
+                        item["advantage"] = 0.0
+                    elif score > mean_v:
+                        item["advantage"] = 1.0
+                    else:
+                        item["advantage"] = -1.0
+                elif advantage_mode == "mean_only":
+                    item["advantage"] = score - mean_v
+                else:
+                    item["advantage"] = (score - mean_v) / (std_v + eps)
 
         # Exec case-level advantages:
         # 1) strict same-code + same-case z-score when group size >=2
@@ -1780,7 +1836,18 @@ class CodeGRPOTreeRunner:
                 mean_v = _mean(vals)
                 std_v = _std(vals)
                 for item, score in rows:
-                    item["advantage"] = (score - mean_v) / (std_v + eps)
+                    # [降低 batch variance] 对 exec case-level 也统一用 advantage_mode
+                    if advantage_mode == "sign":
+                        if std_v <= eps:
+                            item["advantage"] = 0.0
+                        elif score > mean_v:
+                            item["advantage"] = 1.0
+                        else:
+                            item["advantage"] = -1.0
+                    elif advantage_mode == "mean_only":
+                        item["advantage"] = score - mean_v
+                    else:
+                        item["advantage"] = (score - mean_v) / (std_v + eps)
                     item["advantage_source"] = "same_code_case"
             else:
                 for item, score in rows:
