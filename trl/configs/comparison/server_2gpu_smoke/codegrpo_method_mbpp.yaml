@@ -103,7 +103,7 @@ eval_round_n: 1
 eval_k_list: [1, 2]
 
 # --- 方差优化开关（快速验证用，开启全部新特性） ---
-advantage_base: pass_rate
+advantage_base: R_code
 advantage_mode: mean_only
 code_grpo_loss_type: token_mean
 

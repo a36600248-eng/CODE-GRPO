@@ -123,7 +123,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "grad_norm",
             "mean_R_code",
             "mean_pass_rate",
-            "reward/tie_rate",
+            "advantage/code_zero_rate",
         }
     )
     # --- TensorBoard 写入全量诊断指标 ---
@@ -141,22 +141,30 @@ class CodeGRPOTrainer(GRPOTrainer):
             "mean_pass_rate",
             "rollout_time_s",
             # reward 诊断
-            "reward/tie_rate",
+            "advantage/code_zero_rate",
             "reward/R_code_min",
             "reward/R_code_max",
+            "reward/pass_rate_min",
+            "reward/pass_rate_max",
             "std_R_code",
+            "std_R_reason",
             # advantage 诊断
             "advantage/code_nonzero_rate",
             "advantage/code_std",
+            "advantage/code_mean",
+            "advantage/reason_mean",
+            "advantage/reason_std",
             "nonzero_A_code_rate",
             "mean_abs_A_code",
             # ratio 诊断
             "ratio/mean",
             "ratio/max",
+            "ratio/std",
             "clip_low_rate",
             "clip_high_rate",
             # batch/length 诊断
             "completion_len/code_mean",
+            "completion_len/reason_mean",
             "tokens_per_update",
             "effective_prompts_per_update",
             "effective_rollouts_per_update",
@@ -897,10 +905,10 @@ class CodeGRPOTrainer(GRPOTrainer):
                 for sample in rollout.train_samples:
                     if hasattr(sample, "R_code"):
                         pair_diffs.append(sample.R_code)
-            # tie_rate 从 advantage 视角：A_code == 0 的样本比例
+            # advantage/code_zero_rate: A_code == 0 的样本比例（sibling reward 相同或 std<=eps 时为 0）
             if all_a_codes:
-                tie_count = sum(1 for a in all_a_codes if abs(a) < 1e-8)
-                metric_updates["reward/tie_rate"] = tie_count / len(all_a_codes)
+                zero_count = sum(1 for a in all_a_codes if abs(a) < 1e-8)
+                metric_updates["advantage/code_zero_rate"] = zero_count / len(all_a_codes)
         if all_pass_rates:
             metric_updates["reward/pass_rate_min"] = min(all_pass_rates)
             metric_updates["reward/pass_rate_max"] = max(all_pass_rates)

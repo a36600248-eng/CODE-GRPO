@@ -1744,9 +1744,9 @@ class CodeGRPOTreeRunner:
         return child
 
     def _assign_group_advantages(self, siblings: list[Node], update_exec_baseline: bool = True) -> None:
-        # [降低 reward variance] advantage_base: 选择用 R_code 还是 pass_rate 做 sibling 比较
-        # R_code 包含 soft/compile/format 加法项后 clamp01，K=2 高分区两者都饱和到 1 → std=0 → 零梯度
-        # pass_rate 不受辅助项影响，高分区仍有区分度（如 0.75 vs 1.0）
+        # [advantage_base] 选择用 R_code 还是 pass_rate 做 sibling 比较
+        # R_code 包含 compile/format/soft 稠密信号，低分区有更好区分度
+        # pass_rate 高分区可能仍有区分度（如 0.75 vs 1.0），但丢失了稠密信号
         advantage_base = getattr(self.args, "advantage_base", "R_code")
         advantage_mode = getattr(self.args, "advantage_mode", "zscore")
         if advantage_base == "pass_rate":
@@ -1767,8 +1767,10 @@ class CodeGRPOTreeRunner:
             else:
                 val = node.R_code
             if advantage_mode == "sign":
-                # [降低 batch variance] pairwise sign: 两个 sibling 直接比较方向
-                if std_code <= eps:
+                # [pairwise sign] 仅在严格二元组(len==2)下有效；否则 fallback 到 mean_only
+                if len(siblings) != 2:
+                    node.A_code = val - mean_code
+                elif std_code <= eps:
                     node.A_code = 0.0
                 elif val > mean_code:
                     node.A_code = 1.0
@@ -1807,8 +1809,10 @@ class CodeGRPOTreeRunner:
                 if len(rows) <= 1:
                     item["advantage"] = 0.0
                 elif advantage_mode == "sign":
-                    # [降低 batch variance] pairwise sign for case-level logic advantages
-                    if std_v <= eps:
+                    # [pairwise sign] 仅在严格二元组下有效；否则 fallback 到 mean_only
+                    if len(rows) != 2:
+                        item["advantage"] = score - mean_v
+                    elif std_v <= eps:
                         item["advantage"] = 0.0
                     elif score > mean_v:
                         item["advantage"] = 1.0
@@ -1836,9 +1840,11 @@ class CodeGRPOTreeRunner:
                 mean_v = _mean(vals)
                 std_v = _std(vals)
                 for item, score in rows:
-                    # [降低 batch variance] 对 exec case-level 也统一用 advantage_mode
+                    # [pairwise sign] 对 exec case-level 也统一用 advantage_mode
                     if advantage_mode == "sign":
-                        if std_v <= eps:
+                        if len(rows) != 2:
+                            item["advantage"] = score - mean_v
+                        elif std_v <= eps:
                             item["advantage"] = 0.0
                         elif score > mean_v:
                             item["advantage"] = 1.0
