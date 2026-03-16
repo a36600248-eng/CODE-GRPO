@@ -126,6 +126,46 @@ def _safe_preview(value: Any, max_chars: int = 200) -> str:
     return text
 
 
+def _compute_pair_separability(groups: list[list[Node]], eps: float = 1e-8) -> dict[str, float]:
+    """Pair separability diagnostics — 仅统计严格 size==2 的 sibling groups。
+    诊断 pair 内两条样本是否真正拉开差异，不是训练信号。"""
+    pairs = [g for g in groups if len(g) == 2]
+    if not pairs:
+        return {
+            "pair_same_pass_rate_rate": 0.0,
+            "pair_same_R_code_rate": 0.0,
+            "pair_soft_match_gap_mean": 0.0,
+            "pair_same_code_rate": 0.0,
+        }
+    same_pass = 0
+    same_rcode = 0
+    same_code = 0
+    soft_gaps: list[float] = []
+    for a, b in pairs:
+        # pass_rate 完全相同
+        if abs(a.pass_rate - b.pass_rate) < eps:
+            same_pass += 1
+        # R_code 在极小阈值内相同
+        if abs(a.R_code - b.R_code) < eps:
+            same_rcode += 1
+        # R_soft_match_raw 差的绝对值
+        soft_a = float(a.exec_summary.get("R_soft_match_raw", 0.0))
+        soft_b = float(b.exec_summary.get("R_soft_match_raw", 0.0))
+        soft_gaps.append(abs(soft_a - soft_b))
+        # 代码文本去首尾空白后完全相同
+        code_a = (a.code or "").strip()
+        code_b = (b.code or "").strip()
+        if code_a == code_b:
+            same_code += 1
+    n = len(pairs)
+    return {
+        "pair_same_pass_rate_rate": same_pass / n,
+        "pair_same_R_code_rate": same_rcode / n,
+        "pair_soft_match_gap_mean": _mean(soft_gaps),
+        "pair_same_code_rate": same_code / n,
+    }
+
+
 def _compute_advantage_diagnostics(nodes: list[Node], eps: float = 1e-12) -> dict[str, float]:
     code_nodes = [node for node in nodes if node.completion_text]
     sibling_groups: dict[str, list[Node]] = {}
@@ -175,6 +215,9 @@ def _compute_advantage_diagnostics(nodes: list[Node], eps: float = 1e-12) -> dic
         ),
         # [诊断面板] A_code 绝对值均值：反映梯度尺度
         "mean_abs_A_code": _mean([abs(float(node.A_code)) for node in code_nodes]) if code_nodes else 0.0,
+        # --- pair separability diagnostics (仅 size==2 的严格二元组) ---
+        # 诊断目的：确认同 prompt 下两个 sibling 是否真正拉开差异，不是新训练信号
+        **_compute_pair_separability(groups, eps),
     }
 
 

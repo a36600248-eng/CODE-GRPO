@@ -172,6 +172,11 @@ class CodeGRPOTrainer(GRPOTrainer):
             "sibling_group_zero_std_R_code_rate",
             "sibling_group_both_R_code_1_rate",
             "sibling_group_mean_pass_rate_gap",
+            # pair separability 诊断（仅 size==2 的 sibling group）
+            "pair_same_pass_rate_rate",
+            "pair_same_R_code_rate",
+            "pair_soft_match_gap_mean",
+            "pair_same_code_rate",
             # reward window 滑动均值
             "window/mean_R_code",
             "window/mean_R_reason",
