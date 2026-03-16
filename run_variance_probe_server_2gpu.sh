@@ -24,6 +24,13 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate codegrpo
 log "Activated conda env: codegrpo"
 
+log "Clearing stale vLLM / training processes before variance probe"
+pkill -f "trl.cli.main vllm-serve" || true
+pkill -f "VLLM::EngineCore" || true
+pkill -f "python -m trl.cli.main code_grpo" || true
+pkill -f "python -m trl.cli.main code_grpo_eval" || true
+sleep 3
+
 export OMP_NUM_THREADS=8
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export NCCL_SOCKET_IFNAME=lo
