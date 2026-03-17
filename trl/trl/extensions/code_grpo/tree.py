@@ -813,6 +813,8 @@ class CodeGRPOTreeRunner:
         node_serial = 0
         solved = False
         final_reason_node_count = 0
+        total_undiff_retry_triggered = 0
+        total_undiff_retry_succeeded = 0
 
         for round_idx in range(1, self.args.T_max + 1):
             if node_count >= self.args.N_max:
@@ -827,7 +829,7 @@ class CodeGRPOTreeRunner:
                 if parent.frozen_code and parent.frozen_reason:
                     continue
 
-                siblings, produced, resampled, node_serial = self._expand_parent(
+                siblings, produced, resampled, node_serial, undiff_triggered, undiff_succeeded = self._expand_parent(
                     question_id=question_id,
                     parent=parent,
                     prompt=prompt,
@@ -840,6 +842,8 @@ class CodeGRPOTreeRunner:
                 )
                 node_count += produced
                 resample_count += resampled
+                total_undiff_retry_triggered += undiff_triggered
+                total_undiff_retry_succeeded += undiff_succeeded
 
                 if not siblings:
                     continue
@@ -1091,6 +1095,12 @@ class CodeGRPOTreeRunner:
             )
 
         eval_metrics["final_reason_node_count"] = float(final_reason_node_count)
+        eval_metrics["undiff_retry_trigger_count"] = float(total_undiff_retry_triggered)
+        eval_metrics["undiff_retry_success_rate"] = (
+            float(total_undiff_retry_succeeded / total_undiff_retry_triggered)
+            if total_undiff_retry_triggered > 0
+            else 0.0
+        )
 
         return QuestionRollout(
             question_id=question_id,
@@ -1212,7 +1222,7 @@ class CodeGRPOTreeRunner:
         node_serial: int,
         budget: int,
         update_exec_baseline: bool,
-    ) -> tuple[list[Node], int, int, int]:
+    ) -> tuple[list[Node], int, int, int, int, int]:
         produced_total = 0
         resample_count = 0
         accepted: list[Node] = []
@@ -1281,10 +1291,59 @@ class CodeGRPOTreeRunner:
             accepted = siblings
             break
 
+        # --- undiff_unsolved retry: reduce unresolved-and-undifferentiated pair variance ---
+        # Separate from all-double-zero retry above. Triggers when:
+        #   1) group is strict size==2
+        #   2) not all-pass (i.e. at least one sibling didn't solve)
+        #   3) R_code identical within eps
+        #   4) pass_rate identical within eps
+        # Regenerates one sibling (the worse or arbitrary) up to undiff_retry_max times
+        # to break the reward tie and produce a nonzero A_code.
+        undiff_retry_triggered = 0
+        undiff_retry_succeeded = 0
+        undiff_retry_enabled = bool(getattr(self.args, "undiff_retry_enabled", False))
+        undiff_retry_max = int(getattr(self.args, "undiff_retry_max", 1))
+        if undiff_retry_enabled and len(accepted) == 2:
+            eps = 1e-8
+            for _undiff_attempt in range(undiff_retry_max):
+                a, b = accepted[0], accepted[1]
+                all_pass = (a.pass_rate == 1.0) and (b.pass_rate == 1.0)
+                r_code_same = abs(a.R_code - b.R_code) < eps
+                pass_rate_same = abs(a.pass_rate - b.pass_rate) < eps
+                if all_pass or not r_code_same or not pass_rate_same:
+                    break  # not undiff_unsolved, no retry needed
+                if produced_total >= budget:
+                    break  # respect per-question N_max cap
+                undiff_retry_triggered += 1
+                # Regenerate the second sibling
+                node_serial += 1
+                produced_total += 1
+                new_node = self._generate_node(
+                    question_id=question_id,
+                    node_id=f"n{node_serial}",
+                    parent=parent,
+                    prompt=prompt,
+                    test_cases=test_cases,
+                    audit_indices=audit_indices,
+                    round_idx=round_idx,
+                )
+                accepted[1] = new_node
+                # Check if the retry broke the tie
+                if abs(accepted[0].R_code - new_node.R_code) >= eps or abs(accepted[0].pass_rate - new_node.pass_rate) >= eps:
+                    undiff_retry_succeeded += 1
+                    break
+                if bool(getattr(self.args, "log_train_rollout_details", False)):
+                    self.logger.info(
+                        "[TREE] undiff_retry parent=%s round=%d attempt=%d still_tied",
+                        parent.node_id,
+                        round_idx,
+                        _undiff_attempt + 1,
+                    )
+
         if accepted:
             self._assign_group_advantages(accepted, update_exec_baseline=update_exec_baseline)
 
-        return accepted, produced_total, resample_count, node_serial
+        return accepted, produced_total, resample_count, node_serial, undiff_retry_triggered, undiff_retry_succeeded
 
     def _generate_node(
         self,

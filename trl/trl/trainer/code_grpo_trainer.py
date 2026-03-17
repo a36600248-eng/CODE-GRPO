@@ -227,6 +227,9 @@ class CodeGRPOTrainer(GRPOTrainer):
             "signal/undiff_unsolved_rate",
             "signal/easy_solved_rate",
             "signal/useful_signal_rate",
+            # undiff_unsolved retry 诊断
+            "undiff_retry_trigger_count",
+            "undiff_retry_success_rate",
             # reward window 滑动均值
             "window/mean_R_code",
             "window/mean_R_reason",

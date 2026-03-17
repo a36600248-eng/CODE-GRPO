@@ -29,6 +29,19 @@ class CodeGRPOConfig(GRPOConfig):
         default=1,
         metadata={"help": "Maximum retries (N) when a sibling group is all double-zero rewards."},
     )
+    undiff_retry_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable retry for undiff_unsolved sibling groups: strict size==2, not all-pass, "
+                "R_code identical, pass_rate identical. Regenerates one sibling to break the tie."
+            )
+        },
+    )
+    undiff_retry_max: int = field(
+        default=1,
+        metadata={"help": "Maximum retries for undiff_unsolved groups (only used when undiff_retry_enabled=True)."},
+    )
     context_round_window: int = field(default=2, metadata={"help": "Rounds of feedback to carry to next prompt."})
 
     lambda_soft: float = field(default=0.2, metadata={"help": "Soft reward coefficient for code reward."})
@@ -453,6 +466,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("review_bundle_trace_sample_size must be >= 0.")
         if self.M_audit < 0 or self.M_retry < 0:
             raise ValueError("M_audit and M_retry must be non-negative.")
+        if self.undiff_retry_max < 0:
+            raise ValueError("undiff_retry_max must be non-negative.")
         if not (0.0 <= self.lambda_soft <= 1.0):
             raise ValueError(f"lambda_soft must be in [0, 1], got: {self.lambda_soft}")
         if not (0.0 <= self.code_compile_reward_scale <= 1.0):
