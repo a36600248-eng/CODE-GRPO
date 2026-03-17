@@ -63,9 +63,9 @@ per_device_eval_batch_size: 1
 max_completion_length: 128
 max_completion_length_code: 128
 max_completion_length_audit: 96
-generation_temperature_code: 0.7
+generation_temperature_code: 0.85   # probe: raise temp to reduce pair reward ties
 eval_generation_temperature_code: 0.0
-generation_top_p_code: 0.95
+generation_top_p_code: 0.98          # probe: widen top-p to improve pair separability
 generation_min_new_tokens_code: 16
 generation_empty_retry_count: 1
 
