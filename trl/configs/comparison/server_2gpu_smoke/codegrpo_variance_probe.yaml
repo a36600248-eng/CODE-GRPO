@@ -113,6 +113,10 @@ eval_k_list: [1, 2]
 advantage_base: R_code
 advantage_mode: mean_only
 code_grpo_loss_type: token_mean
+# 信号加权采样暂不启用：当前实现仅在 dataloader 构建时计算权重，
+# 而训练起始时 signal states 为空，权重全为 1.0（等效均匀采样）。
+# 待实现 epoch 级 sampler 重建后再启用。
+signal_weighted_sampling: false
 
 # --- logging / trace ---
 # compact_logging 默认 true：控制台精简 8 指标，TensorBoard 全量 30+ 指标

@@ -256,6 +256,21 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    signal_weighted_sampling: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable signal-weighted sampling (dataloader-build-time snapshot). "
+                "Questions that historically produced useful gradient signal are sampled more often; "
+                "always-solved or long-term-undifferentiated questions are down-weighted. "
+                "NOTE: weights are computed once when the train dataloader is built, using the "
+                "signal states accumulated up to that point. They are NOT refreshed each epoch. "
+                "At training start the states are empty so all weights equal 1.0 (uniform). "
+                "This flag is a placeholder for future epoch-level refresh; "
+                "enable only after implementing a sampler rebuild hook."
+            )
+        },
+    )
 
     error_max_chars: int = field(default=800, metadata={"help": "Maximum error summary character length."})
     error_max_lines: int = field(default=20, metadata={"help": "Maximum error summary line count."})

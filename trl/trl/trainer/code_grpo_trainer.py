@@ -5,8 +5,8 @@ import os
 import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -25,7 +25,7 @@ from ..extras.profiling import profiling_context
 from ..models.utils import disable_gradient_checkpointing
 from .code_grpo_config import CodeGRPOConfig
 from .grpo_trainer import GRPOTrainer
-from .utils import get_config_model_id, pad, use_adapter
+from .utils import RepeatSampler, get_config_model_id, pad, use_adapter
 
 
 if torch.cuda.is_available():
@@ -74,6 +74,52 @@ class _CodeGRPORolloutResult:
     eval_metric_snapshot: dict[str, float]
     train_sample_count: int
     examples_count: int
+
+
+@dataclass
+class _QuestionSignalState:
+    """Per-question lightweight signal tracker for sampling priority.
+
+    Tracks recent rollout outcomes for future weighted sampling.
+    Currently used for diagnostic logging only — weighted sampling requires
+    a sampler rebuild hook to take effect (see _get_train_sampler docstring).
+
+    Outcomes:
+      - "easy_solved": all siblings passed (A_code=0 is expected, no need to learn)
+      - "useful_signal": at least one sibling had |A_code| > eps (gradient flows)
+      - "undiff_unsolved": not all-pass AND R_code identical AND pass_rate identical (no signal)
+    """
+    recent_outcomes: deque = field(default_factory=lambda: deque(maxlen=8))
+    total_samples: int = 0
+
+
+class _WeightedRepeatSampler(RepeatSampler):
+    """RepeatSampler with per-index weights for signal-weighted sampling.
+
+    Replaces uniform randperm with torch.multinomial weighted sampling.
+    All other RepeatSampler behavior (mini_repeat_count, batch_size, repeat_count) is preserved.
+
+    NOTE: Weights are set at construction time and not updated thereafter.
+    Currently this sampler is only effective if the dataloader is rebuilt
+    after signal states have been populated (not yet implemented).
+    """
+
+    def __init__(self, data_source, weights: list[float], **kwargs):
+        super().__init__(data_source=data_source, shuffle=True, **kwargs)
+        self._weights = torch.tensor(weights, dtype=torch.float64)
+
+    def __iter__(self):
+        # Weighted sampling without replacement (replaces torch.randperm)
+        indexes = torch.multinomial(
+            self._weights, self.num_samples, replacement=False, generator=self.generator
+        ).tolist()
+        indexes = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
+        indexes = [chunk for chunk in indexes if len(chunk) == self.batch_size]
+        for chunk in indexes:
+            for _ in range(self.repeat_count):
+                for index in chunk:
+                    for _ in range(self.mini_repeat_count):
+                        yield index
 
 
 class _CodeGRPOLookaheadLoader:
@@ -177,6 +223,10 @@ class CodeGRPOTrainer(GRPOTrainer):
             "pair_same_R_code_rate",
             "pair_soft_match_gap_mean",
             "pair_same_code_rate",
+            # per-question signal 诊断
+            "signal/undiff_unsolved_rate",
+            "signal/easy_solved_rate",
+            "signal/useful_signal_rate",
             # reward window 滑动均值
             "window/mean_R_code",
             "window/mean_R_reason",
@@ -297,6 +347,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._trace_dump_counter = 0
         self._train_trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
+        # --- per-question signal tracking (diagnostic + future weighted sampling) ---
+        self._question_signal_states: dict[str, _QuestionSignalState] = {}
+        self._signal_weight_enabled = bool(getattr(self.args, "signal_weighted_sampling", False))
         self._async_rollout_executor: ThreadPoolExecutor | None = None
         self._prefetched_rollout_future: Future | None = None
         self._prefetched_rollout_batch_id: int | None = None
@@ -433,6 +486,72 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
             self._signature_columns = ["question_id", "prompt", "test_cases"]
+
+    @staticmethod
+    def _compute_signal_weight(state: _QuestionSignalState | None) -> float:
+        """Compute sampling weight from per-question signal history.
+
+        Weight rule (两头低中间高):
+          - easy_solved rate > 0.75 → 0.3 (太容易，少学)
+          - useful_signal rate > 0.5 → 1.5 (能产出学习信号，多学)
+          - undiff_unsolved rate > 0.75 → 0.5 (太难且长期无区分，少学但不放弃)
+          - otherwise → 1.0
+
+        NOTE: Currently only called at dataloader build time, when states
+        are typically empty (returns 1.0). Effective use requires a sampler
+        rebuild hook after training accumulates signal history.
+        """
+        if state is None or state.total_samples == 0:
+            return 1.0
+        recent = list(state.recent_outcomes)
+        n = len(recent)
+        if n == 0:
+            return 1.0
+        solved_rate = recent.count("easy_solved") / n
+        signal_rate = recent.count("useful_signal") / n
+        undiff_rate = recent.count("undiff_unsolved") / n
+        if solved_rate > 0.75:
+            return 0.3
+        if signal_rate > 0.5:
+            return 1.5
+        if undiff_rate > 0.75:
+            return 0.5
+        return 1.0
+
+    def _get_train_sampler(self, dataset=None):
+        """Override to support signal-weighted sampling (dataloader-build-time snapshot).
+
+        When signal_weighted_sampling is enabled, uses a WeightedRepeatSampler
+        that replaces uniform shuffle with weighted sampling based on per-question
+        signal history. Otherwise falls back to the standard RepeatSampler.
+
+        IMPORTANT: This sampler is built once per get_train_dataloader() call.
+        HF Trainer does NOT rebuild the dataloader each epoch, so the weights
+        are frozen at build time. At training start, all signal states are empty
+        and weights default to 1.0 (uniform) — meaning this has no practical
+        effect until a sampler rebuild hook is implemented.
+        """
+        if not self._signal_weight_enabled:
+            return super()._get_train_sampler(dataset)
+
+        if dataset is None:
+            dataset = self.train_dataset
+
+        # Compute per-index weights from signal states
+        weights = []
+        for idx in range(len(dataset)):
+            qid = str(dataset[idx].get("question_id", f"q_{idx}"))
+            w = self._compute_signal_weight(self._question_signal_states.get(qid))
+            weights.append(w)
+
+        return _WeightedRepeatSampler(
+            data_source=dataset,
+            weights=weights,
+            mini_repeat_count=self.num_generations,
+            batch_size=self.args.generation_batch_size // self.num_generations,
+            repeat_count=self.num_iterations * self.args.steps_per_generation,
+            seed=self.args.seed,
+        )
 
     def get_train_dataloader(self):
         train_loader = super().get_train_dataloader()
@@ -920,6 +1039,82 @@ class CodeGRPOTrainer(GRPOTrainer):
         # [诊断面板] effective prompts per update
         metric_updates["effective_prompts_per_update"] = float(len(examples))
         metric_updates["effective_rollouts_per_update"] = float(len(train_samples))
+
+        # --- per-question signal tracking + undiff_unsolved diagnostics ---
+        # 信号分类必须按 sibling group（同 prompt_text 的主代码样本）逐组判定，
+        # 不能对整题所有 code samples 做 flat max/min 聚合。原因：多轮树搜索下
+        # 一个 QuestionRollout 包含多个 sibling group（每轮/每个 parent 一组），
+        # 不同 group 的绝对 R_code 可能不同（不同轮次难度不同），但每组内部
+        # 两个 sibling 的 R_code 可能完全相同（无信号）。Flat 聚合会把跨组的
+        # R_code 差异误判为 useful_signal，污染题目状态和采样权重。
+        if mode == "train":
+            eps = 1e-8
+            undiff_unsolved_count = 0
+            easy_solved_count = 0
+            useful_signal_count = 0
+            total_questions = 0
+            for rollout in rollouts:
+                qid = str(rollout.question_id)
+                samples = rollout.train_samples
+                # 只统计主代码样本（code_token_mask 含有 1）。
+                # 不能用 hasattr(A_code/R_code)：它们是 TrainSample 必填字段，
+                # logic/exec 审阅样本也有，但其 R_code/pass_rate 继承自父节点，
+                # 不代表 sibling 间的代码质量差异。
+                code_samples = [s for s in samples if any(m == 1 for m in s.code_token_mask)]
+                if len(code_samples) < 2:
+                    continue
+
+                # 按 prompt_text 分组 = 按 sibling group 分组
+                groups: dict[str, list] = {}
+                for s in code_samples:
+                    groups.setdefault(s.prompt_text, []).append(s)
+
+                # 逐 group 判定信号，汇总到 question level
+                any_group_has_signal = False
+                all_groups_all_pass = True
+                any_group_undiff_unsolved = False
+                for group in groups.values():
+                    if len(group) < 2:
+                        continue
+                    group_all_pass = all(s.pass_rate == 1.0 for s in group)
+                    group_has_signal = any(abs(s.A_code) > eps for s in group)
+                    r_codes = [s.R_code for s in group]
+                    pass_rates = [s.pass_rate for s in group]
+                    r_code_same = (max(r_codes) - min(r_codes)) < eps
+                    pass_rate_same = (max(pass_rates) - min(pass_rates)) < eps
+                    if not group_all_pass:
+                        all_groups_all_pass = False
+                    if group_has_signal:
+                        any_group_has_signal = True
+                    if (not group_all_pass) and r_code_same and pass_rate_same:
+                        any_group_undiff_unsolved = True
+
+                total_questions += 1
+                if all_groups_all_pass:
+                    outcome = "easy_solved"
+                    easy_solved_count += 1
+                elif any_group_has_signal:
+                    outcome = "useful_signal"
+                    useful_signal_count += 1
+                elif any_group_undiff_unsolved:
+                    outcome = "undiff_unsolved"
+                    undiff_unsolved_count += 1
+                else:
+                    # 所有 group 都无显著 A_code 但也不满足 undiff 条件（稀有边界）
+                    outcome = "useful_signal"
+                    useful_signal_count += 1
+
+                state = self._question_signal_states.get(qid)
+                if state is None:
+                    state = _QuestionSignalState()
+                    self._question_signal_states[qid] = state
+                state.recent_outcomes.append(outcome)
+                state.total_samples += 1
+
+            if total_questions > 0:
+                metric_updates["signal/undiff_unsolved_rate"] = undiff_unsolved_count / total_questions
+                metric_updates["signal/easy_solved_rate"] = easy_solved_count / total_questions
+                metric_updates["signal/useful_signal_rate"] = useful_signal_count / total_questions
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
