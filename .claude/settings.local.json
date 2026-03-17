@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile trl/trl/trainer/code_grpo_config.py)",
+      "Bash(python -m py_compile trl/trl/trainer/code_grpo_trainer.py)"
+    ]
+  }
+}

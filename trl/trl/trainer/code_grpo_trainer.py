@@ -94,32 +94,67 @@ class _QuestionSignalState:
 
 
 class _WeightedRepeatSampler(RepeatSampler):
-    """RepeatSampler with per-index weights for signal-weighted sampling.
+    """RepeatSampler with per-index weights for signal-weighted question sampling.
+
+    Question sampling weight: controls which questions are drawn for rollout.
+    Does NOT affect reward, advantage, or loss computation — only determines
+    which questions appear more often in subsequent training steps.
 
     Replaces uniform randperm with torch.multinomial weighted sampling.
     All other RepeatSampler behavior (mini_repeat_count, batch_size, repeat_count) is preserved.
 
-    NOTE: Weights are set at construction time and not updated thereafter.
-    Currently this sampler is only effective if the dataloader is rebuilt
-    after signal states have been populated (not yet implemented).
+    When refresh_steps > 0, weights are re-read from self._weights between
+    segments of training steps (pseudo-epoch refresh). The trainer updates
+    self._weights externally based on accumulated signal states.
     """
 
-    def __init__(self, data_source, weights: list[float], **kwargs):
+    def __init__(self, data_source, weights: list[float], refresh_steps: int = 0, **kwargs):
         super().__init__(data_source=data_source, shuffle=True, **kwargs)
         self._weights = torch.tensor(weights, dtype=torch.float64)
+        self._refresh_steps = refresh_steps  # 0 = no refresh, >0 = refresh every N steps
+        self.refresh_count = 0  # actual segment-boundary refresh count (for diagnostics)
 
-    def __iter__(self):
-        # Weighted sampling without replacement (replaces torch.randperm)
+    def _sample_one_pass(self):
+        """Sample all indices once using current weights, return list of chunks."""
         indexes = torch.multinomial(
             self._weights, self.num_samples, replacement=False, generator=self.generator
         ).tolist()
-        indexes = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
-        indexes = [chunk for chunk in indexes if len(chunk) == self.batch_size]
-        for chunk in indexes:
-            for _ in range(self.repeat_count):
-                for index in chunk:
-                    for _ in range(self.mini_repeat_count):
-                        yield index
+        chunks = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
+        return [c for c in chunks if len(c) == self.batch_size]
+
+    def __iter__(self):
+        if self._refresh_steps <= 0:
+            # No refresh: sample all indices once (original behavior)
+            for chunk in self._sample_one_pass():
+                for _ in range(self.repeat_count):
+                    for index in chunk:
+                        for _ in range(self.mini_repeat_count):
+                            yield index
+            return
+
+        # Pseudo-epoch refresh: yield chunks in segments, re-sample between segments.
+        # Each chunk produces (repeat_count * batch_size * mini_repeat_count) items.
+        # The DL consumes (per_device_train_batch_size * steps_per_generation) items per batch,
+        # but we approximate: each chunk ≈ repeat_count training steps consumed by the DL.
+        # So chunks_per_segment ≈ ceil(refresh_steps / repeat_count).
+        steps_per_chunk = max(self.repeat_count, 1)
+        chunks_per_segment = max(1, (self._refresh_steps + steps_per_chunk - 1) // steps_per_chunk)
+        total_yielded = 0
+        total_needed = len(self)  # __len__ from RepeatSampler
+        is_first_segment = True
+        while total_yielded < total_needed:
+            all_chunks = self._sample_one_pass()
+            if not is_first_segment:
+                self.refresh_count += 1  # only count actual re-reads, not the initial sample
+            is_first_segment = False
+            for chunk in all_chunks[:chunks_per_segment]:
+                for _ in range(self.repeat_count):
+                    for index in chunk:
+                        for _ in range(self.mini_repeat_count):
+                            yield index
+                            total_yielded += 1
+                            if total_yielded >= total_needed:
+                                return
 
 
 class _CodeGRPOLookaheadLoader:
@@ -230,6 +265,15 @@ class CodeGRPOTrainer(GRPOTrainer):
             # undiff_unsolved retry 诊断
             "undiff_retry_trigger_count",
             "undiff_retry_success_rate",
+            # question sampling weight 诊断
+            "sampling_weight/easy_solved_mean",
+            "sampling_weight/useful_signal_mean",
+            "sampling_weight/undiff_unsolved_mean",
+            "sampling_weight/updated_question_count",
+            "sampling_refresh/event_count",
+            # audit count 诊断
+            "audit_count/logic_per_main_sample",
+            "audit_count/exec_per_main_sample",
             # reward window 滑动均值
             "window/mean_R_code",
             "window/mean_R_reason",
@@ -522,17 +566,14 @@ class CodeGRPOTrainer(GRPOTrainer):
         return 1.0
 
     def _get_train_sampler(self, dataset=None):
-        """Override to support signal-weighted sampling (dataloader-build-time snapshot).
+        """Override to support signal-weighted question sampling.
 
-        When signal_weighted_sampling is enabled, uses a WeightedRepeatSampler
-        that replaces uniform shuffle with weighted sampling based on per-question
-        signal history. Otherwise falls back to the standard RepeatSampler.
+        Question sampling weight: controls which questions are drawn for rollout.
+        Does NOT affect reward, advantage, or loss computation.
 
-        IMPORTANT: This sampler is built once per get_train_dataloader() call.
-        HF Trainer does NOT rebuild the dataloader each epoch, so the weights
-        are frozen at build time. At training start, all signal states are empty
-        and weights default to 1.0 (uniform) — meaning this has no practical
-        effect until a sampler rebuild hook is implemented.
+        When signal_weighted_sampling is enabled and sampling_refresh_steps > 0,
+        the sampler re-reads weights between pseudo-epoch segments. The trainer
+        updates sampler._weights after each step's signal classification.
         """
         if not self._signal_weight_enabled:
             return super()._get_train_sampler(dataset)
@@ -547,14 +588,19 @@ class CodeGRPOTrainer(GRPOTrainer):
             w = self._compute_signal_weight(self._question_signal_states.get(qid))
             weights.append(w)
 
-        return _WeightedRepeatSampler(
+        refresh_steps = int(getattr(self.args, "sampling_refresh_steps", 0))
+        sampler = _WeightedRepeatSampler(
             data_source=dataset,
             weights=weights,
+            refresh_steps=refresh_steps,
             mini_repeat_count=self.num_generations,
             batch_size=self.args.generation_batch_size // self.num_generations,
             repeat_count=self.num_iterations * self.args.steps_per_generation,
             seed=self.args.seed,
         )
+        # Keep reference so we can update weights after signal classification
+        self._active_weighted_sampler = sampler
+        return sampler
 
     def get_train_dataloader(self):
         train_loader = super().get_train_dataloader()
@@ -1043,6 +1089,14 @@ class CodeGRPOTrainer(GRPOTrainer):
         metric_updates["effective_prompts_per_update"] = float(len(examples))
         metric_updates["effective_rollouts_per_update"] = float(len(train_samples))
 
+        # [诊断面板] audit count per main sample — from rollout eval_metrics
+        total_main = sum(r.eval_metrics.get("main_sample_count", 0.0) for r in rollouts)
+        total_logic = sum(r.eval_metrics.get("logic_sample_count", 0.0) for r in rollouts)
+        total_exec = sum(r.eval_metrics.get("exec_sample_count", 0.0) for r in rollouts)
+        if total_main > 0:
+            metric_updates["audit_count/logic_per_main_sample"] = total_logic / total_main
+            metric_updates["audit_count/exec_per_main_sample"] = total_exec / total_main
+
         # --- per-question signal tracking + undiff_unsolved diagnostics ---
         # 信号分类必须按 sibling group（同 prompt_text 的主代码样本）逐组判定，
         # 不能对整题所有 code samples 做 flat max/min 聚合。原因：多轮树搜索下
@@ -1118,6 +1172,53 @@ class CodeGRPOTrainer(GRPOTrainer):
                 metric_updates["signal/undiff_unsolved_rate"] = undiff_unsolved_count / total_questions
                 metric_updates["signal/easy_solved_rate"] = easy_solved_count / total_questions
                 metric_updates["signal/useful_signal_rate"] = useful_signal_count / total_questions
+
+            # --- Update sampler weights for pseudo-epoch refresh ---
+            # Only write weights when refresh is enabled (sampling_refresh_steps > 0).
+            # When refresh_steps=0, sampler._weights stays frozen at build time — truly static.
+            # Question sampling weight: only affects which questions are drawn for rollout.
+            # Does NOT change reward, advantage, or loss computation.
+            refresh_steps = int(getattr(self.args, "sampling_refresh_steps", 0))
+            sampler = getattr(self, "_active_weighted_sampler", None)
+            if refresh_steps > 0 and sampler is not None and hasattr(sampler, "_weights") and self.train_dataset is not None:
+                new_weights = []
+                weight_by_category = {"easy_solved": [], "useful_signal": [], "undiff_unsolved": [], "default": []}
+                updated_count = 0
+                for idx in range(len(self.train_dataset)):
+                    qid = str(self.train_dataset[idx].get("question_id", f"q_{idx}"))
+                    st = self._question_signal_states.get(qid)
+                    w = self._compute_signal_weight(st)
+                    new_weights.append(w)
+                    if st is not None and st.total_samples > 0:
+                        updated_count += 1
+                        recent = list(st.recent_outcomes)
+                        n = len(recent)
+                        if n > 0:
+                            sr = recent.count("easy_solved") / n
+                            ur = recent.count("undiff_unsolved") / n
+                            sgr = recent.count("useful_signal") / n
+                            if sr > 0.75:
+                                weight_by_category["easy_solved"].append(w)
+                            elif sgr > 0.5:
+                                weight_by_category["useful_signal"].append(w)
+                            elif ur > 0.75:
+                                weight_by_category["undiff_unsolved"].append(w)
+                            else:
+                                weight_by_category["default"].append(w)
+                        else:
+                            weight_by_category["default"].append(w)
+                    else:
+                        weight_by_category["default"].append(w)
+                sampler._weights = torch.tensor(new_weights, dtype=torch.float64)
+                # Sampling weight diagnostics (TB only)
+                metric_updates["sampling_weight/updated_question_count"] = float(updated_count)
+                for cat in ("easy_solved", "useful_signal", "undiff_unsolved"):
+                    vals = weight_by_category[cat]
+                    metric_updates[f"sampling_weight/{cat}_mean"] = (
+                        sum(vals) / len(vals) if vals else 0.0
+                    )
+                # Read actual refresh count from sampler (incremented at segment boundaries)
+                metric_updates["sampling_refresh/event_count"] = float(getattr(sampler, "refresh_count", 0))
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}

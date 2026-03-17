@@ -273,14 +273,22 @@ class CodeGRPOConfig(GRPOConfig):
         default=False,
         metadata={
             "help": (
-                "Enable signal-weighted sampling (dataloader-build-time snapshot). "
-                "Questions that historically produced useful gradient signal are sampled more often; "
-                "always-solved or long-term-undifferentiated questions are down-weighted. "
-                "NOTE: weights are computed once when the train dataloader is built, using the "
-                "signal states accumulated up to that point. They are NOT refreshed each epoch. "
-                "At training start the states are empty so all weights equal 1.0 (uniform). "
-                "This flag is a placeholder for future epoch-level refresh; "
-                "enable only after implementing a sampler rebuild hook."
+                "Enable signal-weighted question sampling. Questions that historically "
+                "produced useful gradient signal are sampled more often; always-solved or "
+                "long-term-undifferentiated questions are down-weighted. "
+                "Only affects which questions are drawn for rollout (dataset/sampler layer). "
+                "Does NOT change reward, advantage, or loss computation."
+            )
+        },
+    )
+    sampling_refresh_steps: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Pseudo-epoch refresh interval for question sampling weights. "
+                "0 = no refresh (weights frozen at dataloader build time). "
+                ">0 = re-read weights every N training steps worth of sampler output. "
+                "Only effective when signal_weighted_sampling=True."
             )
         },
     )
@@ -468,6 +476,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("M_audit and M_retry must be non-negative.")
         if self.undiff_retry_max < 0:
             raise ValueError("undiff_retry_max must be non-negative.")
+        if self.sampling_refresh_steps < 0:
+            raise ValueError("sampling_refresh_steps must be non-negative.")
         if not (0.0 <= self.lambda_soft <= 1.0):
             raise ValueError(f"lambda_soft must be in [0, 1], got: {self.lambda_soft}")
         if not (0.0 <= self.code_compile_reward_scale <= 1.0):
