@@ -104,6 +104,17 @@ choose_stage_port() {
   done
 }
 
+resolve_latest_train_out() {
+  local train_root="${1}"
+  local latest
+  latest=$(find "${train_root}/train" -mindepth 2 -maxdepth 2 -type d -name train_out | sort | tail -n 1)
+  if [ -z "${latest}" ]; then
+    log "Could not locate train_out under ${train_root}/train"
+    exit 1
+  fi
+  echo "${latest}"
+}
+
 start_server() {
   local port="$1"
   local server_log="/root/autodl-tmp/CODE-GRPO/trl/vllm_server_soft_grpo_${port}.log"
@@ -144,9 +155,11 @@ run_train() {
 run_eval() {
   local port="$1"
   local group_port="$((port + 40000))"
+  local trained_adapter_dir
+  trained_adapter_dir=$(resolve_latest_train_out "${TRAIN_OUTPUT_DIR}")
   log "Running soft-reward GRPO eval on trained adapter"
-  CUDA_VISIBLE_DEVICES=1 python -m trl.cli.main code_grpo_eval     --config "${EVAL_CONFIG}"     --seed "${SEED}"     --data_seed "${SEED}"     --output_dir "${EVAL_OUTPUT_DIR}"     --model_name_or_path "${TRAIN_OUTPUT_DIR}"     --use_peft true     --vllm_server_base_url "http://127.0.0.1:${port}"     --vllm_group_port "${group_port}"
-  log "Soft-reward GRPO eval finished. Train dir: ${TRAIN_OUTPUT_DIR} Eval dir: ${EVAL_OUTPUT_DIR}"
+  CUDA_VISIBLE_DEVICES=1 python -m trl.cli.main code_grpo_eval     --config "${EVAL_CONFIG}"     --seed "${SEED}"     --data_seed "${SEED}"     --output_dir "${EVAL_OUTPUT_DIR}"     --model_name_or_path "${trained_adapter_dir}"     --use_peft true     --vllm_server_base_url "http://127.0.0.1:${port}"     --vllm_group_port "${group_port}"
+  log "Soft-reward GRPO eval finished. Train adapter: ${trained_adapter_dir} Eval dir: ${EVAL_OUTPUT_DIR}"
 }
 
 STAGE_PORT=$(choose_stage_port "$PORT")
