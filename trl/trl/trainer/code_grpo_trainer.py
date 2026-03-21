@@ -697,21 +697,30 @@ class CodeGRPOTrainer(GRPOTrainer):
             self._signature_columns = ["question_id", "prompt", "test_cases"]
 
     def _get_train_sampler(self, dataset=None):
-        """Override to support question-prior weighted question sampling.
+        """CodeGRPO sampler: repeat each prompt only within the current rollout group.
 
-        Question sampling weight: controls which questions are drawn for rollout.
-        Does NOT affect reward, advantage, or loss computation.
+        Unlike base GRPO, CodeGRPO does not buffer one generated batch across
+        multiple optimizer steps. Each incoming batch is rolled out directly in
+        `_prepare_inputs`, so repeating the same prompt across
+        `num_iterations * steps_per_generation` would incorrectly cause the same
+        question to be re-rolled for many consecutive training steps.
 
-        When question_prior_enabled is active and
-        sampling_refresh_steps > 0, the sampler re-reads weights between
-        pseudo-epoch segments. The trainer updates sampler._weights after each
-        step's prior-state refresh.
+        Therefore the sampler only repeats each sampled prompt inside its local
+        sibling group (`mini_repeat_count=self.num_generations`) and uses
+        `repeat_count=1`.
         """
-        if not self._question_prior_enabled:
-            return super()._get_train_sampler(dataset)
-
         if dataset is None:
             dataset = self.train_dataset
+
+        if not self._question_prior_enabled:
+            return RepeatSampler(
+                data_source=dataset,
+                mini_repeat_count=self.num_generations,
+                batch_size=self.args.generation_batch_size // self.num_generations,
+                repeat_count=1,
+                shuffle=self.shuffle_dataset,
+                seed=self.args.seed,
+            )
 
         # Compute per-index weights from signal states
         weights = []
@@ -727,7 +736,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             refresh_steps=refresh_steps,
             mini_repeat_count=self.num_generations,
             batch_size=self.args.generation_batch_size // self.num_generations,
-            repeat_count=self.num_iterations * self.args.steps_per_generation,
+            repeat_count=1,
             seed=self.args.seed,
         )
         # Keep reference so we can update weights after signal classification

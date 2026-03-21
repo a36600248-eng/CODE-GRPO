@@ -111,3 +111,7 @@ The following are intentionally removed from the active path:
 - heavy tree-search multiround repair
 - legacy comparison configs for old methods
 
+### Deferred TODOs
+
+- Improve iterative-history compression for large `N`. The current summary keeps the latest failure in detail but compresses older rounds too aggressively (`status_counts`, one repeated failed input, compile-failure flag). Follow-up design should preserve more trial-and-error signal, especially multiple important failed cases, ineffective repair attempts, and coarse temporal progression across rounds, without blowing up prompt length.
+

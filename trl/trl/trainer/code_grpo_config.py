@@ -471,7 +471,21 @@ class CodeGRPOConfig(GRPOConfig):
     )
 
     def __post_init__(self):
-        super().__post_init__()
+        restore_num_generations = None
+        restore_num_generations_eval = None
+        if self.codegrpo_mode != "train" and self.num_generations is not None and self.num_generations < 2:
+            restore_num_generations = self.num_generations
+            self.num_generations = 2
+            if self.num_generations_eval is None:
+                restore_num_generations_eval = self.num_generations_eval
+                self.num_generations_eval = 2
+        try:
+            super().__post_init__()
+        finally:
+            if restore_num_generations is not None:
+                self.num_generations = restore_num_generations
+            if restore_num_generations_eval is not None:
+                self.num_generations_eval = restore_num_generations_eval
         if self.codegrpo_mode not in {"train", "test"}:
             raise ValueError(f"codegrpo_mode must be one of ['train', 'test'], got: {self.codegrpo_mode}")
         if self.backend not in {"hf", "vllm"}:
