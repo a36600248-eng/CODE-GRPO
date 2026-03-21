@@ -1,4 +1,4 @@
-import json
+﻿import json
 from collections import Counter
 from typing import Any
 
@@ -6,7 +6,7 @@ from typing import Any
 def serialize_value(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return repr(value)
 
 
@@ -15,28 +15,6 @@ GENERATION_FEWSHOT = """Format example (follow exactly this structure):
 def solve(x):
     return x * 2
 ```"""
-
-
-LOGIC_FEWSHOT = """Example:
-Code:
-def solve(x)
-    return x * 2
-Input:
-3
-Answer:
-<REASON>The intended logic is to multiply input by 2, ignoring syntax issues.</REASON>
-<LOGIC_PREDICTION>6</LOGIC_PREDICTION>"""
-
-
-EXEC_FEWSHOT = """Example:
-Code:
-def solve(x)
-    return x * 2
-Input:
-3
-Answer:
-<REASON>This code has a function-definition syntax problem, so execution raises an error.</REASON>
-<EXEC_PREDICTION>SyntaxError</EXEC_PREDICTION>"""
 
 
 def summarize_generation_history(history: list[dict[str, Any]]) -> dict[str, str]:
@@ -50,9 +28,6 @@ def summarize_generation_history(history: list[dict[str, Any]]) -> dict[str, str
     status = str(latest.get("status_code", "") or "").strip()
     if status:
         latest_lines.append(f"- latest_status={status}")
-    status_reason = str(latest.get("status_reason", "") or "").strip()
-    if status_reason:
-        latest_lines.append(f"- latest_reason_status={status_reason}")
     failed_input = latest.get("failed_input")
     if failed_input is not None:
         latest_lines.append(f"- failed_input={serialize_value(failed_input)}")
@@ -62,12 +37,6 @@ def summarize_generation_history(history: list[dict[str, Any]]) -> dict[str, str
     error_summary = str(latest.get("error_summary", "") or "").strip()
     if error_summary:
         latest_lines.append(f"- error_summary={error_summary}")
-    logic_mismatch_count = latest.get("logic_mismatch_count")
-    if logic_mismatch_count not in (None, ""):
-        latest_lines.append(f"- logic_mismatch_count={logic_mismatch_count}")
-    exec_mismatch_count = latest.get("exec_mismatch_count")
-    if exec_mismatch_count not in (None, ""):
-        latest_lines.append(f"- exec_mismatch_count={exec_mismatch_count}")
     latest_feedback = "\n".join(latest_lines)
 
     earlier = history[:-1]
@@ -88,10 +57,6 @@ def summarize_generation_history(history: list[dict[str, Any]]) -> dict[str, str
                 earlier_lines.append(f"- repeated_failure_input={top_input}")
         if any(float(item.get("compile_score", 0.0) or 0.0) <= 0.0 for item in earlier):
             earlier_lines.append("- some_earlier_attempts_failed_to_compile")
-        if any(int(item.get("logic_mismatch_count", 0) or 0) > 0 for item in earlier):
-            earlier_lines.append("- earlier_attempts_had_logic_mismatches")
-        if any(int(item.get("exec_mismatch_count", 0) or 0) > 0 for item in earlier):
-            earlier_lines.append("- earlier_attempts_had_execution_mismatches")
         earlier_summary = "\n".join(earlier_lines)
 
     return {"latest_feedback": latest_feedback, "earlier_summary": earlier_summary}
@@ -100,11 +65,8 @@ def summarize_generation_history(history: list[dict[str, Any]]) -> dict[str, str
 def build_generation_prompt(
     question_prompt: str,
     history: list[dict[str, Any]],
-    need_code: bool,
-    need_reason: bool,
     parent_code: str | None = None,
 ) -> str:
-    del need_reason
     history_summary = summarize_generation_history(history)
     parts = [
         "You solve one Python programming task.",
@@ -130,78 +92,42 @@ def build_generation_prompt(
         parts.extend(["Latest feedback:", history_summary["latest_feedback"]])
     if history_summary["earlier_summary"]:
         parts.extend(["Earlier history summary:", history_summary["earlier_summary"]])
-    if not need_code:
-        parts.append("Code is frozen; keep prior code behavior unchanged.")
     parts.append("Now answer with one fenced Python code block only.")
     return "\n".join(parts)
 
 
-def build_logic_prompt(code: str, case_input: Any, question_prompt: str = "") -> str:
+def build_zero_pass_problem_view_prompt(question_prompt: str, case_input: Any) -> str:
     return (
-        "You evaluate intended code logic; do not rewrite code.\n"
-        "Infer the intended output for this input.\n"
-        "Ignore implementation-level issues such as syntax/runtime errors.\n"
-        "Output exactly these tags, once, in this order:\n"
-        "<REASON>...</REASON>\n"
-        "<LOGIC_PREDICTION>...</LOGIC_PREDICTION>\n"
-        "No markdown, no extra text outside tags.\n"
-        "<REASON> must be one short sentence.\n"
-        "<LOGIC_PREDICTION> must be one-line final value only.\n"
-        f"{LOGIC_FEWSHOT}\n"
-        f"Question:\n{question_prompt.strip()}\n"
-        f"Code:\n{code}\n"
+        "You are given a Python programming task and one concrete input.\n"
+        "Predict the exact output for the input.\n"
+        "Output the final answer only.\n"
+        "No reasoning. No explanation. No markdown. No extra text.\n"
+        f"Problem:\n{question_prompt.strip()}\n"
         f"Input:\n{serialize_value(case_input)}\n"
-        "Now respond with tags only."
+        "Output:\n"
     )
 
 
-def build_exec_prompt(
-    code: str,
-    case_input: Any,
-) -> str:
+def build_zero_pass_code_view_prompt(code: str, case_input: Any) -> str:
     return (
-        "You simulate actual execution of the given code.\n"
-        "Predict actual result for the input (value or error type).\n"
-        "Output exactly these tags, once, in this order:\n"
-        "<REASON>...</REASON>\n"
-        "<EXEC_PREDICTION>...</EXEC_PREDICTION>\n"
-        "No markdown, no extra text outside tags.\n"
-        "<REASON> must be one short sentence.\n"
-        "<EXEC_PREDICTION> must be one-line final value or error type (e.g., SyntaxError).\n"
-        f"{EXEC_FEWSHOT}\n"
+        "You are given Python code and one concrete input.\n"
+        "Predict the exact output produced by the code for the input.\n"
+        "Output the final answer only.\n"
+        "No reasoning. No explanation. No markdown. No extra text.\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
-        "Now respond with tags only."
+        "Output:\n"
     )
 
 
-def build_frozen_reason_prompt(
-    code: str,
-    case_input: Any,
-) -> str:
+def build_code_io_training_prompt(code: str, case_input: Any) -> str:
     return (
-        "You are given a fixed Python function. Do not modify code.\n"
-        "Simulate execution for the input and output exactly these tags once:\n"
-        "<REASON>...</REASON>\n"
-        "<EXEC_PREDICTION>...</EXEC_PREDICTION>\n"
-        "No markdown, no extra text outside tags.\n"
-        "<REASON> must be one short sentence.\n"
-        "<EXEC_PREDICTION> must be one-line final value or error type.\n"
-        f"{EXEC_FEWSHOT}\n"
+        "You are given Python code and one concrete input.\n"
+        "Predict the exact program behavior for this input.\n"
+        "If execution returns a value, output that value only.\n"
+        "If execution fails, output the error type only (for example: SyntaxError, RuntimeError, Timeout).\n"
+        "Do not explain. Do not reason. Do not use markdown. Output one final answer only.\n"
         f"Code:\n{code}\n"
         f"Input:\n{serialize_value(case_input)}\n"
-        "Now respond with tags only."
-    )
-
-
-def build_soft_prompt(code: str, case_input: Any, question_prompt: str = "") -> str:
-    """Backward-compatible alias for logic prediction prompt."""
-    return build_logic_prompt(code=code, case_input=case_input, question_prompt=question_prompt)
-
-
-def build_reason_prompt(code: str, case_input: Any) -> str:
-    """Backward-compatible alias for execution prediction prompt."""
-    return build_exec_prompt(
-        code=code,
-        case_input=case_input,
+        "Output:\n"
     )

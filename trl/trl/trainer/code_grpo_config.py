@@ -18,13 +18,8 @@ class CodeGRPOConfig(GRPOConfig):
     backend: str = field(default="hf", metadata={"help": "Generation backend: hf or vllm."})
 
     K: int = field(default=2, metadata={"help": "Sibling group size per parent expansion."})
-    K_reason: int = field(
-        default=4,
-        metadata={"help": "Sibling size for reason-only rollout when code is frozen and reason is not frozen."},
-    )
     T_max: int = field(default=3, metadata={"help": "Maximum rounds per question."})
     N_max: int = field(default=16, metadata={"help": "Maximum generated nodes per question."})
-    M_audit: int = field(default=3, metadata={"help": "Fixed audit subset size per question."})
     M_retry: int = field(
         default=1,
         metadata={"help": "Maximum retries (N) when a sibling group is all double-zero rewards."},
@@ -62,69 +57,12 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
-    logic_format_reward_scale: float = field(
-        default=0.1,
-        metadata={"help": "Additive scale for logic-audit format signal in reason reward."},
-    )
-    logic_match_reward_scale: float = field(
-        default=1.0,
-        metadata={"help": "Reward scale for logic-audit answer match in reason reward."},
-    )
-    logic_confirmed_bonus: float = field(
-        default=0.25,
-        metadata={"help": "Extra bonus for logic-audit answer match when the child code already passes."},
-    )
-    exec_case_baseline_ema_alpha: float = field(
-        default=0.1,
-        metadata={"help": "EMA alpha for execution case baseline used in fallback case-level advantage."},
-    )
     soft_reward_ineligible_scale: float = field(
         default=0.3,
         metadata={
             "help": (
                 "Scale applied to soft reward when node is soft-reward-ineligible "
                 "(e.g., syntax error or missing top-level solve). 0 keeps hard gate."
-            )
-        },
-    )
-    format_penalty_logic: float = field(
-        default=0.3,
-        metadata={"help": "Penalty applied when logic response format is invalid."},
-    )
-    format_bonus_logic: float = field(
-        default=0.05,
-        metadata={"help": "Bonus added when logic response format is valid."},
-    )
-    format_penalty_exec: float = field(
-        default=0.3,
-        metadata={"help": "Penalty applied when execution response format is invalid."},
-    )
-    format_bonus_exec: float = field(
-        default=0.05,
-        metadata={"help": "Bonus added when execution response format is valid."},
-    )
-    require_reason_before_prediction: bool = field(
-        default=True,
-        metadata={"help": "Whether <REASON> must appear before prediction tags to count as format-valid."},
-    )
-    reasoning_max_chars: int = field(
-        default=400,
-        metadata={"help": "Max allowed characters in reasoning tags for logic/exec parsing."},
-    )
-    prediction_max_chars: int = field(
-        default=200,
-        metadata={"help": "Max allowed characters in prediction tags for logic/exec parsing."},
-    )
-    disallow_code_in_reasoning: bool = field(
-        default=True,
-        metadata={"help": "Mark format invalid when reasoning contains code-like content."},
-    )
-    format_outside_noise_chars: int = field(
-        default=80,
-        metadata={
-            "help": (
-                "Allowed non-whitespace chars outside required reasoning tags when parsing logic/exec responses. "
-                "Use 0 for fully strict parsing."
             )
         },
     )
@@ -142,14 +80,6 @@ class CodeGRPOConfig(GRPOConfig):
         metadata={
             "help": (
                 "Optional main-generation completion length override. Falls back to max_completion_length when unset."
-            )
-        },
-    )
-    max_completion_length_audit: int | None = field(
-        default=None,
-        metadata={
-            "help": (
-                "Optional audit/reason completion length override. Falls back to max_completion_length when unset."
             )
         },
     )
@@ -183,50 +113,170 @@ class CodeGRPOConfig(GRPOConfig):
         default=1,
         metadata={"help": "How many times to retry a main-generation sample when the decoded output is empty."},
     )
-    prefill_generation_code_tag: bool = field(
+    zero_pass_soft_reward_enabled: bool = field(
         default=True,
+        metadata={"help": "Compute soft reward only for zero-pass code candidates in baseline mode."},
+    )
+    zero_pass_soft_reward_diag_count: int = field(
+        default=4,
+        metadata={"help": "Maximum number of diagnostic IO cases used for zero-pass soft reward."},
+    )
+    zero_pass_soft_reward_clip_low: float = field(
+        default=-2.0,
+        metadata={"help": "Lower clip bound for raw zero-pass soft reward before mapping to [0,1]."},
+    )
+    zero_pass_soft_reward_clip_high: float = field(
+        default=2.0,
+        metadata={"help": "Upper clip bound for raw zero-pass soft reward before mapping to [0,1]."},
+    )
+    zero_pass_soft_reward_beta_scale: float = field(
+        default=0.5,
         metadata={
             "help": (
-                "Whether the main-generation prompt should prefill the opening <CODE> tag and expect the model "
-                "to continue with code body only."
+                "Soft reward scale numerator in baseline mode. Actual beta is min(beta_scale / k, (1-eps)/k), "
+                "so beta stays strictly below 1/k."
             )
+        },
+    )
+    code_io_aux_training_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable auxiliary training on code+input->output (or error type) pairs. "
+                "This uses a supervised loss on the auxiliary targets while code remains the main GRPO target."
+            )
+        },
+    )
+    code_io_aux_case_count: int = field(
+        default=2,
+        metadata={"help": "Maximum number of code-IO auxiliary training cases created per candidate code sample."},
+    )
+    code_io_aux_include_correct: bool = field(
+        default=True,
+        metadata={"help": "Whether to create code-IO auxiliary samples for candidates whose execution is correct."},
+    )
+    code_io_aux_include_incorrect: bool = field(
+        default=True,
+        metadata={"help": "Whether to create code-IO auxiliary samples for candidates whose execution is incorrect."},
+    )
+    code_io_aux_include_errors: bool = field(
+        default=True,
+        metadata={"help": "Whether runtime/compiler errors can be used as auxiliary targets via their error type."},
+    )
+    code_io_aux_sft_weight_correct: float = field(
+        default=1.0,
+        metadata={"help": "Supervised-loss weight assigned to correct code-IO auxiliary training samples."},
+    )
+    code_io_aux_sft_weight_incorrect: float = field(
+        default=1.0,
+        metadata={"help": "Supervised-loss weight assigned to incorrect code-IO auxiliary training samples."},
+    )
+    question_prior_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable question-level EMA prior. This keeps a per-question moving estimate of code success and "
+                "reason-signal strength, then uses the derived weight to modulate original-problem keep probability "
+                "and iterative-node priority."
+            )
+        },
+    )
+    question_prior_ema_momentum: float = field(
+        default=0.9,
+        metadata={"help": "EMA momentum for per-question code/reason prior statistics."},
+    )
+    question_prior_high_threshold: float = field(
+        default=0.7,
+        metadata={"help": "High threshold for question-level EMA code/reason signals."},
+    )
+    question_prior_low_threshold: float = field(
+        default=0.3,
+        metadata={"help": "Low threshold for question-level EMA code/reason signals."},
+    )
+    question_prior_gap_threshold: float = field(
+        default=0.2,
+        metadata={"help": "Gap threshold for distinguishing 'can reason but cannot code' and the reverse."},
+    )
+    question_prior_weight_high_value: float = field(
+        default=1.0,
+        metadata={"help": "Question prior weight for high-reason / low-code questions."},
+    )
+    question_prior_weight_mid_negative_gap: float = field(
+        default=0.7,
+        metadata={"help": "Question prior weight for low-reason / high-code questions."},
+    )
+    question_prior_weight_mastered: float = field(
+        default=0.4,
+        metadata={"help": "Question prior weight when both code and reason EMA are high."},
+    )
+    question_prior_weight_too_hard: float = field(
+        default=0.2,
+        metadata={"help": "Question prior weight when both code and reason EMA are low."},
+    )
+    question_prior_weight_default: float = field(
+        default=0.8,
+        metadata={"help": "Default question prior weight for intermediate cases."},
+    )
+    question_prior_keep_prob_floor: float = field(
+        default=0.05,
+        metadata={"help": "Minimum keep probability after applying question-prior downweighting."},
+    )
+    pseudo_multiround_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable pseudo-multiround training on top of the single-round zero-pass baseline: "
+                "alternate between original problems and an in-memory iterative-node pool."
+            )
+        },
+    )
+    pseudo_iterative_pool_capacity: int = field(
+        default=2048,
+        metadata={"help": "Maximum in-memory iterative-node records kept for pseudo-multiround training."},
+    )
+    pseudo_iterative_select_count: int = field(
+        default=3,
+        metadata={"help": "How many iterative candidates to keep when a rollout group has no passing sample."},
+    )
+    pseudo_original_downweight_after: int = field(
+        default=2,
+        metadata={"help": "Start downweighting original problems after this many consecutive no-pass attempts."},
+    )
+    pseudo_original_keep_prob_decay: float = field(
+        default=0.5,
+        metadata={"help": "Multiplicative keep-prob decay for original problems after the no-pass threshold."},
+    )
+    pseudo_original_keep_prob_floor: float = field(
+        default=0.1,
+        metadata={"help": "Minimum keep probability for original-problem sampling when downweighted."},
+    )
+    pseudo_original_age_bonus_per_step: float = field(
+        default=0.0,
+        metadata={"help": "Additive keep-prob bonus per step since this question was last rolled out as an original problem."},
+    )
+    pseudo_original_age_bonus_max: float = field(
+        default=0.0,
+        metadata={"help": "Maximum additive keep-prob bonus from original-problem age recovery."},
+    )
+    pseudo_original_cover_once_before_iterative: bool = field(
+        default=False,
+        metadata={"help": "Before pseudo-multiround mixing begins, force each original question to be rolled out once as an original problem."},
+    )
+    pseudo_forced_original_fraction: float = field(
+        default=0.0,
+        metadata={"help": "Fraction of rollout slots forced to use original problems instead of iterative nodes."},
+    )
+    pseudo_iterative_ttl_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Drop iterative nodes older than this many trainer steps. 0 disables TTL-based cleanup."
         },
     )
     use_chat_template_for_codegrpo: bool = field(
         default=True,
         metadata={"help": "Whether to render CodeGRPO prompts with tokenizer chat template before generation."},
     )
-    terminal_logic_backprop_bonus: float = field(
-        default=0.1,
-        metadata={
-            "help": (
-                "Base bonus scale for terminal logic backpropagation. "
-                "Applied to matched logic case-level rewards on ancestors when descendants solve the task."
-            )
-        },
-    )
-    terminal_logic_backprop_decay: float = field(
-        default=0.7,
-        metadata={"help": "Per-hop decay for terminal logic backprop bonus along ancestor chain."},
-    )
-    terminal_logic_backprop_max_depth: int = field(
-        default=6,
-        metadata={"help": "Maximum ancestor hops for terminal logic backprop bonus."},
-    )
-    terminal_backprop_code_similarity_threshold: float = field(
-        default=0.75,
-        metadata={"help": "Minimum parent-child code similarity to continue terminal bonus backpropagation."},
-    )
-    frozen_reason_one_shot: bool = field(
-        default=True,
-        metadata={"help": "Run a single reason-only round after code is frozen/passed, then stop tree growth."},
-    )
-    unify_reason_when_code_frozen: bool = field(
-        default=True,
-        metadata={"help": "When code is frozen and passed, use a unified reason/execution audit prompt."},
-    )
-    beta_reason: float = field(default=1.0, metadata={"help": "Reason loss coefficient."})
-    gamma_shrink: float = field(default=0.1, metadata={"help": "Advantage shrink factor for fully-correct nodes."})
+    beta_sft: float = field(default=1.0, metadata={"help": "Auxiliary SFT loss coefficient."})
 
     # --- Variance reduction options (K=2 specific) ---
     advantage_base: str = field(
@@ -269,18 +319,6 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
-    signal_weighted_sampling: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Enable signal-weighted question sampling. Questions that historically "
-                "produced useful gradient signal are sampled more often; always-solved or "
-                "long-term-undifferentiated questions are down-weighted. "
-                "Only affects which questions are drawn for rollout (dataset/sampler layer). "
-                "Does NOT change reward, advantage, or loss computation."
-            )
-        },
-    )
     sampling_refresh_steps: int = field(
         default=0,
         metadata={
@@ -288,7 +326,7 @@ class CodeGRPOConfig(GRPOConfig):
                 "Pseudo-epoch refresh interval for question sampling weights. "
                 "0 = no refresh (weights frozen at dataloader build time). "
                 ">0 = re-read weights every N training steps worth of sampler output. "
-                "Only effective when signal_weighted_sampling=True."
+                "Used by question-prior weighted sampling."
             )
         },
     )
@@ -419,7 +457,7 @@ class CodeGRPOConfig(GRPOConfig):
     )
     log_reward_losses: bool = field(
         default=False,
-        metadata={"help": "Whether to print per-step loss_code/loss_reason messages to the console."},
+        metadata={"help": "Whether to print per-step loss_code/loss_sft messages to the console."},
     )
     log_trace_dump_events: bool = field(
         default=False,
@@ -458,8 +496,6 @@ class CodeGRPOConfig(GRPOConfig):
             )
         if self.K < 2:
             raise ValueError("K must be >= 2 for sibling-group GRPO.")
-        if self.K_reason < 1:
-            raise ValueError("K_reason must be >= 1.")
         if self.K != self.num_generations:
             raise ValueError(
                 f"K ({self.K}) must equal num_generations ({self.num_generations}) to keep sibling grouping consistent."
@@ -472,8 +508,6 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("max_train_trace_files must be >= 0.")
         if self.review_bundle_trace_sample_size < 0:
             raise ValueError("review_bundle_trace_sample_size must be >= 0.")
-        if self.M_audit < 0 or self.M_retry < 0:
-            raise ValueError("M_audit and M_retry must be non-negative.")
         if self.undiff_retry_max < 0:
             raise ValueError("undiff_retry_max must be non-negative.")
         if self.sampling_refresh_steps < 0:
@@ -493,50 +527,14 @@ class CodeGRPOConfig(GRPOConfig):
                 "code_aux_reward_without_format_scale must be in [0, 1], "
                 f"got: {self.code_aux_reward_without_format_scale}"
             )
-        if not (0.0 <= self.logic_format_reward_scale <= 1.0):
-            raise ValueError(
-                f"logic_format_reward_scale must be in [0, 1], got: {self.logic_format_reward_scale}"
-            )
-        if not (0.0 <= self.logic_match_reward_scale <= 1.0):
-            raise ValueError(
-                f"logic_match_reward_scale must be in [0, 1], got: {self.logic_match_reward_scale}"
-            )
-        if not (0.0 <= self.logic_confirmed_bonus <= 1.0):
-            raise ValueError(f"logic_confirmed_bonus must be in [0, 1], got: {self.logic_confirmed_bonus}")
-        if not (0.0 <= self.exec_case_baseline_ema_alpha <= 1.0):
-            raise ValueError(
-                f"exec_case_baseline_ema_alpha must be in [0, 1], got: {self.exec_case_baseline_ema_alpha}"
-            )
         if not (0.0 <= self.soft_reward_ineligible_scale <= 1.0):
             raise ValueError(
                 f"soft_reward_ineligible_scale must be in [0, 1], got: {self.soft_reward_ineligible_scale}"
             )
-        if not (0.0 <= self.format_penalty_logic <= 1.0):
-            raise ValueError(f"format_penalty_logic must be in [0, 1], got: {self.format_penalty_logic}")
-        if not (0.0 <= self.format_bonus_logic <= 1.0):
-            raise ValueError(f"format_bonus_logic must be in [0, 1], got: {self.format_bonus_logic}")
-        if not (0.0 <= self.format_penalty_exec <= 1.0):
-            raise ValueError(f"format_penalty_exec must be in [0, 1], got: {self.format_penalty_exec}")
-        if not (0.0 <= self.format_bonus_exec <= 1.0):
-            raise ValueError(f"format_bonus_exec must be in [0, 1], got: {self.format_bonus_exec}")
-        if self.eval_round_n < 1:
-            raise ValueError("eval_round_n must be >= 1.")
-        if not self.eval_k_list:
-            raise ValueError("eval_k_list must contain at least one k value.")
-        if any(k < 1 for k in self.eval_k_list):
-            raise ValueError("All values in eval_k_list must be >= 1.")
-        if self.reasoning_max_chars <= 0:
-            raise ValueError("reasoning_max_chars must be > 0.")
-        if self.prediction_max_chars <= 0:
-            raise ValueError("prediction_max_chars must be > 0.")
-        if self.format_outside_noise_chars < 0:
-            raise ValueError("format_outside_noise_chars must be >= 0.")
         if self.generation_outside_noise_chars < 0:
             raise ValueError("generation_outside_noise_chars must be >= 0.")
         if self.max_completion_length_code is not None and self.max_completion_length_code <= 0:
             raise ValueError("max_completion_length_code must be > 0 when provided.")
-        if self.max_completion_length_audit is not None and self.max_completion_length_audit <= 0:
-            raise ValueError("max_completion_length_audit must be > 0 when provided.")
         if self.generation_temperature_code is not None and self.generation_temperature_code < 0.0:
             raise ValueError("generation_temperature_code must be >= 0 when provided.")
         if self.eval_generation_temperature_code is not None and self.eval_generation_temperature_code < 0.0:
@@ -547,16 +545,61 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("generation_min_new_tokens_code must be >= 0.")
         if self.generation_empty_retry_count < 0:
             raise ValueError("generation_empty_retry_count must be >= 0.")
+        if self.zero_pass_soft_reward_diag_count < 0:
+            raise ValueError("zero_pass_soft_reward_diag_count must be >= 0.")
+        if self.zero_pass_soft_reward_clip_low >= self.zero_pass_soft_reward_clip_high:
+            raise ValueError("zero_pass_soft_reward_clip_low must be < zero_pass_soft_reward_clip_high.")
+        if self.zero_pass_soft_reward_beta_scale < 0:
+            raise ValueError("zero_pass_soft_reward_beta_scale must be >= 0.")
+        if self.code_io_aux_case_count < 0:
+            raise ValueError("code_io_aux_case_count must be >= 0.")
+        if self.code_io_aux_sft_weight_correct < 0:
+            raise ValueError("code_io_aux_sft_weight_correct must be >= 0.")
+        if self.code_io_aux_sft_weight_incorrect < 0:
+            raise ValueError("code_io_aux_sft_weight_incorrect must be >= 0.")
+        if not (0.0 <= self.question_prior_ema_momentum < 1.0):
+            raise ValueError("question_prior_ema_momentum must be in [0, 1).")
+        if not (0.0 <= self.question_prior_low_threshold <= 1.0):
+            raise ValueError("question_prior_low_threshold must be in [0, 1].")
+        if not (0.0 <= self.question_prior_high_threshold <= 1.0):
+            raise ValueError("question_prior_high_threshold must be in [0, 1].")
+        if self.question_prior_low_threshold > self.question_prior_high_threshold:
+            raise ValueError("question_prior_low_threshold must be <= question_prior_high_threshold.")
+        if self.question_prior_gap_threshold < 0:
+            raise ValueError("question_prior_gap_threshold must be >= 0.")
+        if self.question_prior_weight_high_value < 0:
+            raise ValueError("question_prior_weight_high_value must be >= 0.")
+        if self.question_prior_weight_mid_negative_gap < 0:
+            raise ValueError("question_prior_weight_mid_negative_gap must be >= 0.")
+        if self.question_prior_weight_mastered < 0:
+            raise ValueError("question_prior_weight_mastered must be >= 0.")
+        if self.question_prior_weight_too_hard < 0:
+            raise ValueError("question_prior_weight_too_hard must be >= 0.")
+        if self.pseudo_original_age_bonus_per_step < 0:
+            raise ValueError("pseudo_original_age_bonus_per_step must be >= 0.")
+        if self.pseudo_original_age_bonus_max < 0:
+            raise ValueError("pseudo_original_age_bonus_max must be >= 0.")
+        if not (0.0 <= self.pseudo_forced_original_fraction <= 1.0):
+            raise ValueError("pseudo_forced_original_fraction must be in [0, 1].")
+        if self.question_prior_weight_default < 0:
+            raise ValueError("question_prior_weight_default must be >= 0.")
+        if not (0.0 <= self.question_prior_keep_prob_floor <= 1.0):
+            raise ValueError("question_prior_keep_prob_floor must be in [0, 1].")
+        if self.pseudo_iterative_pool_capacity < 0:
+            raise ValueError("pseudo_iterative_pool_capacity must be >= 0.")
+        if self.pseudo_iterative_select_count < 0:
+            raise ValueError("pseudo_iterative_select_count must be >= 0.")
+        if self.pseudo_original_downweight_after < 0:
+            raise ValueError("pseudo_original_downweight_after must be >= 0.")
+        if not (0.0 <= self.pseudo_original_keep_prob_decay <= 1.0):
+            raise ValueError("pseudo_original_keep_prob_decay must be in [0, 1].")
+        if not (0.0 <= self.pseudo_original_keep_prob_floor <= 1.0):
+            raise ValueError("pseudo_original_keep_prob_floor must be in [0, 1].")
+        if self.pseudo_iterative_ttl_steps < 0:
+            raise ValueError("pseudo_iterative_ttl_steps must be >= 0.")
         if self.max_completion_length_code is not None and self.max_completion_length_code > self.max_completion_length:
             raise ValueError(
                 "max_completion_length_code must be <= max_completion_length so shared generation backends remain valid."
-            )
-        if (
-            self.max_completion_length_audit is not None
-            and self.max_completion_length_audit > self.max_completion_length
-        ):
-            raise ValueError(
-                "max_completion_length_audit must be <= max_completion_length so shared generation backends remain valid."
             )
         if (
             self.max_completion_length_code is not None
@@ -565,20 +608,5 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("generation_min_new_tokens_code must be <= max_completion_length_code.")
         if self.generation_min_new_tokens_code > self.max_completion_length:
             raise ValueError("generation_min_new_tokens_code must be <= max_completion_length.")
-        if not (0.0 <= self.terminal_logic_backprop_bonus <= 1.0):
-            raise ValueError(
-                f"terminal_logic_backprop_bonus must be in [0, 1], got: {self.terminal_logic_backprop_bonus}"
-            )
-        if not (0.0 <= self.terminal_logic_backprop_decay <= 1.0):
-            raise ValueError(
-                f"terminal_logic_backprop_decay must be in [0, 1], got: {self.terminal_logic_backprop_decay}"
-            )
-        if self.terminal_logic_backprop_max_depth < 0:
-            raise ValueError("terminal_logic_backprop_max_depth must be >= 0.")
-        if not (0.0 <= self.terminal_backprop_code_similarity_threshold <= 1.0):
-            raise ValueError(
-                "terminal_backprop_code_similarity_threshold must be in [0, 1], "
-                f"got: {self.terminal_backprop_code_similarity_threshold}"
-            )
         if self.debug_trace_sample_size < 0:
             raise ValueError("debug_trace_sample_size must be >= 0.")

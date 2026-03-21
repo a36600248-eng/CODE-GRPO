@@ -1,12 +1,14 @@
 import copy
+import difflib
 import json
 import math
 import os
+from pathlib import Path
 import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import torch
@@ -32,6 +34,9 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
 
 logger = get_logger(__name__)
+
+
+_RUNTIME_STATE_FILE = "codegrpo_runtime_state.json"
 
 
 @dataclass
@@ -77,20 +82,34 @@ class _CodeGRPORolloutResult:
 
 
 @dataclass
-class _QuestionSignalState:
-    """Per-question lightweight signal tracker for sampling priority.
+class _PseudoQuestionState:
+    no_pass_streak: int = 0
+    total_original_attempts: int = 0
+    total_successes: int = 0
+    last_original_rollout_step: int = -1
 
-    Tracks recent rollout outcomes for future weighted sampling.
-    Currently used for diagnostic logging only — weighted sampling requires
-    a sampler rebuild hook to take effect (see _get_train_sampler docstring).
 
-    Outcomes:
-      - "easy_solved": all siblings passed (A_code=0 is expected, no need to learn)
-      - "useful_signal": at least one sibling had |A_code| > eps (gradient flows)
-      - "undiff_unsolved": not all-pass AND R_code identical AND pass_rate identical (no signal)
-    """
-    recent_outcomes: deque = field(default_factory=lambda: deque(maxlen=8))
-    total_samples: int = 0
+@dataclass
+class _QuestionPriorState:
+    ema_code_success: float = 0.0
+    ema_reason_signal: float = 0.0
+    ema_learning_value: float = 1.0
+    seen_count: int = 0
+
+
+@dataclass
+class _PseudoIterativeNode:
+    question_id: str
+    base_question_id: str
+    prompt: str
+    source_prompt: str
+    test_cases: list[dict[str, Any]]
+    selection_tag: str
+    priority: float
+    raw_soft_reward: float
+    final_reward: float
+    pass_rate: float
+    created_step: int
 
 
 class _WeightedRepeatSampler(RepeatSampler):
@@ -190,7 +209,7 @@ class _CodeGRPOLookaheadLoader:
 
 
 class CodeGRPOTrainer(GRPOTrainer):
-    """Tree-search-based code GRPO trainer with code/reason orthogonal updates."""
+    """Single-round code GRPO trainer with optional pseudo-multiround and auxiliary SFT."""
 
     _tag_names = ["trl", "code_grpo"]
     _name = "CodeGRPO"
@@ -199,12 +218,13 @@ class CodeGRPOTrainer(GRPOTrainer):
         {
             "loss",
             "loss_code",
-            "loss_reason",
+            "loss_sft",
             "learning_rate",
             "grad_norm",
             "mean_R_code",
             "mean_pass_rate",
             "advantage/code_zero_rate",
+            "pseudo/original_coverage_remaining",
         }
     )
     # --- TensorBoard 写入全量诊断指标 ---
@@ -213,12 +233,11 @@ class CodeGRPOTrainer(GRPOTrainer):
             # 核心进度
             "loss",
             "loss_code",
-            "loss_reason",
+            "loss_sft",
             "learning_rate",
             "grad_norm",
             "kl",
             "mean_R_code",
-            "mean_R_reason",
             "mean_pass_rate",
             "rollout_time_s",
             # reward 诊断
@@ -228,13 +247,10 @@ class CodeGRPOTrainer(GRPOTrainer):
             "reward/pass_rate_min",
             "reward/pass_rate_max",
             "std_R_code",
-            "std_R_reason",
             # advantage 诊断
             "advantage/code_nonzero_rate",
             "advantage/code_std",
             "advantage/code_mean",
-            "advantage/reason_mean",
-            "advantage/reason_std",
             "nonzero_A_code_rate",
             "mean_abs_A_code",
             # ratio 诊断
@@ -245,7 +261,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "clip_high_rate",
             # batch/length 诊断
             "completion_len/code_mean",
-            "completion_len/reason_mean",
+            "completion_len/sft_mean",
             "tokens_per_update",
             "effective_prompts_per_update",
             "effective_rollouts_per_update",
@@ -258,25 +274,37 @@ class CodeGRPOTrainer(GRPOTrainer):
             "pair_same_R_code_rate",
             "pair_soft_match_gap_mean",
             "pair_same_code_rate",
-            # per-question signal 诊断
-            "signal/undiff_unsolved_rate",
-            "signal/easy_solved_rate",
-            "signal/useful_signal_rate",
             # undiff_unsolved retry 诊断
             "undiff_retry_trigger_count",
             "undiff_retry_success_rate",
-            # question sampling weight 诊断
-            "sampling_weight/easy_solved_mean",
-            "sampling_weight/useful_signal_mean",
-            "sampling_weight/undiff_unsolved_mean",
-            "sampling_weight/updated_question_count",
             "sampling_refresh/event_count",
             # audit count 诊断
-            "audit_count/logic_per_main_sample",
-            "audit_count/exec_per_main_sample",
+            "audit_count/code_io_aux_per_main_sample",
+            "pseudo/source_original_count",
+            "pseudo/source_iterative_count",
+            "pseudo/iterative_pool_size",
+            "pseudo/iterative_nodes_added",
+            "pseudo/iterative_nodes_pruned",
+            "pseudo/original_no_pass_questions",
+            "pseudo/max_original_no_pass_streak",
+            "pseudo/source_forced_original_count",
+            "pseudo/source_warmstart_original_count",
+            "pseudo/original_coverage_remaining",
+            "pseudo/original_coverage_completed",
+            "question_prior/ema_code_success_mean",
+            "question_prior/ema_reason_signal_mean",
+            "question_prior/weight_mean",
+            "question_prior/high_value_question_count",
+            "question_prior/low_value_question_count",
+            "question_prior/updated_question_count",
+            # baseline zero-pass soft reward diagnostics
+            "zero_pass_soft_trigger_rate",
+            "mean_hard_reward",
+            "mean_raw_soft_reward",
+            "mean_normalized_soft_reward",
+            "mean_soft_reward_beta",
             # reward window 滑动均值
             "window/mean_R_code",
-            "window/mean_R_reason",
             "window/mean_R_soft_effective",
             "window/steps",
             "window/end_step",
@@ -300,13 +328,17 @@ class CodeGRPOTrainer(GRPOTrainer):
             "eval_pass_at_1",
             "eval_best_pass_rate_overall",
             "eval_mean_R_code",
-            "eval_mean_R_reason",
             "eval_mean_pass_rate",
             "eval_std_R_code",
             "eval_generation_format_ok_rate",
             "eval_compile_ok_rate",
             "eval_syntax_error_rate",
             "eval_timeout_rate",
+            "eval_zero_pass_soft_trigger_rate",
+            "eval_mean_hard_reward",
+            "eval_mean_raw_soft_reward",
+            "eval_mean_normalized_soft_reward",
+            "eval_mean_soft_reward_beta",
         }
     )
     _EVAL_LOG_PREFIXES = ("eval_pass_at_1_round_", "eval_best_pass_rate_round_")
@@ -358,10 +390,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         self.code_max_completion_length = int(
             getattr(self.args, "max_completion_length_code", None) or self.max_completion_length
         )
-        self.audit_max_completion_length = int(
-            getattr(self.args, "max_completion_length_audit", None) or self.max_completion_length
-        )
-
         generation_defaults = {
             "max_new_tokens": self.code_max_completion_length,
             "do_sample": True,
@@ -394,16 +422,108 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._trace_dump_counter = 0
         self._train_trace_dump_counter = 0
         self._last_eval_metrics: dict[str, float] = {}
-        # --- per-question signal tracking (diagnostic + future weighted sampling) ---
-        self._question_signal_states: dict[str, _QuestionSignalState] = {}
-        self._signal_weight_enabled = bool(getattr(self.args, "signal_weighted_sampling", False))
+        self._pseudo_multiround_enabled = bool(getattr(self.args, "pseudo_multiround_enabled", False))
+        self._pseudo_question_states: dict[str, _PseudoQuestionState] = {}
+        self._pseudo_original_cover_once_enabled = bool(
+            self._pseudo_multiround_enabled and getattr(self.args, "pseudo_original_cover_once_before_iterative", False)
+        )
+        self._pseudo_original_pending_qids: deque[str] = deque()
+        self._pseudo_original_example_by_qid: dict[str, dict[str, Any]] = {}
+        self._question_prior_enabled = bool(getattr(self.args, "question_prior_enabled", False))
+        self._question_prior_states: dict[str, _QuestionPriorState] = {}
+        if (
+            self._question_prior_enabled
+            and not self._pseudo_multiround_enabled
+            and int(getattr(self.args, "sampling_refresh_steps", 0) or 0) <= 0
+        ):
+            logger.warning(
+                "question_prior_enabled is set, but pseudo_multiround_enabled is false and "
+                "sampling_refresh_steps <= 0. Question prior stats will be tracked, but they will not "
+                "meaningfully affect future sampling."
+            )
+        self._pseudo_iterative_pool: list[_PseudoIterativeNode] = []
+        self._pseudo_node_serial = 0
         self._async_rollout_executor: ThreadPoolExecutor | None = None
         self._prefetched_rollout_future: Future | None = None
         self._prefetched_rollout_batch_id: int | None = None
         self._async_rollout_prefetch_enabled = self._resolve_async_rollout_prefetch_enabled()
+        if self._pseudo_multiround_enabled and self._async_rollout_prefetch_enabled:
+            logger.warning("Disabling async_rollout_prefetch because pseudo_multiround_enabled mutates in-memory pools.")
+            self._async_rollout_prefetch_enabled = False
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
+        self._initialize_original_coverage_state()
+        self._runtime_state_loaded = False
+
+    @staticmethod
+    def _resolve_resume_checkpoint_path(output_dir: str, resume_from_checkpoint) -> str | None:
+        if not resume_from_checkpoint:
+            return None
+        if isinstance(resume_from_checkpoint, str):
+            return resume_from_checkpoint
+        if resume_from_checkpoint is True:
+            base = Path(output_dir)
+            candidates = [p for p in base.glob("checkpoint-*") if p.is_dir()]
+            if not candidates:
+                return None
+            def _step(path: Path) -> int:
+                try:
+                    return int(path.name.split("-")[-1])
+                except Exception:
+                    return -1
+            candidates.sort(key=_step)
+            return str(candidates[-1])
+        return None
+
+    def _runtime_state_payload(self) -> dict[str, Any]:
+        return {
+            "pseudo_node_serial": int(self._pseudo_node_serial),
+            "pseudo_original_pending_qids": list(self._pseudo_original_pending_qids),
+            "pseudo_iterative_pool": [asdict(record) for record in self._pseudo_iterative_pool],
+            "pseudo_question_states": {qid: asdict(state) for qid, state in self._pseudo_question_states.items()},
+            "question_prior_states": {qid: asdict(state) for qid, state in self._question_prior_states.items()},
+        }
+
+    def _save_runtime_state(self, checkpoint_dir: str) -> None:
+        if not checkpoint_dir:
+            return
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        payload = self._runtime_state_payload()
+        path = os.path.join(checkpoint_dir, _RUNTIME_STATE_FILE)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _load_runtime_state(self, checkpoint_dir: str) -> None:
+        if not checkpoint_dir:
+            return
+        path = os.path.join(checkpoint_dir, _RUNTIME_STATE_FILE)
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        self._pseudo_node_serial = int(payload.get("pseudo_node_serial", 0) or 0)
+        pending = list(payload.get("pseudo_original_pending_qids", []) or [])
+        if self._pseudo_original_cover_once_enabled:
+            self._pseudo_original_pending_qids = deque(
+                [qid for qid in pending if qid in self._pseudo_original_example_by_qid]
+            )
+        else:
+            self._pseudo_original_pending_qids = deque()
+
+        self._pseudo_iterative_pool = [
+            _PseudoIterativeNode(**item) for item in list(payload.get("pseudo_iterative_pool", []) or [])
+        ]
+        self._pseudo_question_states = {
+            str(qid): _PseudoQuestionState(**state)
+            for qid, state in dict(payload.get("pseudo_question_states", {}) or {}).items()
+        }
+        self._question_prior_states = {
+            str(qid): _QuestionPriorState(**state)
+            for qid, state in dict(payload.get("question_prior_states", {}) or {}).items()
+        }
+        self._runtime_state_loaded = True
 
     def _resolve_reward_window_interval_steps(self) -> int:
         bins = int(getattr(self.args, "reward_window_bins", 0) or 0)
@@ -414,6 +534,68 @@ class CodeGRPOTrainer(GRPOTrainer):
         if isinstance(eval_steps, int) and eval_steps > 0:
             return eval_steps
         return 0
+
+    def _initialize_original_coverage_state(self) -> None:
+        if not self._pseudo_original_cover_once_enabled:
+            return
+        dataset = self.train_dataset
+        if dataset is None:
+            self._pseudo_original_cover_once_enabled = False
+            return
+        try:
+            dataset_len = len(dataset)
+        except Exception:
+            logger.warning("Disabling pseudo_original_cover_once_before_iterative because the training dataset is not indexable.")
+            self._pseudo_original_cover_once_enabled = False
+            return
+        for idx in range(dataset_len):
+            example = dataset[idx]
+            qid = str(example.get("question_id", f"q_{idx}"))
+            if qid in self._pseudo_original_example_by_qid:
+                continue
+            copied = copy.deepcopy(dict(example))
+            copied.setdefault("base_question_id", qid)
+            copied["source_kind"] = "original_problem"
+            self._pseudo_original_example_by_qid[qid] = copied
+            self._pseudo_original_pending_qids.append(qid)
+
+    def _prepare_original_coverage_examples(
+        self,
+        fallback_examples: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, float]] | None:
+        if not self._pseudo_original_cover_once_enabled:
+            return None
+        if not self._pseudo_original_pending_qids:
+            return None
+
+        prepared: list[dict[str, Any]] = []
+        needed = len(fallback_examples)
+        while needed > 0 and self._pseudo_original_pending_qids:
+            qid = self._pseudo_original_pending_qids.popleft()
+            example = copy.deepcopy(self._pseudo_original_example_by_qid[qid])
+            example["source_kind"] = "original_problem"
+            example.setdefault("base_question_id", qid)
+            prepared.append(example)
+            needed -= 1
+
+        if needed > 0:
+            for example in fallback_examples[:needed]:
+                copied = copy.deepcopy(example)
+                copied["source_kind"] = "original_problem"
+                copied.setdefault("base_question_id", self._base_question_id(example))
+                prepared.append(copied)
+
+        remaining = len(self._pseudo_original_pending_qids)
+        metrics = {
+            "pseudo/source_original_count": float(len(prepared)),
+            "pseudo/source_iterative_count": 0.0,
+            "pseudo/source_forced_original_count": 0.0,
+            "pseudo/source_warmstart_original_count": float(len(prepared)),
+            "pseudo/original_coverage_remaining": float(remaining),
+            "pseudo/original_coverage_completed": 1.0 if remaining == 0 else 0.0,
+            "pseudo/iterative_nodes_pruned": 0.0,
+        }
+        return prepared, metrics
 
     def _resolve_async_rollout_prefetch_enabled(self) -> bool:
         enabled = bool(getattr(self.args, "async_rollout_prefetch", False))
@@ -506,7 +688,6 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         tracked = {
             "mean_R_code": "window/mean_R_code",
-            "mean_R_reason": "window/mean_R_reason",
             "mean_R_soft_effective": "window/mean_R_soft_effective",
         }
         for source_key in tracked:
@@ -534,48 +715,18 @@ class CodeGRPOTrainer(GRPOTrainer):
         if self._signature_columns is None:
             self._signature_columns = ["question_id", "prompt", "test_cases"]
 
-    @staticmethod
-    def _compute_signal_weight(state: _QuestionSignalState | None) -> float:
-        """Compute sampling weight from per-question signal history.
-
-        Weight rule (两头低中间高):
-          - easy_solved rate > 0.75 → 0.3 (太容易，少学)
-          - useful_signal rate > 0.5 → 1.5 (能产出学习信号，多学)
-          - undiff_unsolved rate > 0.75 → 0.5 (太难且长期无区分，少学但不放弃)
-          - otherwise → 1.0
-
-        NOTE: Currently only called at dataloader build time, when states
-        are typically empty (returns 1.0). Effective use requires a sampler
-        rebuild hook after training accumulates signal history.
-        """
-        if state is None or state.total_samples == 0:
-            return 1.0
-        recent = list(state.recent_outcomes)
-        n = len(recent)
-        if n == 0:
-            return 1.0
-        solved_rate = recent.count("easy_solved") / n
-        signal_rate = recent.count("useful_signal") / n
-        undiff_rate = recent.count("undiff_unsolved") / n
-        if solved_rate > 0.75:
-            return 0.3
-        if signal_rate > 0.5:
-            return 1.5
-        if undiff_rate > 0.75:
-            return 0.5
-        return 1.0
-
     def _get_train_sampler(self, dataset=None):
-        """Override to support signal-weighted question sampling.
+        """Override to support question-prior weighted question sampling.
 
         Question sampling weight: controls which questions are drawn for rollout.
         Does NOT affect reward, advantage, or loss computation.
 
-        When signal_weighted_sampling is enabled and sampling_refresh_steps > 0,
-        the sampler re-reads weights between pseudo-epoch segments. The trainer
-        updates sampler._weights after each step's signal classification.
+        When question_prior_enabled is active and
+        sampling_refresh_steps > 0, the sampler re-reads weights between
+        pseudo-epoch segments. The trainer updates sampler._weights after each
+        step's prior-state refresh.
         """
-        if not self._signal_weight_enabled:
+        if not self._question_prior_enabled:
             return super()._get_train_sampler(dataset)
 
         if dataset is None:
@@ -585,7 +736,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         weights = []
         for idx in range(len(dataset)):
             qid = str(dataset[idx].get("question_id", f"q_{idx}"))
-            w = self._compute_signal_weight(self._question_signal_states.get(qid))
+            w = self._get_question_prior_weight(qid)
             weights.append(w)
 
         refresh_steps = int(getattr(self.args, "sampling_refresh_steps", 0))
@@ -609,10 +760,24 @@ class CodeGRPOTrainer(GRPOTrainer):
         return _CodeGRPOLookaheadLoader(train_loader)
 
     def train(self, *args, **kwargs):
+        resume_from_checkpoint = kwargs.get("resume_from_checkpoint")
+        if resume_from_checkpoint is None and args:
+            resume_from_checkpoint = args[0]
+        checkpoint_dir = self._resolve_resume_checkpoint_path(self.args.output_dir, resume_from_checkpoint)
+        if checkpoint_dir and not self._runtime_state_loaded:
+            self._load_runtime_state(checkpoint_dir)
         try:
             return super().train(*args, **kwargs)
         finally:
             self._shutdown_async_rollout_prefetch(wait=False)
+
+    def _save_checkpoint(self, model, trial):
+        super()._save_checkpoint(model, trial)
+        checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-{self.state.global_step}")
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            self._save_runtime_state(checkpoint_dir)
+        self.accelerator.wait_for_everyone()
 
     @staticmethod
     def _mean(values: list[float]) -> float:
@@ -633,6 +798,481 @@ class CodeGRPOTrainer(GRPOTrainer):
                 deduped[key] = example
         return list(deduped.values())
 
+    @staticmethod
+    def _base_question_id(example: dict[str, Any]) -> str:
+        return str(example.get("base_question_id") or example.get("question_id", "unknown"))
+
+    @staticmethod
+    def _code_novelty_scores(nodes: list[dict[str, Any]]) -> list[float]:
+        codes = [str(node.get("code_text", "") or "") for node in nodes]
+        if len(codes) <= 1:
+            return [1.0 for _ in codes]
+        scores: list[float] = []
+        for idx, code in enumerate(codes):
+            similarities: list[float] = []
+            for other_idx, other_code in enumerate(codes):
+                if idx == other_idx:
+                    continue
+                similarities.append(difflib.SequenceMatcher(None, code, other_code).ratio())
+            novelty = 1.0 - (sum(similarities) / len(similarities) if similarities else 0.0)
+            scores.append(float(novelty))
+        return scores
+
+    def _make_iterative_prompt(self, source_example: dict[str, Any], node_payload: dict[str, Any], selection_tag: str) -> str:
+        base_prompt = str(source_example.get("source_prompt") or source_example.get("prompt", "")).strip()
+        code_text = str(node_payload.get("code_text", "") or "").strip()
+        pass_cnt = int(node_payload.get("pass_cnt", 0) or 0)
+        test_count = int(node_payload.get("test_count", 0) or 0)
+        hard_reward = float(node_payload.get("hard_reward", 0.0) or 0.0)
+        raw_soft_reward = float(node_payload.get("raw_soft_reward", 0.0) or 0.0)
+        normalized_soft_reward = float(node_payload.get("normalized_soft_reward", 0.0) or 0.0)
+        final_reward = float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0)
+        error_summary = str(node_payload.get("error_summary", "") or "").strip()
+        history = list(node_payload.get("history", []) or [])
+        latest = history[-1] if history else {}
+        failed_input = latest.get("failed_input")
+        failed_actual = latest.get("failed_actual")
+        selection_reason = {
+            "best_pass": "This candidate was closest to solving the task in the previous rollout.",
+            "best_soft": "This candidate most increased confidence in the correct answers under the soft evaluator.",
+            "novel": "This candidate was the most novel among the zero-pass samples and is kept for exploration.",
+        }.get(selection_tag, "This candidate was selected for iterative refinement.")
+
+        lines = [
+            "You are revising a previous Python solution attempt.",
+            "Return exactly one fenced Python code block.",
+            "Do not output reasoning or explanations.",
+            "Original problem:",
+            base_prompt,
+            "Previous candidate code:",
+            code_text,
+            "Previous rollout summary:",
+            f"- selection_tag={selection_tag}",
+            f"- selection_reason={selection_reason}",
+            f"- pass_cnt={pass_cnt}/{test_count}",
+            f"- hard_reward={hard_reward:.6f}",
+            f"- raw_soft_reward={raw_soft_reward:.6f}",
+            f"- normalized_soft_reward={normalized_soft_reward:.6f}",
+            f"- final_reward={final_reward:.6f}",
+        ]
+        if error_summary:
+            lines.append(f"- error_summary={error_summary}")
+        if failed_input is not None:
+            lines.append(f"- failed_input={failed_input!r}")
+        if failed_actual is not None:
+            lines.append(f"- failed_actual_or_error={failed_actual!r}")
+        lines.extend(
+            [
+                "Task:",
+                "Revise the previous code using the summary above. Keep the same solve(x) interface.",
+                "Answer with one fenced Python code block only.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _cleanup_iterative_pool(self, solved_base_qids: set[str] | None = None) -> int:
+        if not self._pseudo_multiround_enabled or not self._pseudo_iterative_pool:
+            return 0
+
+        ttl_steps = int(getattr(self.args, "pseudo_iterative_ttl_steps", 0) or 0)
+        current_step = int(self.state.global_step)
+        solved_base_qids = solved_base_qids or set()
+        kept: list[_PseudoIterativeNode] = []
+        removed = 0
+        for record in self._pseudo_iterative_pool:
+            too_old = bool(ttl_steps > 0 and (current_step - int(record.created_step)) >= ttl_steps)
+            solved_prune = bool(record.base_question_id in solved_base_qids)
+            if too_old or solved_prune:
+                removed += 1
+                continue
+            kept.append(record)
+        self._pseudo_iterative_pool = kept
+        return removed
+
+    def _append_iterative_nodes_from_rollout(self, rollout, source_example: dict[str, Any]) -> int:
+        if not self._pseudo_multiround_enabled:
+            return 0
+        rounds = list(getattr(rollout, "rounds", []) or [])
+        if not rounds:
+            return 0
+        search_round = next((item for item in rounds if str(item.get("stage", "search")) == "search"), None)
+        if search_round is None:
+            return 0
+        nodes = [node for node in list(search_round.get("nodes", []) or []) if bool(node.get("main_sample_active", False))]
+        if not nodes:
+            return 0
+        if any(float(node.get("pass_rate", 0.0) or 0.0) >= 1.0 for node in nodes):
+            return 0
+
+        select_count = max(0, int(getattr(self.args, "pseudo_iterative_select_count", 3) or 0))
+        if select_count == 0:
+            return 0
+
+        novelty_scores = self._code_novelty_scores(nodes)
+        for node, novelty in zip(nodes, novelty_scores, strict=True):
+            node["_novelty_score"] = novelty
+
+        ranked_pass = sorted(
+            range(len(nodes)),
+            key=lambda i: (
+                float(nodes[i].get("pass_rate", 0.0) or 0.0),
+                float(nodes[i].get("final_reward", nodes[i].get("R_code", 0.0)) or 0.0),
+            ),
+            reverse=True,
+        )
+        ranked_soft = sorted(
+            range(len(nodes)),
+            key=lambda i: (
+                float(nodes[i].get("raw_soft_reward", 0.0) or 0.0),
+                float(nodes[i].get("normalized_soft_reward", 0.0) or 0.0),
+                float(nodes[i].get("final_reward", nodes[i].get("R_code", 0.0)) or 0.0),
+            ),
+            reverse=True,
+        )
+        ranked_novel = sorted(
+            range(len(nodes)),
+            key=lambda i: (
+                float(nodes[i].get("_novelty_score", 0.0) or 0.0),
+                float(nodes[i].get("raw_soft_reward", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
+
+        picks: list[tuple[int, str]] = []
+        used: set[int] = set()
+        for ranked, tag in ((ranked_pass, "best_pass"), (ranked_soft, "best_soft"), (ranked_novel, "novel")):
+            for idx in ranked:
+                if idx in used:
+                    continue
+                picks.append((idx, tag))
+                used.add(idx)
+                break
+        if len(picks) < select_count:
+            ranked_remaining = sorted(
+                range(len(nodes)),
+                key=lambda i: float(nodes[i].get("final_reward", nodes[i].get("R_code", 0.0)) or 0.0),
+                reverse=True,
+            )
+            for idx in ranked_remaining:
+                if idx in used:
+                    continue
+                picks.append((idx, "fallback"))
+                used.add(idx)
+                if len(picks) >= select_count:
+                    break
+
+        added = 0
+        base_qid = self._base_question_id(source_example)
+        question_prior_weight = self._get_question_prior_weight(base_qid)
+        capacity = max(0, int(getattr(self.args, "pseudo_iterative_pool_capacity", 0) or 0))
+        for idx, tag in picks[:select_count]:
+            node_payload = nodes[idx]
+            self._pseudo_node_serial += 1
+            iterative_qid = f"{base_qid}__iter_{self._pseudo_node_serial}"
+            prompt = self._make_iterative_prompt(source_example, node_payload, tag)
+            base_priority = max(
+                1e-6,
+                float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0)
+                + max(0.0, float(node_payload.get("raw_soft_reward", 0.0) or 0.0)),
+            )
+            record = _PseudoIterativeNode(
+                question_id=iterative_qid,
+                base_question_id=base_qid,
+                prompt=prompt,
+                source_prompt=str(source_example.get("source_prompt") or source_example.get("prompt", "")),
+                test_cases=copy.deepcopy(list(source_example.get("test_cases", []) or [])),
+                selection_tag=tag,
+                priority=max(1e-6, base_priority * question_prior_weight),
+                raw_soft_reward=float(node_payload.get("raw_soft_reward", 0.0) or 0.0),
+                final_reward=float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0),
+                pass_rate=float(node_payload.get("pass_rate", 0.0) or 0.0),
+                created_step=int(self.state.global_step),
+            )
+            self._pseudo_iterative_pool.append(record)
+            added += 1
+
+        if capacity > 0 and len(self._pseudo_iterative_pool) > capacity:
+            self._pseudo_iterative_pool = self._pseudo_iterative_pool[-capacity:]
+        return added
+
+    def _sample_iterative_examples(self, count: int, rng: random.Random) -> list[dict[str, Any]]:
+        if count <= 0 or not self._pseudo_iterative_pool:
+            return []
+        available = list(self._pseudo_iterative_pool)
+        weights = [max(1e-6, record.priority) for record in available]
+        chosen: list[dict[str, Any]] = []
+        local_count = min(count, len(available))
+        for _ in range(local_count):
+            total = sum(weights)
+            threshold = rng.random() * total
+            acc = 0.0
+            pick_idx = 0
+            for idx, weight in enumerate(weights):
+                acc += weight
+                if acc >= threshold:
+                    pick_idx = idx
+                    break
+            record = available.pop(pick_idx)
+            weights.pop(pick_idx)
+            chosen.append(
+                {
+                    "question_id": record.question_id,
+                    "base_question_id": record.base_question_id,
+                    "prompt": record.prompt,
+                    "source_prompt": record.source_prompt,
+                    "test_cases": copy.deepcopy(record.test_cases),
+                    "source_kind": "iterative_node",
+                    "source_selection_tag": record.selection_tag,
+                }
+            )
+        return chosen
+
+    def _original_keep_probability(self, base_question_id: str) -> float:
+        prior_weight = self._get_question_prior_weight(base_question_id)
+        state = self._pseudo_question_states.get(base_question_id)
+        age_bonus_per_step = float(getattr(self.args, "pseudo_original_age_bonus_per_step", 0.0) or 0.0)
+        age_bonus_max = float(getattr(self.args, "pseudo_original_age_bonus_max", 0.0) or 0.0)
+        age_bonus = 0.0
+        if state is not None and state.last_original_rollout_step >= 0 and age_bonus_per_step > 0.0:
+            age_steps = max(0, int(self.state.global_step) - int(state.last_original_rollout_step))
+            age_bonus = min(age_bonus_max, age_steps * age_bonus_per_step)
+        if state is None:
+            return max(
+                float(getattr(self.args, "question_prior_keep_prob_floor", 0.05)),
+                min(1.0, prior_weight + age_bonus),
+            )
+        threshold = int(getattr(self.args, "pseudo_original_downweight_after", 2) or 0)
+        if state.no_pass_streak <= threshold:
+            return max(
+                float(getattr(self.args, "question_prior_keep_prob_floor", 0.05)),
+                min(1.0, prior_weight + age_bonus),
+            )
+        decay_steps = state.no_pass_streak - threshold
+        decay = float(getattr(self.args, "pseudo_original_keep_prob_decay", 0.5))
+        floor = max(
+            float(getattr(self.args, "pseudo_original_keep_prob_floor", 0.1)),
+            float(getattr(self.args, "question_prior_keep_prob_floor", 0.05)),
+        )
+        return max(floor, min(1.0, (decay**decay_steps) * prior_weight + age_bonus))
+
+    def _get_question_prior_state(self, base_question_id: str) -> _QuestionPriorState:
+        state = self._question_prior_states.get(base_question_id)
+        if state is None:
+            state = _QuestionPriorState()
+            self._question_prior_states[base_question_id] = state
+        return state
+
+    def _update_question_prior_state(self, base_question_id: str, rollout) -> _QuestionPriorState:
+        state = self._get_question_prior_state(base_question_id)
+        rollout_samples = list(getattr(rollout, "train_samples", []) or [])
+        solved = bool(float(getattr(rollout, "mean_pass_rate", 0.0) or 0.0) >= 1.0)
+        if not solved:
+            solved = bool(any(float(getattr(sample, "pass_rate", 0.0) or 0.0) >= 1.0 for sample in rollout_samples))
+        code_signal = 1.0 if solved else 0.0
+        zero_pass_trigger_rate = float(getattr(rollout, "eval_metrics", {}).get("zero_pass_soft_trigger_rate", 0.0) or 0.0)
+        mean_hard_reward = float(getattr(rollout, "eval_metrics", {}).get("mean_hard_reward", 0.0) or 0.0)
+        mean_normalized_soft_reward = float(
+            getattr(rollout, "eval_metrics", {}).get("mean_normalized_soft_reward", 0.0) or 0.0
+        )
+        if zero_pass_trigger_rate > 0.0:
+            reason_signal = mean_normalized_soft_reward
+        else:
+            reason_signal = mean_hard_reward
+        reason_signal = max(0.0, min(1.0, float(reason_signal)))
+
+        if state.seen_count == 0:
+            state.ema_code_success = code_signal
+            state.ema_reason_signal = reason_signal
+        else:
+            momentum = float(getattr(self.args, "question_prior_ema_momentum", 0.9))
+            state.ema_code_success = momentum * state.ema_code_success + (1.0 - momentum) * code_signal
+            state.ema_reason_signal = momentum * state.ema_reason_signal + (1.0 - momentum) * reason_signal
+        state.seen_count += 1
+        state.ema_learning_value = self._compute_question_prior_weight_from_state(state)
+        return state
+
+    def _compute_question_prior_weight_from_state(self, state: _QuestionPriorState) -> float:
+        if not self._question_prior_enabled:
+            return 1.0
+        code_value = float(state.ema_code_success)
+        reason_value = float(state.ema_reason_signal)
+        high = float(getattr(self.args, "question_prior_high_threshold", 0.7))
+        low = float(getattr(self.args, "question_prior_low_threshold", 0.3))
+        gap = float(getattr(self.args, "question_prior_gap_threshold", 0.2))
+        if code_value >= high and reason_value >= high:
+            return float(getattr(self.args, "question_prior_weight_mastered", 0.4))
+        if code_value <= low and reason_value <= low:
+            return float(getattr(self.args, "question_prior_weight_too_hard", 0.2))
+        if (reason_value - code_value) >= gap:
+            return float(getattr(self.args, "question_prior_weight_high_value", 1.0))
+        if (code_value - reason_value) >= gap:
+            return float(getattr(self.args, "question_prior_weight_mid_negative_gap", 0.7))
+        return float(getattr(self.args, "question_prior_weight_default", 0.8))
+
+    def _get_question_prior_weight(self, base_question_id: str) -> float:
+        if not self._question_prior_enabled:
+            return 1.0
+        state = self._question_prior_states.get(base_question_id)
+        if state is None or int(state.seen_count) <= 0:
+            return 1.0
+        return max(0.0, float(state.ema_learning_value))
+
+    def _question_prior_metrics(self) -> dict[str, float]:
+        if not self._question_prior_enabled or not self._question_prior_states:
+            return {}
+        states = [state for state in self._question_prior_states.values() if int(state.seen_count) > 0]
+        if not states:
+            return {}
+        weights = [float(state.ema_learning_value) for state in states]
+        code_means = [float(state.ema_code_success) for state in states]
+        reason_means = [float(state.ema_reason_signal) for state in states]
+        high = float(getattr(self.args, "question_prior_high_threshold", 0.7))
+        low = float(getattr(self.args, "question_prior_low_threshold", 0.3))
+        return {
+            "question_prior/ema_code_success_mean": sum(code_means) / len(code_means),
+            "question_prior/ema_reason_signal_mean": sum(reason_means) / len(reason_means),
+            "question_prior/weight_mean": sum(weights) / len(weights),
+            "question_prior/high_value_question_count": float(
+                sum(
+                    1
+                    for state in states
+                    if state.ema_reason_signal >= high and state.ema_code_success <= low
+                )
+            ),
+            "question_prior/low_value_question_count": float(
+                sum(
+                    1
+                    for state in states
+                    if state.ema_reason_signal <= low and state.ema_code_success <= low
+                )
+            ),
+            "question_prior/updated_question_count": float(len(states)),
+        }
+
+    def _prepare_examples_for_rollout(
+        self,
+        examples: list[dict[str, Any]],
+        mode: str,
+        rng: random.Random,
+    ) -> tuple[list[dict[str, Any]], dict[str, float]]:
+        if mode != "train" or not self._pseudo_multiround_enabled:
+            return examples, {}
+
+        coverage_payload = self._prepare_original_coverage_examples(examples)
+        if coverage_payload is not None:
+            return coverage_payload
+
+        pruned = self._cleanup_iterative_pool()
+
+        if not self._pseudo_iterative_pool:
+            return examples, {
+                "pseudo/source_original_count": float(len(examples)),
+                "pseudo/source_iterative_count": 0.0,
+                "pseudo/source_forced_original_count": 0.0,
+                "pseudo/source_warmstart_original_count": 0.0,
+                "pseudo/original_coverage_remaining": float(len(self._pseudo_original_pending_qids)),
+                "pseudo/original_coverage_completed": 1.0 if not self._pseudo_original_pending_qids else 0.0,
+                "pseudo/iterative_nodes_pruned": float(pruned),
+            }
+
+        prepared: list[dict[str, Any]] = []
+        original_count = 0
+        iterative_count = 0
+        forced_original_count = 0
+        for slot_idx, example in enumerate(examples):
+            force_original = False
+            forced_original_fraction = float(getattr(self.args, "pseudo_forced_original_fraction", 0.0) or 0.0)
+            if forced_original_fraction > 0.0 and rng.random() < forced_original_fraction:
+                force_original = True
+            prefer_iterative = ((self.state.global_step + slot_idx) % 2) == 1
+            selected: dict[str, Any] | None = None
+            if prefer_iterative and not force_original:
+                sampled = self._sample_iterative_examples(1, rng)
+                if sampled:
+                    selected = sampled[0]
+            if selected is None and not force_original:
+                base_qid = self._base_question_id(example)
+                keep_prob = self._original_keep_probability(base_qid)
+                if keep_prob < 1.0 and rng.random() > keep_prob:
+                    sampled = self._sample_iterative_examples(1, rng)
+                    if sampled:
+                        selected = sampled[0]
+            if selected is None:
+                selected = copy.deepcopy(example)
+                selected["source_kind"] = "original_problem"
+                selected.setdefault("base_question_id", self._base_question_id(example))
+                original_count += 1
+                if force_original:
+                    forced_original_count += 1
+            else:
+                iterative_count += 1
+            prepared.append(selected)
+
+        metrics = {
+            "pseudo/source_original_count": float(original_count),
+            "pseudo/source_iterative_count": float(iterative_count),
+            "pseudo/source_forced_original_count": float(forced_original_count),
+            "pseudo/source_warmstart_original_count": 0.0,
+            "pseudo/original_coverage_remaining": float(len(self._pseudo_original_pending_qids)),
+            "pseudo/original_coverage_completed": 1.0 if not self._pseudo_original_pending_qids else 0.0,
+            "pseudo/iterative_pool_size": float(len(self._pseudo_iterative_pool)),
+            "pseudo/iterative_nodes_pruned": float(pruned),
+        }
+        return prepared, metrics
+
+    def _update_pseudo_multiround_state(self, examples: list[dict[str, Any]], rollouts: list[Any]) -> dict[str, float]:
+        if not self._pseudo_multiround_enabled:
+            return self._question_prior_metrics()
+
+        added_nodes = 0
+        solved_base_qids: set[str] = set()
+        # Train mode currently guarantees one rollout per prepared example.
+        # If train-time repeated eval-style rollouts are introduced later, this zip(strict=True)
+        # must be revisited together with pseudo-state updates.
+        for example, rollout in zip(examples, rollouts, strict=True):
+            base_qid = self._base_question_id(example)
+            source_kind = str(example.get("source_kind", "original_problem"))
+            round_nodes = list(getattr(rollout, "train_samples", []) or [])
+            succeeded = bool(float(getattr(rollout, "mean_pass_rate", 0.0) or 0.0) >= 1.0)
+            if not succeeded:
+                succeeded = bool(any(float(getattr(sample, "pass_rate", 0.0) or 0.0) >= 1.0 for sample in round_nodes))
+
+            state = self._pseudo_question_states.get(base_qid)
+            if state is None:
+                state = _PseudoQuestionState()
+                self._pseudo_question_states[base_qid] = state
+
+            if source_kind == "original_problem":
+                state.total_original_attempts += 1
+                state.last_original_rollout_step = int(self.state.global_step)
+                if succeeded:
+                    state.no_pass_streak = 0
+                    state.total_successes += 1
+                    solved_base_qids.add(base_qid)
+                else:
+                    state.no_pass_streak += 1
+            elif succeeded:
+                # A successful iterative refinement clears original no-pass pressure.
+                state.no_pass_streak = 0
+                state.total_successes += 1
+                solved_base_qids.add(base_qid)
+
+            added_nodes += self._append_iterative_nodes_from_rollout(rollout, example)
+
+        pruned = self._cleanup_iterative_pool(solved_base_qids=solved_base_qids)
+        max_streak = max((state.no_pass_streak for state in self._pseudo_question_states.values()), default=0)
+        original_no_pass_questions = sum(
+            1 for state in self._pseudo_question_states.values() if int(state.no_pass_streak) > 0
+        )
+        return {
+            "pseudo/iterative_nodes_added": float(added_nodes),
+            "pseudo/iterative_nodes_pruned": float(pruned),
+            "pseudo/iterative_pool_size": float(len(self._pseudo_iterative_pool)),
+            "pseudo/original_no_pass_questions": float(original_no_pass_questions),
+            "pseudo/max_original_no_pass_streak": float(max_streak),
+            **self._question_prior_metrics(),
+        }
+
     def _dump_rollout_traces(self, rollouts):
         trace_root = str(self.args.debug_trace_dir)
         trace_dir = trace_root if os.path.isabs(trace_root) else os.path.join(self.args.output_dir, trace_root)
@@ -646,7 +1286,6 @@ class CodeGRPOTrainer(GRPOTrainer):
             payload = {
                 "global_step": int(self.state.global_step),
                 "question_id": rollout.question_id,
-                "audit_indices": rollout.audit_indices,
                 "rounds": rollout.rounds,
             }
             with open(trace_path, "w", encoding="utf-8") as handle:
@@ -735,7 +1374,6 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "node_count": rollout.node_count,
                 "resample_count": rollout.resample_count,
                 "mean_R_code": rollout.mean_R_code,
-                "mean_R_reason": rollout.mean_R_reason,
                 "mean_pass_rate": rollout.mean_pass_rate,
                 **rollout.eval_metrics,
             }
@@ -853,10 +1491,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         completion_ids_tensors = []
         completion_masks = []
         code_masks = []
-        reason_masks = []
+        sft_masks = []
         old_logprobs = []
         advantages_code = []
-        advantages_reason = []
+        sft_weights = []
         r_code = []
         pass_rates = []
         has_old_logprobs = True
@@ -868,13 +1506,13 @@ class CodeGRPOTrainer(GRPOTrainer):
                 completion_ids = [self.eos_token_id]
 
             code_mask = list(sample.code_token_mask)
-            reason_mask = list(sample.reason_token_mask)
+            sft_mask = list(sample.sft_token_mask)
             if len(code_mask) < len(completion_ids):
                 code_mask.extend([0] * (len(completion_ids) - len(code_mask)))
-            if len(reason_mask) < len(completion_ids):
-                reason_mask.extend([0] * (len(completion_ids) - len(reason_mask)))
+            if len(sft_mask) < len(completion_ids):
+                sft_mask.extend([0] * (len(completion_ids) - len(sft_mask)))
             code_mask = code_mask[: len(completion_ids)]
-            reason_mask = reason_mask[: len(completion_ids)]
+            sft_mask = sft_mask[: len(completion_ids)]
 
             prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long)
             completion_tensor = torch.tensor(completion_ids, dtype=torch.long)
@@ -883,7 +1521,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             completion_ids_tensors.append(completion_tensor)
             completion_masks.append(torch.ones_like(completion_tensor, dtype=torch.long))
             code_masks.append(torch.tensor(code_mask, dtype=torch.float32))
-            reason_masks.append(torch.tensor(reason_mask, dtype=torch.float32))
+            sft_masks.append(torch.tensor(sft_mask, dtype=torch.float32))
             sample_old_logprobs = getattr(sample, "old_per_token_logps", None)
             if sample_old_logprobs is None:
                 has_old_logprobs = False
@@ -893,7 +1531,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                     values.extend([0.0] * (len(completion_ids) - len(values)))
                 old_logprobs.append(torch.tensor(values, dtype=torch.float32))
             advantages_code.append(sample.A_code)
-            advantages_reason.append(sample.A_reason)
+            sft_weights.append(sample.sft_weight)
             r_code.append(sample.R_code)
             pass_rates.append(sample.pass_rate)
 
@@ -922,8 +1560,8 @@ class CodeGRPOTrainer(GRPOTrainer):
             pad_to_multiple_of=self.pad_to_multiple_of,
         )
         code_token_mask = pad(code_masks, padding_value=0.0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of)
-        reason_token_mask = pad(
-            reason_masks, padding_value=0.0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of
+        sft_token_mask = pad(
+            sft_masks, padding_value=0.0, padding_side="right", pad_to_multiple_of=self.pad_to_multiple_of
         )
 
         batch = {
@@ -932,9 +1570,9 @@ class CodeGRPOTrainer(GRPOTrainer):
             "completion_ids": completion_ids,
             "completion_mask": completion_mask,
             "code_token_mask": code_token_mask,
-            "reason_token_mask": reason_token_mask,
+            "sft_token_mask": sft_token_mask,
             "advantages_code": torch.tensor(advantages_code, dtype=torch.float32),
-            "advantages_reason": torch.tensor(advantages_reason, dtype=torch.float32),
+            "sft_weights": torch.tensor(sft_weights, dtype=torch.float32),
             "r_code": torch.tensor(r_code, dtype=torch.float32),
             "pass_rate": torch.tensor(pass_rates, dtype=torch.float32),
             "num_items_in_batch": completion_mask.sum(),
@@ -993,6 +1631,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         rollout_t0 = time.perf_counter()
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
+        examples, pseudo_prepare_metrics = self._prepare_examples_for_rollout(examples, mode, base_rng)
 
         rollouts = []
         for _idx, example in enumerate(examples):
@@ -1008,27 +1647,23 @@ class CodeGRPOTrainer(GRPOTrainer):
                     rollout.repeat_idx = repeat_idx
                     rollouts.append(rollout)
             else:
-                rollout = self.tree_runner.run_question(
-                    example,
-                    rng=random.Random(rollout_seed),
-                    update_exec_baseline=(mode == "train"),
-                )
+                rollout = self.tree_runner.run_question(example, rng=random.Random(rollout_seed))
                 rollouts.append(rollout)
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
 
         train_samples = [sample for rollout in rollouts for sample in rollout.train_samples]
         if not train_samples and examples:
             fallback_completion = build_generation_completion("")
-            _, fallback_code_mask, fallback_reason_mask = build_token_masks(self.code_tokenizer, fallback_completion)
+            _, fallback_code_mask, _ = build_token_masks(self.code_tokenizer, fallback_completion)
             train_samples = [
                 {
                     "question_id": str(examples[0]["question_id"]),
                     "prompt_text": str(examples[0]["prompt"]),
                     "completion_text": fallback_completion,
                     "code_token_mask": fallback_code_mask,
-                    "reason_token_mask": fallback_reason_mask,
                     "A_code": 0.0,
-                    "A_reason": 0.0,
+                    "sft_token_mask": [0] * len(fallback_code_mask),
+                    "sft_weight": 0.0,
                     "R_code": 0.0,
                     "pass_rate": 0.0,
                 }
@@ -1045,25 +1680,22 @@ class CodeGRPOTrainer(GRPOTrainer):
         batch = self._build_training_batch(train_samples, to_device=False)
 
         mean_r_code = self._mean([rollout.mean_R_code for rollout in rollouts])
-        mean_r_reason = self._mean([rollout.mean_R_reason for rollout in rollouts])
         mean_pass_rate = self._mean([rollout.mean_pass_rate for rollout in rollouts])
         std_r_code = self._mean([rollout.std_R_code for rollout in rollouts])
-        std_r_reason = self._mean([rollout.std_R_reason for rollout in rollouts])
         node_count = float(sum(rollout.node_count for rollout in rollouts))
         resample_count = float(sum(rollout.resample_count for rollout in rollouts))
 
         metric_updates: dict[str, float] = {
             "mean_R_code": mean_r_code,
-            "mean_R_reason": mean_r_reason,
             "mean_pass_rate": mean_pass_rate,
             "std_R_code": std_r_code,
-            "std_R_reason": std_r_reason,
             "node_count": node_count,
             "resample_count": resample_count,
             "rollout_time_s": float(rollout_time_s),
             "rollout_nodes_per_s": float(node_count / rollout_time_s),
             "rollout_questions_per_s": float(len(examples) / rollout_time_s),
         }
+        metric_updates.update(pseudo_prepare_metrics)
 
         # [诊断面板] rollout 层面的 reward / advantage / batch 诊断
         all_r_codes = [s.R_code for s in train_samples if hasattr(s, "R_code")]
@@ -1072,12 +1704,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         if all_r_codes:
             metric_updates["reward/R_code_min"] = min(all_r_codes)
             metric_updates["reward/R_code_max"] = max(all_r_codes)
-            # [诊断面板] reward tie rate: 一组 sibling 的 R_code 相同的比例
-            pair_diffs = []
-            for rollout in rollouts:
-                for sample in rollout.train_samples:
-                    if hasattr(sample, "R_code"):
-                        pair_diffs.append(sample.R_code)
             # advantage/code_zero_rate: A_code == 0 的样本比例（sibling reward 相同或 std<=eps 时为 0）
             if all_a_codes:
                 zero_count = sum(1 for a in all_a_codes if abs(a) < 1e-8)
@@ -1091,87 +1717,17 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         # [诊断面板] audit count per main sample — from rollout eval_metrics
         total_main = sum(r.eval_metrics.get("main_sample_count", 0.0) for r in rollouts)
-        total_logic = sum(r.eval_metrics.get("logic_sample_count", 0.0) for r in rollouts)
-        total_exec = sum(r.eval_metrics.get("exec_sample_count", 0.0) for r in rollouts)
+        total_code_io_aux = sum(r.eval_metrics.get("code_io_aux_sample_count", 0.0) for r in rollouts)
         if total_main > 0:
-            metric_updates["audit_count/logic_per_main_sample"] = total_logic / total_main
-            metric_updates["audit_count/exec_per_main_sample"] = total_exec / total_main
+            metric_updates["audit_count/code_io_aux_per_main_sample"] = total_code_io_aux / total_main
 
-        # --- per-question signal tracking + undiff_unsolved diagnostics ---
-        # 信号分类必须按 sibling group（同 prompt_text 的主代码样本）逐组判定，
-        # 不能对整题所有 code samples 做 flat max/min 聚合。原因：多轮树搜索下
-        # 一个 QuestionRollout 包含多个 sibling group（每轮/每个 parent 一组），
-        # 不同 group 的绝对 R_code 可能不同（不同轮次难度不同），但每组内部
-        # 两个 sibling 的 R_code 可能完全相同（无信号）。Flat 聚合会把跨组的
-        # R_code 差异误判为 useful_signal，污染题目状态和采样权重。
         if mode == "train":
-            eps = 1e-8
-            undiff_unsolved_count = 0
-            easy_solved_count = 0
-            useful_signal_count = 0
-            total_questions = 0
-            for rollout in rollouts:
-                qid = str(rollout.question_id)
-                samples = rollout.train_samples
-                # 只统计主代码样本（code_token_mask 含有 1）。
-                # 不能用 hasattr(A_code/R_code)：它们是 TrainSample 必填字段，
-                # logic/exec 审阅样本也有，但其 R_code/pass_rate 继承自父节点，
-                # 不代表 sibling 间的代码质量差异。
-                code_samples = [s for s in samples if any(m == 1 for m in s.code_token_mask)]
-                if len(code_samples) < 2:
-                    continue
-
-                # 按 prompt_text 分组 = 按 sibling group 分组
-                groups: dict[str, list] = {}
-                for s in code_samples:
-                    groups.setdefault(s.prompt_text, []).append(s)
-
-                # 逐 group 判定信号，汇总到 question level
-                any_group_has_signal = False
-                all_groups_all_pass = True
-                any_group_undiff_unsolved = False
-                for group in groups.values():
-                    if len(group) < 2:
-                        continue
-                    group_all_pass = all(s.pass_rate == 1.0 for s in group)
-                    group_has_signal = any(abs(s.A_code) > eps for s in group)
-                    r_codes = [s.R_code for s in group]
-                    pass_rates = [s.pass_rate for s in group]
-                    r_code_same = (max(r_codes) - min(r_codes)) < eps
-                    pass_rate_same = (max(pass_rates) - min(pass_rates)) < eps
-                    if not group_all_pass:
-                        all_groups_all_pass = False
-                    if group_has_signal:
-                        any_group_has_signal = True
-                    if (not group_all_pass) and r_code_same and pass_rate_same:
-                        any_group_undiff_unsolved = True
-
-                total_questions += 1
-                if all_groups_all_pass:
-                    outcome = "easy_solved"
-                    easy_solved_count += 1
-                elif any_group_has_signal:
-                    outcome = "useful_signal"
-                    useful_signal_count += 1
-                elif any_group_undiff_unsolved:
-                    outcome = "undiff_unsolved"
-                    undiff_unsolved_count += 1
-                else:
-                    # 所有 group 都无显著 A_code 但也不满足 undiff 条件（稀有边界）
-                    outcome = "useful_signal"
-                    useful_signal_count += 1
-
-                state = self._question_signal_states.get(qid)
-                if state is None:
-                    state = _QuestionSignalState()
-                    self._question_signal_states[qid] = state
-                state.recent_outcomes.append(outcome)
-                state.total_samples += 1
-
-            if total_questions > 0:
-                metric_updates["signal/undiff_unsolved_rate"] = undiff_unsolved_count / total_questions
-                metric_updates["signal/easy_solved_rate"] = easy_solved_count / total_questions
-                metric_updates["signal/useful_signal_rate"] = useful_signal_count / total_questions
+            # Train mode currently guarantees one rollout per prepared example.
+            # If train-time repeated eval-style rollouts are introduced later, this zip(strict=True)
+            # must be revisited together with question-prior updates.
+            for example, rollout in zip(examples, rollouts, strict=True):
+                base_qid = self._base_question_id(example)
+                self._update_question_prior_state(base_qid, rollout)
 
             # --- Update sampler weights for pseudo-epoch refresh ---
             # Only write weights when refresh is enabled (sampling_refresh_steps > 0).
@@ -1180,45 +1736,26 @@ class CodeGRPOTrainer(GRPOTrainer):
             # Does NOT change reward, advantage, or loss computation.
             refresh_steps = int(getattr(self.args, "sampling_refresh_steps", 0))
             sampler = getattr(self, "_active_weighted_sampler", None)
-            if refresh_steps > 0 and sampler is not None and hasattr(sampler, "_weights") and self.train_dataset is not None:
+            if (
+                self._question_prior_enabled
+                and refresh_steps > 0
+                and sampler is not None
+                and hasattr(sampler, "_weights")
+                and self.train_dataset is not None
+            ):
                 new_weights = []
-                weight_by_category = {"easy_solved": [], "useful_signal": [], "undiff_unsolved": [], "default": []}
-                updated_count = 0
                 for idx in range(len(self.train_dataset)):
                     qid = str(self.train_dataset[idx].get("question_id", f"q_{idx}"))
-                    st = self._question_signal_states.get(qid)
-                    w = self._compute_signal_weight(st)
+                    w = self._get_question_prior_weight(qid)
                     new_weights.append(w)
-                    if st is not None and st.total_samples > 0:
-                        updated_count += 1
-                        recent = list(st.recent_outcomes)
-                        n = len(recent)
-                        if n > 0:
-                            sr = recent.count("easy_solved") / n
-                            ur = recent.count("undiff_unsolved") / n
-                            sgr = recent.count("useful_signal") / n
-                            if sr > 0.75:
-                                weight_by_category["easy_solved"].append(w)
-                            elif sgr > 0.5:
-                                weight_by_category["useful_signal"].append(w)
-                            elif ur > 0.75:
-                                weight_by_category["undiff_unsolved"].append(w)
-                            else:
-                                weight_by_category["default"].append(w)
-                        else:
-                            weight_by_category["default"].append(w)
-                    else:
-                        weight_by_category["default"].append(w)
                 sampler._weights = torch.tensor(new_weights, dtype=torch.float64)
-                # Sampling weight diagnostics (TB only)
-                metric_updates["sampling_weight/updated_question_count"] = float(updated_count)
-                for cat in ("easy_solved", "useful_signal", "undiff_unsolved"):
-                    vals = weight_by_category[cat]
-                    metric_updates[f"sampling_weight/{cat}_mean"] = (
-                        sum(vals) / len(vals) if vals else 0.0
-                    )
                 # Read actual refresh count from sampler (incremented at segment boundaries)
                 metric_updates["sampling_refresh/event_count"] = float(getattr(sampler, "refresh_count", 0))
+
+            metric_updates.update(self._question_prior_metrics())
+
+        if mode == "train":
+            metric_updates.update(self._update_pseudo_multiround_state(examples, rollouts))
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
@@ -1249,10 +1786,8 @@ class CodeGRPOTrainer(GRPOTrainer):
         eval_metric_snapshot = (
             {
                 "mean_R_code": mean_r_code,
-                "mean_R_reason": mean_r_reason,
                 "mean_pass_rate": mean_pass_rate,
                 "std_R_code": std_r_code,
-                "std_R_reason": std_r_reason,
                 "node_count": node_count,
                 "resample_count": resample_count,
                 **merged_eval_metrics,
@@ -1355,9 +1890,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         )
 
         code_mask = inputs["code_token_mask"] * completion_mask
-        reason_mask = inputs["reason_token_mask"] * completion_mask
+        sft_mask = inputs["sft_token_mask"] * completion_mask
         advantages_code = inputs["advantages_code"]
-        advantages_reason = inputs["advantages_reason"]
+        sft_weights = inputs["sft_weights"]
 
         old_per_token_logps = inputs.get("old_per_token_logps")
         old_per_token_logps = per_token_logps.detach() if old_per_token_logps is None else old_per_token_logps
@@ -1366,10 +1901,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
 
         advantages_code = advantages_code.unsqueeze(1)
-        advantages_reason = advantages_reason.unsqueeze(1)
+        sft_weights = sft_weights.unsqueeze(1)
 
         per_token_code_loss = -torch.min(coef_1 * advantages_code, coef_2 * advantages_code)
-        per_token_reason_loss = -torch.min(coef_1 * advantages_reason, coef_2 * advantages_reason)
+        per_token_sft_loss = -per_token_logps
 
         # [降低 length bias] code_grpo_loss_type 选择 loss 聚合方式
         # seq_mean: 原始实现，每个序列按长度归一化再取 batch mean → 短序列与长序列等权 → length bias
@@ -1377,15 +1912,16 @@ class CodeGRPOTrainer(GRPOTrainer):
         loss_type = getattr(self.args, "code_grpo_loss_type", "seq_mean")
         if loss_type == "token_mean":
             code_active_tokens = code_mask.sum().clamp(min=1.0)
-            reason_active_tokens = reason_mask.sum().clamp(min=1.0)
+            sft_active_weight = (sft_mask * sft_weights).sum().clamp(min=1.0)
             loss_code = (per_token_code_loss * code_mask).sum() / code_active_tokens
-            loss_reason = (per_token_reason_loss * reason_mask).sum() / reason_active_tokens
+            loss_sft = (per_token_sft_loss * sft_mask * sft_weights).sum() / sft_active_weight
         else:
             loss_code_per_seq = (per_token_code_loss * code_mask).sum(dim=1) / code_mask.sum(dim=1).clamp(min=1.0)
-            loss_reason_per_seq = (per_token_reason_loss * reason_mask).sum(dim=1) / reason_mask.sum(dim=1).clamp(min=1.0)
+            sft_denom = sft_mask.sum(dim=1).clamp(min=1.0)
+            loss_sft_per_seq = ((per_token_sft_loss * sft_mask).sum(dim=1) / sft_denom) * sft_weights.squeeze(1)
             loss_code = loss_code_per_seq.mean()
-            loss_reason = loss_reason_per_seq.mean()
-        loss = loss_code + self.args.beta_reason * loss_reason
+            loss_sft = loss_sft_per_seq.mean()
+        loss = loss_code + self.args.beta_sft * loss_sft
         if self.beta != 0.0:
             ref_per_token_logps = self._get_reference_per_token_logps(
                 input_ids=input_ids,
@@ -1403,9 +1939,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         loss = loss / normalizer
 
         gathered_loss_code = self.accelerator.gather(loss_code.detach()).float().mean().item()
-        gathered_loss_reason = self.accelerator.gather(loss_reason.detach()).float().mean().item()
+        gathered_loss_sft = self.accelerator.gather(loss_sft.detach()).float().mean().item()
         self._metrics[mode]["loss_code"].append(gathered_loss_code)
-        self._metrics[mode]["loss_reason"].append(gathered_loss_reason)
+        self._metrics[mode]["loss_sft"].append(gathered_loss_sft)
 
         # [诊断面板] importance ratio 方差监控
         with torch.no_grad():
@@ -1427,13 +1963,13 @@ class CodeGRPOTrainer(GRPOTrainer):
                     )
             # [诊断面板] 完成长度分布：code vs reason
             code_lens = code_mask.sum(dim=1)
-            reason_lens = reason_mask.sum(dim=1)
+            sft_lens = sft_mask.sum(dim=1)
             code_active = code_lens[code_lens > 0]
-            reason_active = reason_lens[reason_lens > 0]
+            sft_active = sft_lens[sft_lens > 0]
             if code_active.numel() > 0:
                 self._metrics[mode]["completion_len/code_mean"].append(code_active.float().mean().item())
-            if reason_active.numel() > 0:
-                self._metrics[mode]["completion_len/reason_mean"].append(reason_active.float().mean().item())
+            if sft_active.numel() > 0:
+                self._metrics[mode]["completion_len/sft_mean"].append(sft_active.float().mean().item())
             # [诊断面板] advantage 分布
             adv_code_flat = advantages_code.squeeze()
             if adv_code_flat.numel() > 0:
@@ -1442,10 +1978,6 @@ class CodeGRPOTrainer(GRPOTrainer):
                 self._metrics[mode]["advantage/code_nonzero_rate"].append(
                     (adv_code_flat.abs() > 1e-8).float().mean().item()
                 )
-            adv_reason_flat = advantages_reason.squeeze()
-            if adv_reason_flat.numel() > 0:
-                self._metrics[mode]["advantage/reason_mean"].append(adv_reason_flat.mean().item())
-                self._metrics[mode]["advantage/reason_std"].append(adv_reason_flat.std().item())
             # [诊断面板] effective tokens per update
             self._metrics[mode]["tokens_per_update"].append(completion_mask.sum().item())
         kl_value = self._compute_reference_kl_metric(
@@ -1459,10 +1991,10 @@ class CodeGRPOTrainer(GRPOTrainer):
             self._metrics[mode]["kl"].append(kl_value)
         if bool(getattr(self.args, "log_reward_losses", False)):
             logger.info(
-                "[REWARD] loss_code=%.6f loss_reason=%.6f beta_reason=%.4f",
+                "[REWARD] loss_code=%.6f loss_sft=%.6f beta_sft=%.4f",
                 gathered_loss_code,
-                gathered_loss_reason,
-                self.args.beta_reason,
+                gathered_loss_sft,
+                self.args.beta_sft,
             )
         return loss
 

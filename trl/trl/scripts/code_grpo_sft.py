@@ -1,16 +1,4 @@
 # Copyright 2020-2026 The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import os
@@ -33,21 +21,15 @@ from trl import (
     get_peft_config,
     get_quantization_config,
 )
-from trl.extensions.code_grpo.parser import build_canonical_completion
+from trl.extensions.code_grpo.parser import build_generation_completion
 
 
 logger = logging.get_logger(__name__)
-
-# Enable logging in a Hugging Face Space
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 FORMAT_INSTRUCTION = (
-    "You are training for structured code generation. "
-    "Output must follow exactly:\n"
-    "<CODE>...</CODE>\n"
-    "<REASON>...<LOGIC_PREDICTION>...</LOGIC_PREDICTION>"
-    "<EXEC_PREDICTION>...</EXEC_PREDICTION></REASON>\n"
-    "Do not output markdown fences or extra text outside tags."
+    "You are training for code generation. "
+    "Return exactly one fenced Python code block and no extra explanation."
 )
 
 
@@ -55,7 +37,7 @@ FORMAT_INSTRUCTION = (
 class CodeGRPOSFTScriptArguments(ScriptArguments):
     add_format_instruction: bool = field(
         default=True,
-        metadata={"help": "Prepend a fixed structure-format instruction to every prompt."},
+        metadata={"help": "Prepend a fixed code-format instruction to every prompt."},
     )
     format_instruction: str = field(
         default=FORMAT_INSTRUCTION,
@@ -104,16 +86,7 @@ def _normalize_example(example: dict[str, Any], idx: int, script_args: CodeGRPOS
             f"SFT example #{idx} is missing completion and code fields. "
             "Provide `completion` or at least `code`."
         )
-    reasoning = _pick_first(example, ["reasoning", "reason", "analysis"])
-    logic_prediction = _pick_first(example, ["logic_prediction", "logic_output", "logic_answer"])
-    exec_prediction = _pick_first(example, ["exec_prediction", "execution_prediction", "exec_answer"])
-    completion = build_canonical_completion(
-        code=code,
-        reasoning=str(reasoning or ""),
-        logic_prediction=str(logic_prediction or ""),
-        exec_prediction=str(exec_prediction or ""),
-    )
-    return {"prompt": prompt, "completion": completion}
+    return {"prompt": prompt, "completion": build_generation_completion(code)}
 
 
 def _prepare_split(dataset_split, script_args: CodeGRPOSFTScriptArguments):
@@ -168,7 +141,7 @@ def main(script_args, training_args, model_args, dataset_args):
 def make_parser(subparsers: argparse._SubParsersAction | None = None):
     dataclass_types = (CodeGRPOSFTScriptArguments, SFTConfig, ModelConfig, DatasetMixtureConfig)
     if subparsers is not None:
-        parser = subparsers.add_parser("code_grpo_sft", help="Run structured-output SFT for CodeGRPO", dataclass_types=dataclass_types)
+        parser = subparsers.add_parser("code_grpo_sft", help="Run code-only SFT for CodeGRPO", dataclass_types=dataclass_types)
     else:
         parser = TrlParser(dataclass_types)
     return parser

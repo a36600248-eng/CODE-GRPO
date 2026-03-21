@@ -1,34 +1,14 @@
 # Config Layout
 
-This directory contains runnable YAML configs grouped by purpose.
+This directory now emphasizes the current Code-GRPO mainline.
 
-Folders:
+Active comparison configs:
 
-- `train/`
-  - Main training configs.
-- `eval/`
-  - Standalone evaluation-only configs.
-- `comparison/`
-  - Side-by-side comparison configs for raw baseline, vanilla GRPO, and the current method.
+- `comparison/server_2gpu_smoke/raw_qwen7b_eval_mbpp.yaml`
+- `comparison/server_2gpu_smoke/codegrpo_single_round_zero_pass_soft_reward.yaml`
+- `comparison/server_2gpu_smoke/codegrpo_pseudo_multiround_zero_pass_soft_reward.yaml`
 
-Commonly used configs:
+Use the top-level helper scripts for the two training variants:
 
-- Main method training:
-  - `train/codegrpo_train_qwen7b_vllm_mbpp_small.yaml`
-- Vanilla GRPO training:
-  - `train/codegrpo_train_qwen7b_vllm_mbpp_vanilla_grpo.yaml`
-- Raw standalone eval:
-  - `eval/codegrpo_eval_qwen7b_raw_mbpp.yaml`
-
-Comparison suite:
-
-- `comparison/codegrpo_method_mbpp.yaml`
-- `comparison/vanilla_grpo_multiround_k2_mbpp.yaml`
-- `comparison/vanilla_grpo_single_round_k8_mbpp.yaml`
-- `comparison/raw_qwen7b_eval_mbpp.yaml`
-
-Recommended use:
-
-1. Use `train/` for day-to-day training runs.
-2. Use `eval/` for standalone evaluation commands.
-3. Use `comparison/` when running matched ablations.
+- `run_zero_pass_soft_reward_server_2gpu.sh`
+- `run_pseudo_multiround_zero_pass_soft_reward_server_2gpu.sh`

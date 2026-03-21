@@ -1,6 +1,6 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k8_server_2gpu_smoke
+output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_pseudo_multiround_zero_pass_soft_reward_server_2gpu_smoke
 report_to: tensorboard
-tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K8-SERVER-2GPU-SMOKE
+tensorboard_root_dir: /root/tf-logs/CODE-GRPO-PSEUDO-MULTIROUND-ZERO-PASS-SERVER-2GPU-SMOKE
 logging_steps: 2
 disable_tqdm: false
 save_strategy: "no"
@@ -39,15 +39,16 @@ vllm_mode: server
 vllm_server_base_url: http://127.0.0.1:8000
 vllm_server_timeout: 600.0
 vllm_sync_steps: 5
-async_rollout_prefetch: true
+async_rollout_prefetch: false
 
 num_train_epochs: 1
-max_steps: 20
+max_steps: 60
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
 weight_decay: 0.0
 beta: 0.001
+beta_sft: 0.2
 gradient_checkpointing: true
 gradient_accumulation_steps: 1
 generation_batch_size: 8
@@ -55,57 +56,51 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 max_completion_length: 128
 max_completion_length_code: 128
-max_completion_length_audit: 96
 generation_temperature_code: 0.7
 eval_generation_temperature_code: 0.0
 generation_top_p_code: 0.95
 generation_min_new_tokens_code: 16
 generation_empty_retry_count: 1
+generation_outside_noise_chars: 0
+code_timeout_seconds: 1.0
 
 K: 8
-K_reason: 1
 num_generations: 8
 num_generations_eval: 1
-eval_code_only_single_trajectory: true
-reward_window_bins: 4
 T_max: 1
 eval_T_max_override: 1
 N_max: 8
-M_audit: 0
-M_retry: 1
+M_retry: 0
 context_round_window: 1
-lambda_soft: 0.0
-code_compile_reward_scale: 0.1
-code_format_reward_scale: 0.12
-logic_format_reward_scale: 0.0
-exec_case_baseline_ema_alpha: 0.1
-soft_reward_ineligible_scale: 0.0
-format_bonus_logic: 0.0
-format_bonus_exec: 0.0
-use_chat_template_for_codegrpo: true
-terminal_logic_backprop_bonus: 0.0
-terminal_logic_backprop_decay: 0.0
-terminal_logic_backprop_max_depth: 0
-terminal_backprop_code_similarity_threshold: 1.0
-frozen_reason_one_shot: false
-unify_reason_when_code_frozen: false
-beta_reason: 0.0
-gamma_shrink: 0.1
-format_outside_noise_chars: 80
-generation_outside_noise_chars: 0
-prefill_generation_code_tag: false
-error_max_chars: 180
-error_max_lines: 6
-code_timeout_seconds: 1.0
 eval_round_n: 1
 eval_k_list: [1]
-
-# --- k8 不需要方差优化开关，保持原始行为做对照 ---
+eval_code_only_single_trajectory: true
+reward_window_bins: 4
 advantage_base: R_code
-advantage_mode: zscore
+advantage_mode: mean_only
 code_grpo_loss_type: token_mean
 
-# --- logging / trace ---
+zero_pass_soft_reward_enabled: true
+zero_pass_soft_reward_diag_count: 4
+zero_pass_soft_reward_clip_low: -2.0
+zero_pass_soft_reward_clip_high: 2.0
+zero_pass_soft_reward_beta_scale: 0.5
+code_io_aux_training_enabled: true
+code_io_aux_case_count: 2
+question_prior_enabled: false
+
+pseudo_multiround_enabled: true
+pseudo_iterative_pool_capacity: 1024
+pseudo_iterative_select_count: 3
+pseudo_original_downweight_after: 2
+pseudo_original_keep_prob_decay: 0.5
+pseudo_original_keep_prob_floor: 0.1
+pseudo_original_age_bonus_per_step: 0.01
+pseudo_original_age_bonus_max: 0.2
+pseudo_original_cover_once_before_iterative: true
+pseudo_forced_original_fraction: 0.1
+pseudo_iterative_ttl_steps: 20
+
 compact_logging: false
 dump_train_traces: true
 trace_store_full_text: false
@@ -119,4 +114,7 @@ debug_trace_dir: traces/rollout
 debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 10
 max_train_trace_files: 4
-review_bundle_trace_sample_size: 1
+review_bundle_trace_sample_size: 2
+
+
+

@@ -365,7 +365,6 @@ def _generate_review_plots(bundle_root: str, logs_bundle: str, artifacts_bundle:
     # 1. Training reward curves
     reward_key_candidates = {
         "R_code": ["window/mean_R_code", "mean_R_code"],
-        "R_reason": ["window/mean_R_reason", "mean_R_reason"],
         "R_soft_effective": ["window/mean_R_soft_effective", "mean_R_soft_effective"],
     }
     fig, ax = plt.subplots(figsize=(9, 5))

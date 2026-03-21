@@ -1,6 +1,6 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_vanilla_grpo_k2_server_2gpu_smoke
+output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_zero_pass_soft_reward_server_2gpu_smoke
 report_to: tensorboard
-tensorboard_root_dir: /root/tf-logs/CODE-GRPO-VANILLA-K2-SERVER-2GPU-SMOKE
+tensorboard_root_dir: /root/tf-logs/CODE-GRPO-ZERO-PASS-SOFT-SERVER-2GPU-SMOKE
 logging_steps: 2
 disable_tqdm: false
 save_strategy: "no"
@@ -42,7 +42,7 @@ vllm_sync_steps: 5
 async_rollout_prefetch: true
 
 num_train_epochs: 1
-max_steps: 20
+max_steps: 60
 learning_rate: 1.0e-6
 lr_scheduler_type: cosine
 warmup_ratio: 0.03
@@ -50,62 +50,43 @@ weight_decay: 0.0
 beta: 0.001
 gradient_checkpointing: true
 gradient_accumulation_steps: 1
-generation_batch_size: 4
+generation_batch_size: 8
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 max_completion_length: 128
 max_completion_length_code: 128
-max_completion_length_audit: 96
 generation_temperature_code: 0.7
 eval_generation_temperature_code: 0.0
 generation_top_p_code: 0.95
 generation_min_new_tokens_code: 16
 generation_empty_retry_count: 1
+generation_outside_noise_chars: 0
+code_timeout_seconds: 1.0
 
-K: 2
-K_reason: 1
-num_generations: 2
+K: 8
+num_generations: 8
 num_generations_eval: 1
+T_max: 1
+eval_T_max_override: 1
+N_max: 8
+M_retry: 0
+context_round_window: 1
+eval_round_n: 1
+eval_k_list: [1]
 eval_code_only_single_trajectory: true
 reward_window_bins: 4
-T_max: 2
-eval_T_max_override: 2
-N_max: 4
-M_audit: 0
-M_retry: 1
-context_round_window: 2
-lambda_soft: 0.0
-code_compile_reward_scale: 0.1
-code_format_reward_scale: 0.12
-logic_format_reward_scale: 0.0
-exec_case_baseline_ema_alpha: 0.1
-soft_reward_ineligible_scale: 0.0
-format_bonus_logic: 0.0
-format_bonus_exec: 0.0
-use_chat_template_for_codegrpo: true
-terminal_logic_backprop_bonus: 0.0
-terminal_logic_backprop_decay: 0.0
-terminal_logic_backprop_max_depth: 0
-terminal_backprop_code_similarity_threshold: 1.0
-frozen_reason_one_shot: false
-unify_reason_when_code_frozen: false
-beta_reason: 0.0
-gamma_shrink: 0.1
-format_outside_noise_chars: 80
-generation_outside_noise_chars: 0
-prefill_generation_code_tag: false
-error_max_chars: 180
-error_max_lines: 6
-code_timeout_seconds: 1.0
-eval_round_n: 1
-eval_k_list: [1, 2]
-
-# --- 方差优化开关（k2 baseline 也用新 loss 去 length bias，但 advantage 保持 zscore 做对比） ---
 advantage_base: R_code
-advantage_mode: zscore
+advantage_mode: mean_only
 code_grpo_loss_type: token_mean
 
-# --- logging / trace ---
+zero_pass_soft_reward_enabled: true
+zero_pass_soft_reward_diag_count: 4
+zero_pass_soft_reward_clip_low: -2.0
+zero_pass_soft_reward_clip_high: 2.0
+zero_pass_soft_reward_beta_scale: 0.5
+code_io_aux_training_enabled: false
+question_prior_enabled: false
+
 compact_logging: false
 dump_train_traces: true
 trace_store_full_text: false
@@ -119,4 +100,4 @@ debug_trace_dir: traces/rollout
 debug_trace_sample_size: 1
 dump_train_trace_interval_steps: 10
 max_train_trace_files: 4
-review_bundle_trace_sample_size: 1
+review_bundle_trace_sample_size: 2
