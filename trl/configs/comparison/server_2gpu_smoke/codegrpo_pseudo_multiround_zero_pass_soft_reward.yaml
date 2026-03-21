@@ -2,7 +2,7 @@ output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_pseudo_multiround_zero_pass_soft
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-PSEUDO-MULTIROUND-ZERO-PASS-SERVER-2GPU-SMOKE
 logging_steps: 2
-disable_tqdm: false
+disable_tqdm: true
 save_strategy: "no"
 eval_strategy: "steps"
 eval_steps: 10

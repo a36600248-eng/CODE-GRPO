@@ -2,7 +2,7 @@ output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_codegrpo_eval_server_2gpu_smoke
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-RAW-EVAL-SERVER-2GPU-SMOKE
 logging_steps: 10
-disable_tqdm: false
+disable_tqdm: true
 save_strategy: "no"
 eval_strategy: "no"
 push_to_hub: false

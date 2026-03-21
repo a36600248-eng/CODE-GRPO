@@ -60,26 +60,45 @@ def main(script_args, training_args, model_args, dataset_args):
 
     effective_model_name_or_path = model_args.model_name_or_path
     eval_peft_config = get_peft_config(model_args)
-    if (
-        training_args.use_vllm
-        and training_args.backend == "vllm"
-        and os.path.exists(os.path.join(model_args.model_name_or_path, "adapter_config.json"))
-    ):
-        adapter_path = model_args.model_name_or_path
+    adapter_path = model_args.model_name_or_path if os.path.exists(os.path.join(model_args.model_name_or_path, "adapter_config.json")) else None
+    if adapter_path is not None:
         adapter_config = PeftConfig.from_pretrained(adapter_path)
-        # Keep the HF-side trainer on a normal base+LoRA construction so transformers.Trainer
-        # does not reject the model as a purely quantized read-only checkpoint. The actual
-        # adapter under evaluation is applied only through vLLM dynamic LoRA requests below.
-        effective_model_name_or_path = adapter_config.base_model_name_or_path
-        training_args.vllm_dynamic_lora_path = adapter_path
-        training_args.vllm_dynamic_lora_name = os.path.basename(os.path.abspath(adapter_path)) or "adapter"
-        training_args.vllm_dynamic_lora_int_id = 1
-        logger.info(
-            "[EVAL] using vLLM dynamic LoRA: hf_model=%s base_model=%s adapter=%s",
-            effective_model_name_or_path,
-            adapter_config.base_model_name_or_path,
-            adapter_path,
-        )
+        if training_args.use_vllm and training_args.backend == "vllm":
+            if getattr(training_args, "vllm_mode", "server") == "colocate":
+                # Keep the HF-side trainer on a normal base+LoRA construction so transformers.Trainer
+                # does not reject the model as a purely quantized read-only checkpoint. The actual
+                # adapter under evaluation is applied only through vLLM dynamic LoRA requests below.
+                effective_model_name_or_path = adapter_config.base_model_name_or_path
+                training_args.vllm_dynamic_lora_path = adapter_path
+                training_args.vllm_dynamic_lora_name = os.path.basename(os.path.abspath(adapter_path)) or "adapter"
+                training_args.vllm_dynamic_lora_int_id = 1
+                logger.info(
+                    "[EVAL] using vLLM dynamic LoRA: hf_model=%s base_model=%s adapter=%s",
+                    effective_model_name_or_path,
+                    adapter_config.base_model_name_or_path,
+                    adapter_path,
+                )
+            else:
+                # Server-mode vLLM does not support dynamic LoRA requests in the current implementation.
+                # Fall back to normal HF-side adapter loading for correctness.
+                effective_model_name_or_path = adapter_path
+                eval_peft_config = None
+                training_args.use_vllm = False
+                training_args.backend = "hf"
+                logger.warning(
+                    "[EVAL] adapter checkpoint with vLLM server mode is not supported via dynamic LoRA; "
+                    "falling back to HF backend for standalone eval: adapter=%s base_model=%s",
+                    adapter_path,
+                    adapter_config.base_model_name_or_path,
+                )
+        else:
+            effective_model_name_or_path = adapter_path
+            eval_peft_config = None
+            logger.info(
+                "[EVAL] loading adapter checkpoint directly on HF backend: adapter=%s base_model=%s",
+                adapter_path,
+                adapter_config.base_model_name_or_path,
+            )
 
     run_layout = _configure_run_layout(script_args, training_args, model_args, dataset_args)
     rank = _get_rank()
