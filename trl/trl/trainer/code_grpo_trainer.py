@@ -224,13 +224,13 @@ class CodeGRPOTrainer(GRPOTrainer):
             "mean_R_code",
             "mean_pass_rate",
             "advantage/code_zero_rate",
+            "zero_pass_soft_trigger_rate",
+            "soft_lift",
             "pseudo/original_coverage_remaining",
         }
     )
-    # --- TensorBoard 写入全量诊断指标 ---
     _TRAIN_LOG_KEYS = frozenset(
         {
-            # 核心进度
             "loss",
             "loss_code",
             "loss_sft",
@@ -240,45 +240,26 @@ class CodeGRPOTrainer(GRPOTrainer):
             "mean_R_code",
             "mean_pass_rate",
             "rollout_time_s",
-            # reward 诊断
             "advantage/code_zero_rate",
             "reward/R_code_min",
             "reward/R_code_max",
             "reward/pass_rate_min",
             "reward/pass_rate_max",
             "std_R_code",
-            # advantage 诊断
             "advantage/code_nonzero_rate",
             "advantage/code_std",
             "advantage/code_mean",
-            "nonzero_A_code_rate",
-            "mean_abs_A_code",
-            # ratio 诊断
             "ratio/mean",
             "ratio/max",
             "ratio/std",
             "clip_low_rate",
             "clip_high_rate",
-            # batch/length 诊断
             "completion_len/code_mean",
             "completion_len/sft_mean",
             "tokens_per_update",
             "effective_prompts_per_update",
             "effective_rollouts_per_update",
-            # tree-level 诊断
-            "sibling_group_zero_std_R_code_rate",
-            "sibling_group_both_R_code_1_rate",
-            "sibling_group_mean_pass_rate_gap",
-            # pair separability 诊断（仅 size==2 的 sibling group）
-            "pair_same_pass_rate_rate",
-            "pair_same_R_code_rate",
-            "pair_soft_match_gap_mean",
-            "pair_same_code_rate",
-            # undiff_unsolved retry 诊断
-            "undiff_retry_trigger_count",
-            "undiff_retry_success_rate",
             "sampling_refresh/event_count",
-            # audit count 诊断
             "audit_count/code_io_aux_per_main_sample",
             "pseudo/source_original_count",
             "pseudo/source_iterative_count",
@@ -297,20 +278,20 @@ class CodeGRPOTrainer(GRPOTrainer):
             "question_prior/high_value_question_count",
             "question_prior/low_value_question_count",
             "question_prior/updated_question_count",
-            # baseline zero-pass soft reward diagnostics
             "zero_pass_soft_trigger_rate",
+            "soft_lift",
             "mean_hard_reward",
             "mean_raw_soft_reward",
             "mean_normalized_soft_reward",
             "mean_soft_reward_beta",
-            # reward window 滑动均值
+            "sibling_group_zero_std_R_code_rate",
+            "pair_same_R_code_rate",
             "window/mean_R_code",
             "window/mean_R_soft_effective",
             "window/steps",
             "window/end_step",
         }
     )
-    # --- 控制台 eval 只打核心结果 ---
     _CONSOLE_EVAL_KEYS = frozenset(
         {
             "eval_loss",
@@ -320,7 +301,6 @@ class CodeGRPOTrainer(GRPOTrainer):
             "eval_mean_pass_rate",
         }
     )
-    # --- TensorBoard eval 全量写入 ---
     _EVAL_LOG_KEYS = frozenset(
         {
             "eval_loss",
@@ -453,6 +433,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         logs_dir = os.path.join(os.path.dirname(self.args.output_dir), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         self._rollout_summary_path = os.path.join(logs_dir, f"rollout_summary_rank{self.accelerator.process_index}.jsonl")
+        self._step_samples_path = os.path.join(logs_dir, f"step_samples_rank{self.accelerator.process_index}.jsonl")
         self._initialize_original_coverage_state()
         self._runtime_state_loaded = False
 
@@ -1371,6 +1352,8 @@ class CodeGRPOTrainer(GRPOTrainer):
                 "mode": mode,
                 "global_step": int(self.state.global_step),
                 "question_id": rollout.question_id,
+                "base_question_id": getattr(rollout, "base_question_id", rollout.question_id),
+                "source_kind": getattr(rollout, "source_kind", "original_problem"),
                 "node_count": rollout.node_count,
                 "resample_count": rollout.resample_count,
                 "mean_R_code": rollout.mean_R_code,
@@ -1380,6 +1363,39 @@ class CodeGRPOTrainer(GRPOTrainer):
             lines.append(json.dumps(payload, ensure_ascii=False))
         if lines:
             with open(self._rollout_summary_path, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+
+    def _append_step_samples(self, rollouts, mode: str):
+        lines = []
+        for rollout in rollouts:
+            for round_item in getattr(rollout, "rounds", []) or []:
+                for candidate_idx, node in enumerate(round_item.get("nodes", []) or []):
+                    if not bool(node.get("main_sample_active", False)):
+                        continue
+                    code = str(node.get("code", "") or "")
+                    payload = {
+                        "mode": mode,
+                        "global_step": int(self.state.global_step),
+                        "question_id": rollout.question_id,
+                        "base_question_id": getattr(rollout, "base_question_id", rollout.question_id),
+                        "source_kind": getattr(rollout, "source_kind", "original_problem"),
+                        "candidate_idx": int(candidate_idx),
+                        "node_id": node.get("node_id"),
+                        "round_idx": int(node.get("round_idx", 0) or 0),
+                        "pass_rate": float(node.get("pass_rate", 0.0) or 0.0),
+                        "hard_reward": float(node.get("hard_reward", 0.0) or 0.0),
+                        "raw_soft_reward": float(node.get("raw_soft_reward", 0.0) or 0.0),
+                        "normalized_soft_reward": float(node.get("normalized_soft_reward", 0.0) or 0.0),
+                        "final_reward": float(node.get("final_reward", node.get("R_code", 0.0)) or 0.0),
+                        "A_code": float(node.get("A_code", 0.0) or 0.0),
+                        "compile_ok": float(node.get("compile_score", 0.0) or 0.0) > 0.0,
+                        "generation_format_ok": bool(node.get("generation_format_ok", False)),
+                        "status_code": str(node.get("status_code", "FAIL")),
+                        "code_preview": code[:240],
+                    }
+                    lines.append(json.dumps(payload, ensure_ascii=False))
+        if lines:
+            with open(self._step_samples_path, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(lines) + "\n")
 
     def _should_record_kl_metric(self, mode: str) -> bool:
@@ -1458,9 +1474,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         return ref_per_token_logps
 
     def _filter_console_logs(self, logs: dict[str, float], mode: str) -> dict[str, float]:
-        """控制台精简过滤：只保留核心进度指标，避免刷屏。"""
-        if not bool(getattr(self.args, "compact_logging", True)):
-            return logs
+        """????????????????????????"""
         if mode == "train":
             return {key: value for key, value in logs.items() if key in self._CONSOLE_TRAIN_KEYS}
         return {
@@ -1645,9 +1659,11 @@ class CodeGRPOTrainer(GRPOTrainer):
                         rng=random.Random(repeat_seed),
                     )
                     rollout.repeat_idx = repeat_idx
+                    self._attach_rollout_source_metadata(example, rollout)
                     rollouts.append(rollout)
             else:
                 rollout = self.tree_runner.run_question(example, rng=random.Random(rollout_seed))
+                self._attach_rollout_source_metadata(example, rollout)
                 rollouts.append(rollout)
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
 
@@ -1846,6 +1862,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 )
 
         self._append_rollout_summaries(result.rollouts, mode=mode)
+        self._append_step_samples(result.rollouts, mode=mode)
         return batch
 
     def _generate_and_score_completions(self, inputs: list[dict[str, Any]]) -> dict[str, torch.Tensor | Any]:
@@ -1989,13 +2006,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         )
         if kl_value is not None:
             self._metrics[mode]["kl"].append(kl_value)
-        if bool(getattr(self.args, "log_reward_losses", False)):
-            logger.info(
-                "[REWARD] loss_code=%.6f loss_sft=%.6f beta_sft=%.4f",
-                gathered_loss_code,
-                gathered_loss_sft,
-                self.args.beta_sft,
-            )
         return loss
 
     def evaluate(self, *args, **kwargs):

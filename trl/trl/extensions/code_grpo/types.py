@@ -58,4 +58,6 @@ class QuestionRollout:
     std_R_code: float
     eval_metrics: dict[str, float] = field(default_factory=dict)
     repeat_idx: int | None = None
+    source_kind: str = "original_problem"
+    base_question_id: str = ""
 

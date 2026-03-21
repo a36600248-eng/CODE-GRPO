@@ -136,78 +136,6 @@ def _build_code_io_aux_samples(
     return samples
 
 
-def _compute_pair_separability(groups: list[list[Node]], eps: float = 1e-8) -> dict[str, float]:
-    pairs = [group for group in groups if len(group) == 2]
-    if not pairs:
-        return {
-            "pair_same_pass_rate_rate": 0.0,
-            "pair_same_R_code_rate": 0.0,
-            "pair_soft_match_gap_mean": 0.0,
-            "pair_same_code_rate": 0.0,
-        }
-    same_pass = 0
-    same_rcode = 0
-    same_code = 0
-    soft_gaps: list[float] = []
-    for a, b in pairs:
-        if abs(a.pass_rate - b.pass_rate) < eps:
-            same_pass += 1
-        if abs(a.R_code - b.R_code) < eps:
-            same_rcode += 1
-        soft_a = float(a.exec_summary.get("normalized_soft_reward", 0.0))
-        soft_b = float(b.exec_summary.get("normalized_soft_reward", 0.0))
-        soft_gaps.append(abs(soft_a - soft_b))
-        if (a.code or "").strip() == (b.code or "").strip():
-            same_code += 1
-    n = len(pairs)
-    return {
-        "pair_same_pass_rate_rate": same_pass / n,
-        "pair_same_R_code_rate": same_rcode / n,
-        "pair_soft_match_gap_mean": _mean(soft_gaps),
-        "pair_same_code_rate": same_code / n,
-    }
-
-
-def _compute_advantage_diagnostics(nodes: list[Node], eps: float = 1e-12) -> dict[str, float]:
-    code_nodes = [node for node in nodes if node.completion_text]
-    sibling_groups: dict[str, list[Node]] = {}
-    for node in code_nodes:
-        if node.parent_id is None:
-            continue
-        sibling_groups.setdefault(str(node.parent_id), []).append(node)
-
-    groups = list(sibling_groups.values())
-    group_stds = [_std([node.R_code for node in group]) for group in groups]
-    group_unique_counts = [float(len({round(float(node.R_code), 12) for node in group})) for group in groups]
-    group_sizes = [float(len(group)) for group in groups]
-    group_spans = [
-        max((float(node.R_code) for node in group), default=0.0) - min((float(node.R_code) for node in group), default=0.0)
-        for group in groups
-    ]
-    pass_rate_gaps = [
-        max((float(node.pass_rate) for node in group), default=0.0)
-        - min((float(node.pass_rate) for node in group), default=0.0)
-        for group in groups
-    ]
-
-    return {
-        "nonzero_A_code_rate": _mean([1.0 if abs(float(node.A_code)) > eps else 0.0 for node in code_nodes]),
-        "sibling_group_count": float(len(groups)),
-        "sibling_group_mean_size": _mean(group_sizes),
-        "sibling_group_zero_std_R_code_rate": _mean([1.0 if std <= eps else 0.0 for std in group_stds]),
-        "sibling_group_nonzero_std_R_code_rate": _mean([1.0 if std > eps else 0.0 for std in group_stds]),
-        "sibling_group_mean_std_R_code": _mean(group_stds),
-        "sibling_group_mean_unique_R_code_count": _mean(group_unique_counts),
-        "sibling_group_mean_reward_span": _mean(group_spans),
-        "sibling_group_all_pass_rate": _mean([1.0 if all(float(node.pass_rate) >= 1.0 - eps for node in group) else 0.0 for group in groups]),
-        "sibling_group_all_fail_rate": _mean([1.0 if all(float(node.pass_rate) <= eps for node in group) else 0.0 for group in groups]),
-        "sibling_group_mean_pass_rate_gap": _mean(pass_rate_gaps),
-        "sibling_group_both_R_code_1_rate": _mean([1.0 if all(float(node.R_code) >= 1.0 - eps for node in group) else 0.0 for group in groups]),
-        "mean_abs_A_code": _mean([abs(float(node.A_code)) for node in code_nodes]),
-        **_compute_pair_separability(groups, eps),
-    }
-
-
 def _is_double_zero_node(node: Node, eps: float = 1e-12) -> bool:
     return abs(node.R_code) <= eps
 
@@ -396,7 +324,6 @@ class CodeGRPOTreeRunner:
         pass_rates = [node.pass_rate for node in siblings]
         eval_metrics = self._compute_eval_metrics(rounds)
         if siblings:
-            eval_metrics.update(_compute_advantage_diagnostics(siblings))
             eval_metrics.update(
                 {
                     "search_node_count": float(len(siblings)),
@@ -416,10 +343,10 @@ class CodeGRPOTreeRunner:
                     "mean_raw_soft_reward": _mean([float(node.exec_summary.get("raw_soft_reward", 0.0)) for node in siblings]),
                     "mean_normalized_soft_reward": _mean([float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in siblings]),
                     "mean_soft_reward_beta": _mean([float(node.exec_summary.get("soft_reward_beta", 0.0)) for node in siblings]),
+                    "sibling_group_zero_std_R_code_rate": 1.0 if _std(r_code) <= 1e-8 else 0.0,
+                    "pair_same_R_code_rate": (1.0 if len(siblings) == 2 and abs(float(siblings[0].R_code) - float(siblings[1].R_code)) <= 1e-8 else 0.0),
                 }
             )
-        eval_metrics["undiff_retry_trigger_count"] = float(undiff_triggered)
-        eval_metrics["undiff_retry_success_rate"] = float(undiff_succeeded / undiff_triggered) if undiff_triggered > 0 else 0.0
 
         return QuestionRollout(
             question_id=question_id,

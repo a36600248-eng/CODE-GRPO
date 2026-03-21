@@ -455,19 +455,9 @@ class CodeGRPOConfig(GRPOConfig):
         default=False,
         metadata={"help": "Whether to write a duplicated plain-text trainer_events log in addition to jsonl."},
     )
-    log_reward_losses: bool = field(
-        default=False,
-        metadata={"help": "Whether to print per-step loss_code/loss_sft messages to the console."},
-    )
     log_trace_dump_events: bool = field(
         default=False,
         metadata={"help": "Whether to print trace dump count messages to the console."},
-    )
-    compact_logging: bool = field(
-        default=True,
-        metadata={
-            "help": "Log only a compact whitelist of high-signal metrics to console/reporters such as TensorBoard."
-        },
     )
     log_kl_metrics: bool = field(
         default=True,
@@ -494,12 +484,20 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError(
                 f"code_grpo_loss_type must be 'seq_mean' or 'token_mean', got: {self.code_grpo_loss_type}"
             )
-        if self.K < 2:
-            raise ValueError("K must be >= 2 for sibling-group GRPO.")
-        if self.K != self.num_generations:
-            raise ValueError(
-                f"K ({self.K}) must equal num_generations ({self.num_generations}) to keep sibling grouping consistent."
-            )
+        if self.codegrpo_mode == "train":
+            if self.K < 2:
+                raise ValueError("K must be >= 2 for sibling-group GRPO training.")
+            if self.K != self.num_generations:
+                raise ValueError(
+                    f"K ({self.K}) must equal num_generations ({self.num_generations}) to keep sibling grouping consistent."
+                )
+        else:
+            if self.K < 1:
+                raise ValueError("K must be >= 1 for CodeGRPO test/eval mode.")
+            if self.K != self.num_generations:
+                raise ValueError(
+                    f"K ({self.K}) must equal num_generations ({self.num_generations}) in test/eval mode as well."
+                )
         if self.eval_repeat_count < 1:
             raise ValueError("eval_repeat_count must be >= 1.")
         if self.dump_train_trace_interval_steps == 0:

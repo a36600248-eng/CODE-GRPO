@@ -334,6 +334,53 @@ def _load_jsonl_rows(path: str) -> list[dict[str, Any]]:
                 continue
     return rows
 
+def _last_numeric(rows: list[dict[str, Any]], key: str):
+    for row in reversed(rows):
+        logs = row.get("logs") if isinstance(row.get("logs"), dict) else row
+        if key in logs and isinstance(logs[key], (int, float)):
+            return float(logs[key])
+    return None
+
+
+def _best_numeric(rows: list[dict[str, Any]], key: str):
+    vals = []
+    for row in rows:
+        logs = row.get("logs") if isinstance(row.get("logs"), dict) else row
+        value = logs.get(key)
+        if isinstance(value, (int, float)):
+            vals.append(float(value))
+    return max(vals) if vals else None
+
+
+def _build_review_summary(run_layout: dict[str, str], rank: int) -> dict[str, Any]:
+    trainer_jsonl = os.path.join(run_layout["logs_dir"], f"trainer_events_rank{rank}.jsonl")
+    rollout_jsonl = os.path.join(run_layout["logs_dir"], f"rollout_summary_rank{rank}.jsonl")
+    trainer_rows = _load_jsonl_rows(trainer_jsonl)
+    rollout_rows = _load_jsonl_rows(rollout_jsonl)
+    train_rows = [row for row in trainer_rows if isinstance(row.get("logs"), dict) and "loss" in row["logs"]]
+    eval_rows = [row for row in trainer_rows if isinstance(row.get("logs"), dict) and any(str(k).startswith("eval_") for k in row["logs"].keys())]
+
+    summary = {
+        "run_id": run_layout.get("run_id"),
+        "mode": run_layout.get("mode"),
+        "train_last_step": int(train_rows[-1].get("step", 0)) if train_rows else None,
+        "eval_last_step": int(eval_rows[-1].get("step", 0)) if eval_rows else None,
+        "train_mean_pass_rate_last": _last_numeric(train_rows, "mean_pass_rate"),
+        "train_mean_R_code_last": _last_numeric(train_rows, "mean_R_code"),
+        "train_advantage_code_zero_rate_last": _last_numeric(train_rows, "advantage/code_zero_rate"),
+        "train_zero_pass_soft_trigger_rate_last": _last_numeric(train_rows, "zero_pass_soft_trigger_rate"),
+        "train_soft_lift_last": _last_numeric(train_rows, "soft_lift"),
+        "train_pseudo_iterative_pool_size_last": _last_numeric(train_rows, "pseudo/iterative_pool_size"),
+        "eval_pass_at_1_last": _last_numeric(eval_rows, "eval_pass_at_1"),
+        "eval_pass_at_1_best": _best_numeric(eval_rows, "eval_pass_at_1"),
+        "eval_best_pass_rate_overall_last": _last_numeric(eval_rows, "eval_best_pass_rate_overall"),
+        "eval_best_pass_rate_overall_best": _best_numeric(eval_rows, "eval_best_pass_rate_overall"),
+        "eval_mean_pass_rate_last": _last_numeric(eval_rows, "eval_mean_pass_rate"),
+        "eval_mean_R_code_last": _last_numeric(eval_rows, "eval_mean_R_code"),
+        "rollout_row_count": len(rollout_rows),
+    }
+    return summary
+
 
 def _generate_review_plots(bundle_root: str, logs_bundle: str, artifacts_bundle: str, rank: int):
     plots_dir = os.path.join(bundle_root, "plots")
@@ -451,8 +498,10 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
     bundle_root = os.path.join(run_layout["run_root"], "review_bundle")
     logs_bundle = os.path.join(bundle_root, "logs")
     artifacts_bundle = os.path.join(bundle_root, "artifacts")
+    samples_bundle = os.path.join(bundle_root, "samples")
     os.makedirs(logs_bundle, exist_ok=True)
     os.makedirs(artifacts_bundle, exist_ok=True)
+    os.makedirs(samples_bundle, exist_ok=True)
 
     # Core metadata
     _copy_if_exists(os.path.join(run_layout["run_root"], "RUN_INDEX.txt"), os.path.join(bundle_root, "RUN_INDEX.txt"))
@@ -485,6 +534,15 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
             os.path.join(artifacts_bundle, filename),
         )
 
+    _copy_if_exists(
+        os.path.join(run_layout["logs_dir"], f"step_samples_rank{rank}.jsonl"),
+        os.path.join(samples_bundle, "step_samples.jsonl"),
+    )
+
+    summary_payload = _build_review_summary(run_layout, rank)
+    with open(os.path.join(bundle_root, "summary.json"), "w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, ensure_ascii=False, indent=2)
+
     # Randomly sample a few rollout traces only when explicitly requested.
     trace_candidates = sorted(glob.glob(os.path.join(run_layout["traces_dir"], "*.json")))
     if trace_sample_size > 0 and trace_candidates:
@@ -503,9 +561,10 @@ def _build_review_bundle(run_layout: dict[str, str], rank: int, trace_sample_siz
         "This folder is a compact review bundle for quick debugging.",
         "",
         "Included:",
-        "- RUN_INDEX.txt and run_manifest.json",
+        "- RUN_INDEX.txt, run_manifest.json, summary.json",
         "- compact jsonl logs",
         "- result json files",
+        "- compact sample dump (samples/step_samples.jsonl)",
         "- optional sampled rollout traces only when explicitly requested",
         "",
         "Not included on purpose:",

@@ -101,14 +101,12 @@ pseudo_original_cover_once_before_iterative: true
 pseudo_forced_original_fraction: 0.1
 pseudo_iterative_ttl_steps: 20
 
-compact_logging: false
 dump_train_traces: true
 trace_store_full_text: false
 dump_eval_traces: false
 log_eval_trajectories: false
 log_train_rollout_details: false
 write_trainer_text_log: false
-log_reward_losses: true
 log_trace_dump_events: false
 debug_trace_dir: traces/rollout
 debug_trace_sample_size: 1
