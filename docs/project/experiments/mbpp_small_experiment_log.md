@@ -120,3 +120,44 @@ Current three-way reading:
 - raw base standalone matches the current soft-only online eval on `pass_at_1` (`0.6000`), but soft-only currently shows a higher online `best_pass_rate_overall` (`0.7111`)
 - therefore the current evidence does not yet support "60-step training clearly beats the base model" on this small eval slice
 - the clean next comparison point is still a matching soft-only standalone eval bundle; until then, treat soft-vs-pure-vs-raw as provisional rather than final
+
+## 2026-03-21 Soft-Only Single-Round GRPO Medium (Seed 42)
+
+Run:
+
+- train run id: `20260321_231904__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+- local review bundle: `D:\BroswerDownload\20260321_231904__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm\review_bundle`
+- config family: `codegrpo_single_round_zero_pass_soft_reward_mbpp_medium.yaml`
+- training mode: single-round, soft reward on, aux SFT off, pseudo-multiround off, question prior off
+- notable config changes vs smoke: `max_steps=240`, `max_train_samples=240`, `max_eval_samples=61`, `eval_steps=60`, `max_completion_length_code=256`
+
+Important results:
+
+- training coverage remains healthy: `240` train rollout rows cover `240` unique questions
+- train averages across rollout rows:
+  - `mean_pass_rate ~= 0.5455`
+  - `mean zero_pass_soft_trigger_rate ~= 0.4052`
+  - `127 / 240` train rollout rows had `zero_pass_soft_trigger_rate > 0`
+  - `96 / 240` train rollout rows were all-pass
+  - `64 / 240` train rollout rows were all-zero-pass
+- train last step:
+  - `mean_pass_rate = 0.4250`
+  - `mean_R_code = 0.4690`
+  - `advantage/code_zero_rate = 0.2`
+  - `zero_pass_soft_trigger_rate = 0.5750`
+  - `soft_lift = 0.0440`
+- online eval trajectory:
+  - step `60`: `pass_at_1 = 0.4918`, `mean_pass_rate = 0.5307`, `mean_R_code = 0.5671`, `best_pass_rate_overall = 0.6434`
+  - step `120`: `pass_at_1 = 0.5738`, `mean_pass_rate = 0.5485`, `mean_R_code = 0.5818`, `best_pass_rate_overall = 0.6995`
+  - step `180`: `pass_at_1 = 0.5738`, `mean_pass_rate = 0.5587`, `mean_R_code = 0.5929`, `best_pass_rate_overall = 0.6803`
+  - step `240`: `pass_at_1 = 0.4590`, `mean_pass_rate = 0.5432`, `mean_R_code = 0.5798`, `best_pass_rate_overall = 0.7158`
+
+Interpretation:
+
+- enlarging the run increases soft-reward participation and reduces the chance that the result is dominated by trivial sampling noise
+- however, the current signal shape is mixed:
+  - greedy `pass_at_1` improves from step 60 to 120/180, then drops sharply by step 240
+  - `best_pass_rate_overall` continues to improve and reaches its best value at step 240
+- this pattern is more consistent with "soft reward improves candidate ranking / best-of-K search quality" than with "soft reward steadily improves single-sample greedy correctness"
+- the run does not currently justify training to the end of 240 steps; based on online eval, step 120 to 180 looks healthier than step 240
+- the next clean comparison should use the same `61`-example eval scale for raw base and any pure-GRPO medium baseline
