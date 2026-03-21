@@ -783,6 +783,11 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _base_question_id(example: dict[str, Any]) -> str:
         return str(example.get("base_question_id") or example.get("question_id", "unknown"))
 
+    def _attach_rollout_source_metadata(self, example: dict[str, Any], rollout):
+        rollout.source_kind = str(example.get("source_kind", "original_problem"))
+        rollout.base_question_id = self._base_question_id(example)
+        return rollout
+
     @staticmethod
     def _code_novelty_scores(nodes: list[dict[str, Any]]) -> list[float]:
         codes = [str(node.get("code_text", "") or "") for node in nodes]
