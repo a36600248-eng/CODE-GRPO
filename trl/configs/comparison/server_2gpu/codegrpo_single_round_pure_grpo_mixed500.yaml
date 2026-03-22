@@ -1,4 +1,4 @@
-﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_pure_grpo_server_2gpu_mixed500
+output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_pure_grpo_server_2gpu_mixed500
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-PURE-GRPO-SERVER-2GPU-MIXED500
 logging_steps: 5
