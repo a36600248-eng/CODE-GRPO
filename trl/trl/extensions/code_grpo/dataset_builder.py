@@ -167,11 +167,11 @@ def _normalize_test_case_io(value: Any) -> str | None:
     return None
 
 
-def _normalize_optional_string(value: Any) -> str | None:
+def _normalize_optional_string(value: Any) -> str:
     if value is None:
-        return None
+        return ""
     text = str(value).strip()
-    return text if text else None
+    return text
 
 
 def _extract_tests_from_mapping(mapping: dict[str, Any]) -> list[dict[str, str]]:

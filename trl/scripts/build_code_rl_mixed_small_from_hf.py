@@ -41,7 +41,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     work_dir = args.work_dir
     raw_dir = work_dir / "raw_sources"
-    output_dir = work_dir / "code_rl_mixed_small"
+    normalize_dir = work_dir / "stage_normalize"
+    validate_dir = work_dir / "stage_validate"
+    output_dir = work_dir / f"code_rl_mixed_small_{args.target_total}"
     cache_dir = args.cache_dir or (work_dir / "hf_cache")
     apps_count = _resolve_download_count(args.apps_count, args.apps_target, args.buffer_factor, minimum_count=120)
     codecontests_count = _resolve_download_count(
@@ -85,16 +87,57 @@ def main(argv: Optional[list[str]] = None) -> int:
             str(taco_count),
         ]
     )
-    print("[build] download stage complete; starting normalization/build")
+    print("[build] download stage complete; starting staged build")
 
     build_main(
         [
+            "normalize",
             "--apps-path",
             str(raw_dir / "apps_raw.jsonl"),
             "--codecontests-path",
             str(raw_dir / "codecontests_raw.jsonl"),
             "--taco-path",
             str(raw_dir / "taco_raw.jsonl"),
+            "--output-dir",
+            str(normalize_dir),
+            "--split-seed",
+            str(args.seed),
+            "--apps-input-limit",
+            str(apps_existing if apps_existing > 0 else apps_count),
+            "--codecontests-input-limit",
+            str(codecontests_existing if codecontests_existing > 0 else codecontests_count),
+            "--taco-input-limit",
+            str(taco_existing if taco_existing > 0 else taco_count),
+        ]
+    )
+    print("[build] normalize stage complete; starting validation")
+
+    build_main(
+        [
+            "validate",
+            "--pool",
+            str(normalize_dir / "deduped_pool.jsonl"),
+            "--output-dir",
+            str(validate_dir),
+            "--batch-size",
+            "10",
+            "--resume",
+            "--apps-target",
+            str(args.apps_target),
+            "--codecontests-target",
+            str(args.codecontests_target),
+            "--taco-target",
+            str(args.taco_target),
+            "--stop-when-targets-met",
+        ]
+    )
+    print("[build] validation stage complete; starting finalize")
+
+    build_main(
+        [
+            "finalize",
+            "--validated-dir",
+            str(validate_dir),
             "--output-dir",
             str(output_dir),
             "--split-seed",

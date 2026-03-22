@@ -27,6 +27,24 @@ from .dataset_builder import (
 
 SOURCE_ORDER = ("apps", "codecontests", "taco", "codeforces")
 
+EXPECTED_STRING_FIELDS = (
+    "question_id",
+    "prompt",
+    "reference_solution",
+    "source",
+    "io_mode",
+    "source_problem_id",
+    "difficulty",
+    "source_url",
+    "source_prompt",
+)
+EXPECTED_INT_FIELDS = (
+    "source_test_count",
+    "prompt_token_estimate",
+    "reference_exec_ok_count",
+)
+EXPECTED_FLOATLIKE_FIELDS = ("reference_pass_rate",)
+
 
 def _append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
@@ -61,6 +79,31 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     tmp_path.replace(path)
+
+
+def _validate_dataset_rows(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        question_id = str(row.get("question_id", "unknown"))
+        for field_name in EXPECTED_STRING_FIELDS:
+            value = row.get(field_name)
+            if not isinstance(value, str):
+                raise ValueError(f"{question_id}: field '{field_name}' must be str, got {type(value).__name__}")
+        for field_name in EXPECTED_INT_FIELDS:
+            value = row.get(field_name)
+            if not isinstance(value, int):
+                raise ValueError(f"{question_id}: field '{field_name}' must be int, got {type(value).__name__}")
+        for field_name in EXPECTED_FLOATLIKE_FIELDS:
+            value = row.get(field_name)
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"{question_id}: field '{field_name}' must be numeric, got {type(value).__name__}")
+        test_cases = row.get("test_cases")
+        if not isinstance(test_cases, list) or len(test_cases) < 1:
+            raise ValueError(f"{question_id}: field 'test_cases' must be a non-empty list")
+        for case in test_cases:
+            if not isinstance(case, dict):
+                raise ValueError(f"{question_id}: each test case must be an object")
+            if not isinstance(case.get("input"), str) or not isinstance(case.get("output"), str):
+                raise ValueError(f"{question_id}: test case input/output must be str")
 
 
 def _normalize_static_filter(
@@ -382,6 +425,7 @@ def finalize_stage(*, validated_dir: Path, output_dir: Path, split_seed: int, ta
         rng.shuffle(selected)
         selected = selected[:target_total]
     selected.sort(key=lambda row: (str(row["source"]), str(row["question_id"])))
+    _validate_dataset_rows(selected)
     split_payload = _split_rows(selected, split_seed=split_seed, train_size=min(split_sizes[0], len(selected)), validation_size=min(split_sizes[1], max(0, len(selected) - split_sizes[0])), test_size=min(split_sizes[2], max(0, len(selected) - split_sizes[0] - split_sizes[1])))
     _write_jsonl(output_dir / "merged.jsonl", selected)
     _write_jsonl(output_dir / "train.jsonl", split_payload["train"])

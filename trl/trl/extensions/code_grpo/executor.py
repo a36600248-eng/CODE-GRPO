@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import multiprocessing as mp
+import queue
 import subprocess
 import sys
 import traceback
@@ -20,7 +21,7 @@ import traceback
 
 
 def _exec_call_mode(compiled, case_input):
-    scope = {}
+    scope = {"__name__": "__main__"}
     exec(compiled, scope, scope)
     if callable(scope.get("solve")):
         return scope["solve"](case_input)
@@ -84,7 +85,7 @@ def _validate_io_mode(io_mode: str) -> str:
 
 
 def _exec_call_mode(compiled, case_input: Any) -> Any:
-    scope: dict[str, Any] = {}
+    scope: dict[str, Any] = {"__name__": "__main__"}
     exec(compiled, scope, scope)
     if callable(scope.get("solve")):
         return scope["solve"](case_input)
@@ -110,6 +111,13 @@ def _exec_stdio_mode(compiled, case_input: Any) -> str:
     finally:
         sys.stdin = old_stdin
         sys.stdout = old_stdout
+
+
+def _read_queue_payload(q: Any, timeout_s: float) -> Any | None:
+    try:
+        return q.get(timeout=max(1.0, timeout_s))
+    except queue.Empty:
+        return None
 
 
 def _exec_worker(
@@ -170,7 +178,8 @@ def execute(
             error_msg=summarize_error("Execution timed out.", error_max_chars, error_max_lines),
         )
 
-    if queue.empty():
+    payload = _read_queue_payload(queue, timeout_s)
+    if payload is None:
         return ExecResult(
             kind="RUNTIME_ERROR",
             value=None,
@@ -178,7 +187,7 @@ def execute(
             error_msg=summarize_error("Execution failed without traceback.", error_max_chars, error_max_lines),
         )
 
-    kind, value, error_type, raw_error = queue.get()
+    kind, value, error_type, raw_error = payload
     if kind == "OK":
         return ExecResult(kind="OK", value=value, error_type=None, error_msg=None)
     return ExecResult(
@@ -318,7 +327,8 @@ def execute_batch(
             ExecResult(kind="TIMEOUT", value=None, error_type="Timeout", error_msg=timeout_error) for _ in case_inputs
         ]
 
-    if queue.empty():
+    raw_results = _read_queue_payload(queue, timeout_s)
+    if raw_results is None:
         unknown_error = summarize_error("Execution failed without traceback.", error_max_chars, error_max_lines)
         return [
             ExecResult(
@@ -330,7 +340,6 @@ def execute_batch(
             for _ in case_inputs
         ]
 
-    raw_results = queue.get()
     if len(raw_results) < len(case_inputs):
         raw_results.extend(
             [("RUNTIME_ERROR", None, "UnknownRuntimeError", "Missing execution result.")] * (len(case_inputs) - len(raw_results))
