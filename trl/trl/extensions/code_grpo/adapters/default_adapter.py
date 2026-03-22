@@ -38,10 +38,14 @@ class DefaultCodeDatasetAdapter(DatasetAdapter):
 
         test_cases_source = example.get("test_cases", example.get("tests"))
         test_cases = _to_test_cases(test_cases_source, example)
+        io_mode = str(example.get("io_mode", "call") or "call").strip().lower()
+        if io_mode not in {"call", "stdio"}:
+            raise ValueError(f"Example {question_id} has unsupported io_mode: {io_mode}")
 
         return {
             **example,
             "question_id": question_id,
             "prompt": prompt,
             "test_cases": test_cases,
+            "io_mode": io_mode,
         }

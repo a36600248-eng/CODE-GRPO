@@ -10,6 +10,10 @@ def _normalize_ws(text: str) -> str:
     return " ".join(text.strip().split())
 
 
+def stripped_text_equal(lhs: Any, rhs: Any) -> bool:
+    return str(lhs).strip() == str(rhs).strip()
+
+
 def _normalize_error_type(text: str | None) -> str:
     if not text:
         return ""
@@ -62,4 +66,3 @@ def is_match(pred: str, actual: ExecResult) -> bool:
 
     parsed_pred = _try_parse_literal(pred)
     return values_equal(parsed_pred, actual.value)
-

@@ -694,7 +694,7 @@ class CodeGRPOTrainer(GRPOTrainer):
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
-            self._signature_columns = ["question_id", "prompt", "test_cases"]
+            self._signature_columns = ["question_id", "prompt", "test_cases", "io_mode"]
 
     def _get_train_sampler(self, dataset=None):
         """CodeGRPO sampler: repeat each prompt only within the current rollout group.

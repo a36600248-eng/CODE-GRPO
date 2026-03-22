@@ -5,7 +5,7 @@ from typing import Any
 
 from .error_utils import summarize_error
 from .executor import execute_batch
-from .matcher import values_equal
+from .matcher import stripped_text_equal, values_equal
 from .parser import build_generation_completion, build_token_masks, parse_generation_response
 from .prompts import build_code_io_training_prompt, build_generation_prompt, summarize_generation_history
 from .soft_reward import (
@@ -269,6 +269,7 @@ class CodeGRPOTreeRunner:
         question_id = str(sample["question_id"])
         prompt = str(sample["prompt"])
         test_cases = list(sample["test_cases"])
+        io_mode = str(sample.get("io_mode", "call") or "call").strip().lower()
 
         root = Node(node_id="root", parent_id=None, round_idx=0, code=None, exec_summary={"history": []})
         siblings, produced, resampled, _node_serial, undiff_triggered, undiff_succeeded = self._expand_parent(
@@ -276,6 +277,7 @@ class CodeGRPOTreeRunner:
             parent=root,
             prompt=prompt,
             test_cases=test_cases,
+            io_mode=io_mode,
             round_idx=1,
             node_serial=0,
             budget=min(int(self.args.N_max), int(self.args.K)),
@@ -368,6 +370,7 @@ class CodeGRPOTreeRunner:
         parent: Node,
         prompt: str,
         test_cases: list[dict[str, Any]],
+        io_mode: str,
         round_idx: int,
         node_serial: int,
         budget: int,
@@ -411,6 +414,7 @@ class CodeGRPOTreeRunner:
                         parent=parent,
                         prompt=prompt,
                         test_cases=test_cases,
+                        io_mode=io_mode,
                         round_idx=round_idx,
                         prompt_text_override=rendered_prompt_text,
                         prompt_text_raw_override=prompt_text,
@@ -445,6 +449,7 @@ class CodeGRPOTreeRunner:
                     parent=parent,
                     prompt=prompt,
                     test_cases=test_cases,
+                    io_mode=io_mode,
                     round_idx=round_idx,
                     prompt_text_override=rendered_prompt_text,
                     prompt_text_raw_override=prompt_text,
@@ -464,6 +469,7 @@ class CodeGRPOTreeRunner:
         parent: Node,
         prompt: str,
         test_cases: list[dict[str, Any]],
+        io_mode: str,
         round_idx: int,
         prompt_text_override: str | None = None,
         prompt_text_raw_override: str | None = None,
@@ -513,15 +519,19 @@ class CodeGRPOTreeRunner:
         token_ids, _, _ = build_token_masks(self.tokenizer, completion_text)
         code_mask = [1] * len(token_ids)
 
-        case_inputs = [_parse_case_input(case["input"]) for case in test_cases]
+        case_inputs = [str(case["input"]) if io_mode == "stdio" else _parse_case_input(case["input"]) for case in test_cases]
         exec_results = execute_batch(
             code=code,
             case_inputs=case_inputs,
             timeout_s=self.args.code_timeout_seconds,
             error_max_chars=self.args.error_max_chars,
             error_max_lines=self.args.error_max_lines,
+            io_mode=io_mode,
         )
-        pass_flags = [self._is_test_pass(case["output"], actual) for case, actual in zip(test_cases, exec_results, strict=True)]
+        pass_flags = [
+            self._is_test_pass(case["output"], actual, io_mode=io_mode)
+            for case, actual in zip(test_cases, exec_results, strict=True)
+        ]
         pass_cnt = int(sum(1 for ok in pass_flags if ok))
         test_count = len(test_cases)
         pass_rate = _mean([1.0 if ok else 0.0 for ok in pass_flags])
@@ -545,7 +555,7 @@ class CodeGRPOTreeRunner:
         soft_reward_beta = 0.0
         soft_reward_details: list[dict[str, Any]] = []
         if zero_pass_triggered:
-            problem_payload = {"prompt": prompt, "test_cases": test_cases}
+            problem_payload = {"prompt": prompt, "test_cases": test_cases, "io_mode": io_mode}
             diag_count = int(getattr(self.args, "zero_pass_soft_reward_diag_count", 0) or 0)
             diagnostic_inputs = build_diagnostic_inputs(problem_payload, max_count=diag_count)
             oracle_outputs = get_oracle_outputs(problem_payload, diagnostic_inputs)
@@ -705,9 +715,11 @@ class CodeGRPOTreeRunner:
                 node.A_code = val - mean_code
             else:
                 node.A_code = (val - mean_code) / (std_code + eps)
-    def _is_test_pass(self, expected_output: Any, actual: ExecResult) -> bool:
+    def _is_test_pass(self, expected_output: Any, actual: ExecResult, io_mode: str = "call") -> bool:
         if actual.kind != "OK":
             return False
+        if io_mode == "stdio":
+            return stripped_text_equal(expected_output, actual.value)
         return values_equal(expected_output, actual.value)
 
     def _compute_eval_metrics(self, rounds: list[dict[str, Any]]) -> dict[str, float]:
