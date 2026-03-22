@@ -148,6 +148,8 @@ class VLLMClient:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+        self.connect_timeout = 10.0
+        self.server_timeout = float(connection_timeout) if connection_timeout and connection_timeout > 0 else 240.0
 
         if base_url is not None:
             # Parse the base_url to extract host and port
@@ -161,6 +163,12 @@ class VLLMClient:
             self.base_url = f"http://{self.host}:{self.server_port}"
         self.group_port = group_port
         self.check_server(connection_timeout)  # check server and fail after timeout
+
+    def _request_timeout(self) -> tuple[float, float]:
+        return (self.connect_timeout, self.server_timeout)
+
+    def _healthcheck_timeout(self) -> tuple[float, float]:
+        return (min(self.connect_timeout, 2.0), min(self.server_timeout, 5.0))
 
     def check_server(self, total_timeout: float = 0.0, retry_interval: float = 2.0):
         """
@@ -178,7 +186,7 @@ class VLLMClient:
 
         while True:
             try:
-                response = requests.get(url)
+                response = requests.get(url, timeout=self._healthcheck_timeout())
             except requests.exceptions.RequestException as exc:
                 # Check if the total timeout duration has passed
                 elapsed_time = time.time() - start_time
@@ -288,7 +296,7 @@ class VLLMClient:
         if truncate_prompt_tokens is not None:
             payload["truncate_prompt_tokens"] = truncate_prompt_tokens
 
-        response = self.session.post(url, json=payload)
+        response = self.session.post(url, json=payload, timeout=self._request_timeout())
         if response.status_code == 200:
             json_response = response.json()
             return {
@@ -409,7 +417,7 @@ class VLLMClient:
         if truncate_prompt_tokens is not None:
             payload["truncate_prompt_tokens"] = truncate_prompt_tokens
 
-        response = self.session.post(url, json=payload)
+        response = self.session.post(url, json=payload, timeout=self._request_timeout())
         if response.status_code == 200:
             json_response = response.json()
             return {
@@ -432,7 +440,7 @@ class VLLMClient:
         """
         # Get the world size from the server
         url = f"{self.base_url}/get_world_size/"
-        response = requests.get(url)
+        response = requests.get(url, timeout=self._request_timeout())
         if response.status_code == 200:
             vllm_world_size = response.json()["world_size"]
         else:
@@ -472,6 +480,7 @@ class VLLMClient:
                 "world_size": world_size,
                 "client_device_uuid": client_device_uuid,
             },
+            timeout=self._request_timeout(),
         )
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
@@ -550,7 +559,7 @@ class VLLMClient:
         """
         dtype, shape = str(weights.dtype), tuple(weights.shape)
         url = f"{self.base_url}/update_named_param/"
-        response = self.session.post(url, json={"name": name, "dtype": dtype, "shape": shape})
+        response = self.session.post(url, json={"name": name, "dtype": dtype, "shape": shape}, timeout=self._request_timeout())
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
@@ -580,7 +589,7 @@ class VLLMClient:
         Resets the prefix cache for the model.
         """
         url = f"{self.base_url}/reset_prefix_cache/"
-        response = self.session.post(url)
+        response = self.session.post(url, timeout=self._request_timeout())
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
@@ -591,8 +600,8 @@ class VLLMClient:
         url = f"{self.base_url}/close_communicator/"
 
         try:
-            response = self.session.post(url)
-        except ConnectionError:
+            response = self.session.post(url, timeout=self._request_timeout())
+        except requests.exceptions.RequestException:
             # The server might be already down, so we don't need to close the communicator
             pass
         else:

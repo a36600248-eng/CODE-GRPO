@@ -115,6 +115,7 @@ start_server() {
     --port "${port}" \
     --tensor_parallel_size 1 \
     --data_parallel_size 1 \
+    --max_model_len 4096 \
     --gpu_memory_utilization 0.85 \
     > "${server_log}" 2>&1 &
   SERVER_PID=$!
