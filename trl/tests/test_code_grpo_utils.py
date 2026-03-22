@@ -33,6 +33,13 @@ def test_parse_generation_response_requires_single_block_for_format_ok():
     assert not format_ok
 
 
+def test_parse_generation_response_recovers_incomplete_fenced_block():
+    text = "```python\nprint('x')\n"
+    code, _, _, _, format_ok = parse_generation_response(text)
+    assert code == "print('x')"
+    assert not format_ok
+
+
 def test_build_generation_completion_contains_fence():
     completion = build_generation_completion("a=1")
     assert completion.startswith("```python")

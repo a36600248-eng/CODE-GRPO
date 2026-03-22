@@ -4,6 +4,7 @@ import re
 CODE_PATTERN = re.compile(r"<CODE>\s*(.*?)\s*</CODE>", re.DOTALL | re.IGNORECASE)
 FENCED_CODE_BLOCK_PATTERN = re.compile(r"^\s*```(?:python)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 FENCED_CODE_FINDALL_PATTERN = re.compile(r"```(?:python)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+FENCED_CODE_OPEN_PATTERN = re.compile(r"^\s*```(?:python)?\s*\n?", re.IGNORECASE)
 REASON_PATTERN = re.compile(r"<REASON>\s*(.*?)\s*</REASON>", re.DOTALL | re.IGNORECASE)
 
 
@@ -29,6 +30,10 @@ def _extract_last_code_block(text: str) -> tuple[str, list[tuple[int, int]], boo
     if fenced_matches:
         match = fenced_matches[-1]
         return match.group(1).strip(), [match.span()], len(fenced_matches) == 1
+    if FENCED_CODE_OPEN_PATTERN.match(text):
+        stripped = FENCED_CODE_OPEN_PATTERN.sub("", text, count=1)
+        stripped = re.sub(r"\s*```+\s*$", "", stripped).strip()
+        return stripped, [], False
     tag_matches = list(CODE_PATTERN.finditer(text))
     if tag_matches:
         match = tag_matches[-1]
