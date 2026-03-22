@@ -167,6 +167,13 @@ def _normalize_test_case_io(value: Any) -> str | None:
     return None
 
 
+def _normalize_optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
 def _extract_tests_from_mapping(mapping: dict[str, Any]) -> list[dict[str, str]]:
     inputs = mapping.get("inputs", mapping.get("input", mapping.get("stdin")))
     outputs = mapping.get("outputs", mapping.get("output", mapping.get("stdout")))
@@ -302,8 +309,8 @@ def _extract_apps_like_problem(source: str, example: dict[str, Any], index: int,
         "source": source,
         "io_mode": "stdio",
         "source_problem_id": str(source_problem_id),
-        "difficulty": example.get("difficulty"),
-        "source_url": example.get("url"),
+        "difficulty": _normalize_optional_string(example.get("difficulty")),
+        "source_url": _normalize_optional_string(example.get("url")),
         "source_prompt": prompt.strip(),
     }
     return row, None
@@ -333,8 +340,8 @@ def _extract_codecontests_problem(example: dict[str, Any], index: int, max_tests
         "source": "codecontests",
         "io_mode": "stdio",
         "source_problem_id": str(source_problem_id),
-        "difficulty": example.get("difficulty"),
-        "source_url": example.get("url"),
+        "difficulty": _normalize_optional_string(example.get("difficulty")),
+        "source_url": _normalize_optional_string(example.get("url")),
         "source_prompt": prompt.strip(),
     }
     return row, None
