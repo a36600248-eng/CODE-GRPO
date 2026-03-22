@@ -215,6 +215,7 @@ class TextMetricsCallback(TrainerCallback):
     def __init__(self, text_path: str | None, jsonl_path: str):
         self.text_path = text_path
         self.jsonl_path = jsonl_path
+        self._train_started_at_ts: float | None = None
         target_dir = os.path.dirname(self.text_path) if self.text_path else os.path.dirname(self.jsonl_path)
         os.makedirs(target_dir, exist_ok=True)
 
@@ -232,8 +233,47 @@ class TextMetricsCallback(TrainerCallback):
         with open(self.jsonl_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(_json_safe(payload), ensure_ascii=False) + "\n")
 
+    @staticmethod
+    def _format_duration(seconds: float | None) -> str:
+        if seconds is None:
+            return "unknown"
+        total_seconds = max(0, int(seconds))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _progress_line(self, *, state, args, logs: dict[str, Any]) -> str | None:
+        if self._train_started_at_ts is None:
+            return None
+        current_step = int(state.global_step)
+        max_steps = int(getattr(state, "max_steps", 0) or getattr(args, "max_steps", 0) or 0)
+        elapsed_seconds = time.time() - self._train_started_at_ts
+        if current_step <= 0:
+            avg_step_seconds = None
+            eta_seconds = None
+        else:
+            avg_step_seconds = elapsed_seconds / current_step
+            remaining_steps = max(0, max_steps - current_step) if max_steps > 0 else 0
+            eta_seconds = avg_step_seconds * remaining_steps if max_steps > 0 else None
+        if "loss" in logs:
+            total_fragment = str(max_steps) if max_steps > 0 else "?"
+            return (
+                f"[progress] train step {current_step}/{total_fragment} | "
+                f"elapsed={self._format_duration(elapsed_seconds)} | "
+                f"avg_step={self._format_duration(avg_step_seconds)} | "
+                f"eta={self._format_duration(eta_seconds)}"
+            )
+        if any(str(key).startswith("eval_") for key in logs.keys()):
+            total_fragment = str(max_steps) if max_steps > 0 else "?"
+            return (
+                f"[progress] eval checkpoint at step {current_step}/{total_fragment} | "
+                f"elapsed={self._format_duration(elapsed_seconds)}"
+            )
+        return None
+
     def on_train_begin(self, args, state, control, **kwargs):
         del args, control, kwargs
+        self._train_started_at_ts = time.time()
         self._append_text(f"[{self._now()}] TRAIN_BEGIN step={state.global_step}")
 
     def on_train_end(self, args, state, control, **kwargs):
@@ -252,6 +292,9 @@ class TextMetricsCallback(TrainerCallback):
         }
         self._append_json(payload)
         self._append_text(f"[{payload['time']}] LOG step={payload['step']} epoch={payload['epoch']} logs={payload['logs']}")
+        progress_line = self._progress_line(state=state, args=args, logs=logs)
+        if progress_line:
+            logger.info(progress_line)
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         del args, control, kwargs
