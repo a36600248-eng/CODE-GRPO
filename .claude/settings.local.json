@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(python -m py_compile trl/trl/trainer/code_grpo_config.py)",
-      "Bash(python -m py_compile trl/trl/trainer/code_grpo_trainer.py)"
+      "Bash(python -m py_compile trl/trl/trainer/code_grpo_trainer.py)",
+      "Bash(find d:MY-GRPOtrldatacode_rl_mixed_small_hf_local -type f -name *.json -o -name *.jsonl -o -name *.md)",
+      "Bash(python3 -m json.tool)",
+      "Bash(find d:MY-GRPO -name *experiment* -type f)"
     ]
   }
 }

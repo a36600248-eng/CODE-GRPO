@@ -1,4 +1,4 @@
-﻿# MBPP Small Experiment Log
+# MBPP Small Experiment Log
 
 ## Reset Notice
 
@@ -161,3 +161,118 @@ Interpretation:
 - this pattern is more consistent with "soft reward improves candidate ranking / best-of-K search quality" than with "soft reward steadily improves single-sample greedy correctness"
 - the run does not currently justify training to the end of 240 steps; based on online eval, step 120 to 180 looks healthier than step 240
 - the next clean comparison should use the same `61`-example eval scale for raw base and any pure-GRPO medium baseline
+
+## 2026-03-22 Soft-Only Medium Standalone Eval (Seed 42)
+
+Run:
+
+- eval run ids:
+  - `20260322_000656__test__train_out__json-mbpp_sanitized_codegrpo___hf`
+  - `20260322_010924__test__train_out__json-mbpp_sanitized_codegrpo___hf`
+- local review bundles:
+  - `D:\BroswerDownload\20260322_000656__test__train_out__json-mbpp_sanitized_codegrpo___hf\review_bundle`
+  - `D:\BroswerDownload\20260322_010924__test__train_out__json-mbpp_sanitized_codegrpo___hf\review_bundle`
+- source adapter: `runs_single_round_soft_grpo_medium_seed42/train/20260321_231904__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm/train_out`
+- eval backend note: standalone adapter eval fell back from vLLM server mode to HF backend by design
+- config family: `codegrpo_single_round_zero_pass_soft_reward_mbpp_medium.yaml`
+
+Important results:
+
+- `eval_pass_at_1 = 0.4754`
+- `eval_best_pass_rate_overall = 0.5068`
+- `eval_mean_pass_rate = 0.5068`
+- `eval_mean_R_code = 0.5455`
+- `eval_generation_format_ok_rate = 0.7869`
+- `eval_zero_pass_soft_trigger_rate = 0.4426`
+- `eval_soft_lift = 0.0387`
+- `rollout_row_count = 61`
+
+Interpretation:
+
+- the two standalone eval bundles are effectively duplicate reruns of the same soft-medium adapter; they are not pure-GRPO medium results
+- compared with the soft-medium online eval checkpoints from the train run, the standalone readout is materially worse:
+  - online best region (`step 120` to `180`) had `pass_at_1 ~= 0.5738`
+  - standalone post-train eval drops to `0.4754`
+- this means the current soft-medium run does not hold up well as a final post-train checkpoint, even though its mid-training online eval looked better
+- the current medium-scale conclusion is therefore: soft reward helps training-time ranking / best-of-K behavior more than it helps the final standalone greedy checkpoint
+- a true `pure GRPO medium` standalone bundle is still missing from the local archive and should not be inferred from these two soft-medium eval runs
+
+
+## 2026-03-22 Pure GRPO Medium Standalone Eval (Seed 42, Corrected)
+
+Run:
+
+- eval run id: `20260322_005617__test__train_out__json-mbpp_sanitized_codegrpo___hf`
+- local review bundle: `D:\BroswerDownload\20260322_005617__test__train_out__json-mbpp_sanitized_codegrpo___hf\review_bundle`
+- source adapter: `runs_single_round_pure_grpo_medium_seed42/train/20260322_001802__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm/train_out`
+- eval backend note: standalone adapter eval fell back from vLLM server mode to HF backend by design
+- config family: `codegrpo_single_round_pure_grpo_mbpp_medium.yaml`
+
+Important results:
+
+- `eval_pass_at_1 = 0.4754`
+- `eval_best_pass_rate_overall = 0.5068`
+- `eval_mean_pass_rate = 0.5068`
+- `eval_mean_R_code = 0.5455`
+- `eval_generation_format_ok_rate = 0.7869`
+- `eval_zero_pass_soft_trigger_rate = 0.4426`
+- `eval_soft_lift = 0.0386`
+- `rollout_row_count = 61`
+
+Final medium-scale comparison:
+
+- `raw base` full eval (`61` examples):
+  - `pass_at_1 = 0.4918`
+  - `mean_pass_rate = 0.5178`
+  - `best_pass_rate_overall = 0.5178`
+- `pure medium` standalone:
+  - `pass_at_1 = 0.4754`
+  - `mean_pass_rate = 0.5068`
+  - `best_pass_rate_overall = 0.5068`
+- `soft medium` standalone:
+  - `pass_at_1 = 0.4754`
+  - `mean_pass_rate = 0.5068`
+  - `best_pass_rate_overall = 0.5068`
+
+Interpretation:
+
+- on the final standalone checkpoint comparison, `soft medium` and `pure medium` are effectively tied
+- both are slightly below the raw base model on this `61`-example eval slice
+- therefore the current evidence supports a narrow but important conclusion:
+  - in this setup, soft reward clearly affects training-time ranking behavior, but that advantage does not survive into a better final standalone greedy checkpoint
+  - removing soft reward also does not fix the problem; pure medium ends up in essentially the same place
+- the practical reading is that the main bottleneck is no longer "does soft reward participate" but "why do train-time gains fail to translate into final standalone checkpoint gains"
+
+## 2026-03-22 Pure GRPO Medium Train Run (Seed 42)
+
+Run:
+
+- train run id: `20260322_001802__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm`
+- local review bundle: `D:\BroswerDownload\20260322_001802__train__qwen2.5-coder-7b-instruct__json-mbpp_sanitized_codegrpo___vllm\review_bundle`
+- config family: `codegrpo_single_round_pure_grpo_mbpp_medium.yaml`
+- training mode: single-round, soft reward off, aux SFT off, pseudo-multiround off, question prior off
+
+Important results:
+
+- training coverage remains healthy: `240` train rollout rows cover `240` unique questions
+- train averages across rollout rows:
+  - `mean_pass_rate ~= 0.5484`
+  - `mean zero_pass_soft_trigger_rate = 0.0`
+  - `95 / 240` train rollout rows were all-pass
+  - `66 / 240` train rollout rows were all-zero-pass
+- train last step:
+  - `mean_pass_rate = 0.3500`
+  - `mean_R_code = 0.3500`
+  - `advantage/code_zero_rate = 0.8`
+- online eval trajectory:
+  - step `60`: `pass_at_1 = 0.4754`, `mean_pass_rate = 0.5292`, `mean_R_code = 0.5381`, `best_pass_rate_overall = 0.6831`
+  - step `120`: `pass_at_1 = 0.4590`, `mean_pass_rate = 0.5437`, `mean_R_code = 0.5528`, `best_pass_rate_overall = 0.6544`
+  - step `180`: `pass_at_1 = 0.5082`, `mean_pass_rate = 0.5427`, `mean_R_code = 0.5518`, `best_pass_rate_overall = 0.6557`
+  - step `240`: `pass_at_1 = 0.5410`, `mean_pass_rate = 0.5492`, `mean_R_code = 0.5601`, `best_pass_rate_overall = 0.6585`
+
+Interpretation:
+
+- compared with soft-medium training, pure-medium is more stable late in training on greedy `pass_at_1`
+- soft-medium has stronger best-of-K style behavior during training (`best_pass_rate_overall` is consistently higher and peaks at `0.7158`), while pure-medium finishes with a stronger final online `pass_at_1` (`0.5410` vs `0.4590`)
+- however, both runs lose that apparent online advantage when converted to standalone post-train eval, and both end near `pass_at_1 = 0.4754`
+- this suggests the current gap is not simply "soft vs no-soft"; the bigger issue is the mismatch between online training-time eval and final standalone checkpoint quality
