@@ -103,7 +103,7 @@ start_server() {
     --tensor_parallel_size 1 \
     --data_parallel_size 1 \
     --max_model_len 4096 \
-    --gpu_memory_utilization 0.75 \
+    --gpu_memory_utilization 0.92 \
     > "${server_log}" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 120); do
