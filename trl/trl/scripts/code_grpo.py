@@ -282,7 +282,7 @@ class TextMetricsCallback(TrainerCallback):
         self._append_text(f"[{self._now()}] TRAIN_END step={state.global_step}")
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        del args, control, kwargs
+        del control, kwargs
         if not logs:
             return
         payload = {
