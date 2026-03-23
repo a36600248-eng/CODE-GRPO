@@ -1,4 +1,4 @@
-output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_pure_grpo_server_2gpu_mixed500
+﻿output_dir: /root/autodl-tmp/CODE-GRPO/trl/runs_pure_grpo_server_2gpu_mixed500
 report_to: tensorboard
 tensorboard_root_dir: /root/tf-logs/CODE-GRPO-PURE-GRPO-SERVER-2GPU-MIXED500
 logging_steps: 5
@@ -21,7 +21,7 @@ fp16: false
 model_name_or_path: /root/autodl-tmp/models/Qwen2.5-Coder-7B-Instruct
 load_in_4bit: false
 use_peft: true
-lora_r: 16
+lora_r: 32
 lora_alpha: 32
 lora_dropout: 0.05
 
