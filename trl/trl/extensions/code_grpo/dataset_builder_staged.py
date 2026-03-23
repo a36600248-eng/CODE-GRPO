@@ -40,6 +40,8 @@ EXPECTED_STRING_FIELDS = (
 )
 EXPECTED_INT_FIELDS = (
     "source_test_count",
+    "selected_test_count",
+    "oversized_test_count",
     "prompt_token_estimate",
     "reference_exec_ok_count",
 )
@@ -104,6 +106,10 @@ def _validate_dataset_rows(rows: list[dict[str, Any]]) -> None:
                 raise ValueError(f"{question_id}: each test case must be an object")
             if not isinstance(case.get("input"), str) or not isinstance(case.get("output"), str):
                 raise ValueError(f"{question_id}: test case input/output must be str")
+        for field_name in ("diagnostic_inputs", "diagnostic_outputs"):
+            value = row.get(field_name, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ValueError(f"{question_id}: field '{field_name}' must be list[str]")
 
 
 def _normalize_static_filter(
@@ -112,11 +118,22 @@ def _normalize_static_filter(
     example: dict[str, Any],
     index: int,
     max_tests: int,
+    max_diagnostic_cases: int,
+    max_case_input_chars: int,
+    max_case_output_chars: int,
     max_prompt_tokens: int,
     min_tests: int,
 ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     example_id = example.get("id", example.get("problem_id", example.get("name", index)))
-    normalized, reason = normalize_source_record(source, example, index=index, max_tests=max_tests)
+    normalized, reason = normalize_source_record(
+        source,
+        example,
+        index=index,
+        max_tests=max_tests,
+        max_case_input_chars=max_case_input_chars,
+        max_case_output_chars=max_case_output_chars,
+        max_diagnostic_cases=max_diagnostic_cases,
+    )
     if normalized is None:
         return None, {"source": source, "example_id": str(example_id), "reason": reason or "normalize_failed"}
     prompt = str(normalized["prompt"])
@@ -130,7 +147,6 @@ def _normalize_static_filter(
         return None, {"source": source, "example_id": str(example_id), "reason": "too_few_tests"}
     if _uses_disallowed_imports(str(normalized["reference_solution"])):
         return None, {"source": source, "example_id": str(example_id), "reason": "disallowed_imports"}
-    normalized["source_test_count"] = len(normalized["test_cases"])
     normalized["prompt_token_estimate"] = _approx_token_count(prompt)
     return normalized, None
 
@@ -145,6 +161,9 @@ def normalize_stage(
     max_prompt_tokens: int,
     min_tests: int,
     max_tests_per_problem: int,
+    max_diagnostic_cases_per_problem: int,
+    max_case_input_chars: int,
+    max_case_output_chars: int,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rejects: list[dict[str, Any]] = []
@@ -175,6 +194,9 @@ def normalize_stage(
                 example=example,
                 index=index,
                 max_tests=max_tests_per_problem,
+                max_diagnostic_cases=max_diagnostic_cases_per_problem,
+                max_case_input_chars=max_case_input_chars,
+                max_case_output_chars=max_case_output_chars,
                 max_prompt_tokens=max_prompt_tokens,
                 min_tests=min_tests,
             )
@@ -225,6 +247,12 @@ def normalize_stage(
         "reject_counts": dict(reject_counts),
         "duplicate_removal_counts": dict(duplicate_counts),
         "cross_source_near_hits": cross_source_near_hits[:200],
+        "train_test_filtering": {
+            "max_tests_per_problem": max_tests_per_problem,
+            "max_diagnostic_cases_per_problem": max_diagnostic_cases_per_problem,
+            "max_case_input_chars": max_case_input_chars,
+            "max_case_output_chars": max_case_output_chars,
+        },
     }
     _write_json(output_dir / "normalize_summary.json", summary)
     print(f"[normalize] dedupe complete rows={len(deduped_rows)}")
@@ -449,6 +477,9 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_parser.add_argument("--max-prompt-tokens", type=int, default=2000)
     normalize_parser.add_argument("--min-tests", type=int, default=3)
     normalize_parser.add_argument("--max-tests-per-problem", type=int, default=10)
+    normalize_parser.add_argument("--max-diagnostic-cases-per-problem", type=int, default=4)
+    normalize_parser.add_argument("--max-case-input-chars", type=int, default=5000)
+    normalize_parser.add_argument("--max-case-output-chars", type=int, default=5000)
     normalize_parser.add_argument("--apps-input-limit", type=int, default=0)
     normalize_parser.add_argument("--codecontests-input-limit", type=int, default=0)
     normalize_parser.add_argument("--taco-input-limit", type=int, default=0)
@@ -497,6 +528,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             max_prompt_tokens=args.max_prompt_tokens,
             min_tests=args.min_tests,
             max_tests_per_problem=args.max_tests_per_problem,
+            max_diagnostic_cases_per_problem=args.max_diagnostic_cases_per_problem,
+            max_case_input_chars=args.max_case_input_chars,
+            max_case_output_chars=args.max_case_output_chars,
         )
     elif args.command == "validate":
             summary = validate_stage(

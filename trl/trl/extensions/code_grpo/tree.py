@@ -555,7 +555,13 @@ class CodeGRPOTreeRunner:
         soft_reward_beta = 0.0
         soft_reward_details: list[dict[str, Any]] = []
         if zero_pass_triggered:
-            problem_payload = {"prompt": prompt, "test_cases": test_cases, "io_mode": io_mode}
+            problem_payload = {
+                "prompt": prompt,
+                "test_cases": test_cases,
+                "diagnostic_inputs": list(sample.get("diagnostic_inputs", []) or []),
+                "diagnostic_outputs": list(sample.get("diagnostic_outputs", []) or []),
+                "io_mode": io_mode,
+            }
             diag_count = int(getattr(self.args, "zero_pass_soft_reward_diag_count", 0) or 0)
             diagnostic_inputs = build_diagnostic_inputs(problem_payload, max_count=diag_count)
             oracle_outputs = get_oracle_outputs(problem_payload, diagnostic_inputs)

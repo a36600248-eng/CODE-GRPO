@@ -48,6 +48,9 @@ DEFAULT_SOURCE_TARGETS = {
     "taco": 200,
     "codeforces": 0,
 }
+DEFAULT_MAX_CASE_INPUT_CHARS = 5000
+DEFAULT_MAX_CASE_OUTPUT_CHARS = 5000
+DEFAULT_MAX_DIAGNOSTIC_CASES = 4
 STDIO_PROMPT_PREFIX = (
     "Solve the following programming problem in Python.\n"
     "Read from standard input and write to standard output.\n"
@@ -265,7 +268,7 @@ def _uses_disallowed_imports(code: str) -> bool:
     return any(re.search(pattern, code) for pattern in DISALLOWED_IMPORT_PATTERNS)
 
 
-def _dedupe_cases(cases: list[dict[str, str]], max_cases: int) -> list[dict[str, str]]:
+def _dedupe_cases(cases: list[dict[str, str]], max_cases: int | None = None) -> list[dict[str, str]]:
     seen: set[tuple[str, str]] = set()
     unique_cases: list[dict[str, str]] = []
     for case in cases:
@@ -274,12 +277,101 @@ def _dedupe_cases(cases: list[dict[str, str]], max_cases: int) -> list[dict[str,
             continue
         seen.add(key)
         unique_cases.append(case)
-        if len(unique_cases) >= max_cases:
+        if max_cases is not None and max_cases > 0 and len(unique_cases) >= max_cases:
             break
     return unique_cases
 
 
-def _extract_apps_like_problem(source: str, example: dict[str, Any], index: int, max_tests: int) -> tuple[dict[str, Any] | None, str | None]:
+def _case_input_len(case: dict[str, str]) -> int:
+    return len(str(case.get("input", "")))
+
+
+def _case_output_len(case: dict[str, str]) -> int:
+    return len(str(case.get("output", "")))
+
+
+def _case_total_len(case: dict[str, str]) -> int:
+    return _case_input_len(case) + _case_output_len(case)
+
+
+def _select_representative_cases(indexed_cases: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or len(indexed_cases) <= limit:
+        return list(indexed_cases)
+    ranked = sorted(indexed_cases, key=lambda case: (_case_total_len(case), int(case["_idx"])))
+    if limit == 1:
+        return [ranked[0]]
+
+    selected_positions: list[int] = []
+    for slot in range(limit):
+        position = round(slot * (len(ranked) - 1) / (limit - 1))
+        selected_positions.append(position)
+
+    selected_indices: set[int] = set()
+    selected: list[dict[str, Any]] = []
+    for position in selected_positions:
+        candidate_index = None
+        for radius in range(len(ranked)):
+            left = position - radius
+            if left >= 0 and left not in selected_indices:
+                candidate_index = left
+                break
+            right = position + radius
+            if right < len(ranked) and right not in selected_indices:
+                candidate_index = right
+                break
+        if candidate_index is None:
+            continue
+        selected_indices.add(candidate_index)
+        selected.append(ranked[candidate_index])
+
+    if len(selected) < limit:
+        for idx, case in enumerate(ranked):
+            if idx in selected_indices:
+                continue
+            selected.append(case)
+            if len(selected) >= limit:
+                break
+
+    return sorted(selected, key=lambda case: int(case["_idx"]))
+
+
+def _prepare_problem_cases(
+    cases: list[dict[str, str]],
+    *,
+    max_train_cases: int,
+    max_diagnostic_cases: int,
+    max_case_input_chars: int,
+    max_case_output_chars: int,
+) -> dict[str, Any]:
+    deduped_cases = _dedupe_cases(cases, max_cases=None)
+    indexed_cases = [{**case, "_idx": idx} for idx, case in enumerate(deduped_cases)]
+    filtered_cases = [
+        case
+        for case in indexed_cases
+        if _case_input_len(case) <= max_case_input_chars and _case_output_len(case) <= max_case_output_chars
+    ]
+    selected_cases = _select_representative_cases(filtered_cases, max_train_cases)
+    diagnostic_cases = sorted(selected_cases, key=lambda case: (_case_total_len(case), int(case["_idx"])))[:max_diagnostic_cases]
+
+    return {
+        "test_cases": [{"input": str(case["input"]), "output": str(case["output"])} for case in selected_cases],
+        "diagnostic_inputs": [str(case["input"]) for case in diagnostic_cases],
+        "diagnostic_outputs": [str(case["output"]) for case in diagnostic_cases],
+        "source_test_count": len(deduped_cases),
+        "selected_test_count": len(selected_cases),
+        "oversized_test_count": max(0, len(deduped_cases) - len(filtered_cases)),
+    }
+
+
+def _extract_apps_like_problem(
+    source: str,
+    example: dict[str, Any],
+    index: int,
+    max_tests: int,
+    max_case_input_chars: int,
+    max_case_output_chars: int,
+    max_diagnostic_cases: int,
+) -> tuple[dict[str, Any] | None, str | None]:
     input_output = _parse_jsonish(example.get("input_output"))
     if not isinstance(input_output, dict):
         return None, "missing_input_output"
@@ -301,10 +393,20 @@ def _extract_apps_like_problem(source: str, example: dict[str, Any], index: int,
         return None, "missing_python_reference_solution"
 
     source_problem_id = example.get("problem_id", example.get("id", f"{source}_{index}"))
+    prepared_cases = _prepare_problem_cases(
+        test_cases,
+        max_train_cases=max_tests,
+        max_diagnostic_cases=max_diagnostic_cases,
+        max_case_input_chars=max_case_input_chars,
+        max_case_output_chars=max_case_output_chars,
+    )
+
     row = {
         "question_id": f"{source}_{source_problem_id}",
         "prompt": f"{STDIO_PROMPT_PREFIX}{_clean_prompt(prompt)}",
-        "test_cases": _dedupe_cases(test_cases, max_cases=max_tests),
+        "test_cases": prepared_cases["test_cases"],
+        "diagnostic_inputs": prepared_cases["diagnostic_inputs"],
+        "diagnostic_outputs": prepared_cases["diagnostic_outputs"],
         "reference_solution": solutions[0],
         "source": source,
         "io_mode": "stdio",
@@ -312,11 +414,21 @@ def _extract_apps_like_problem(source: str, example: dict[str, Any], index: int,
         "difficulty": _normalize_optional_string(example.get("difficulty")),
         "source_url": _normalize_optional_string(example.get("url")),
         "source_prompt": prompt.strip(),
+        "source_test_count": int(prepared_cases["source_test_count"]),
+        "selected_test_count": int(prepared_cases["selected_test_count"]),
+        "oversized_test_count": int(prepared_cases["oversized_test_count"]),
     }
     return row, None
 
 
-def _extract_codecontests_problem(example: dict[str, Any], index: int, max_tests: int) -> tuple[dict[str, Any] | None, str | None]:
+def _extract_codecontests_problem(
+    example: dict[str, Any],
+    index: int,
+    max_tests: int,
+    max_case_input_chars: int,
+    max_case_output_chars: int,
+    max_diagnostic_cases: int,
+) -> tuple[dict[str, Any] | None, str | None]:
     prompt = str(example.get("description") or example.get("prompt") or example.get("problem") or "").strip()
     if not prompt:
         return None, "missing_prompt"
@@ -332,10 +444,20 @@ def _extract_codecontests_problem(example: dict[str, Any], index: int, max_tests
         return None, "missing_python_reference_solution"
 
     source_problem_id = example.get("name", example.get("problem_id", example.get("id", f"codecontests_{index}")))
+    prepared_cases = _prepare_problem_cases(
+        test_cases,
+        max_train_cases=max_tests,
+        max_diagnostic_cases=max_diagnostic_cases,
+        max_case_input_chars=max_case_input_chars,
+        max_case_output_chars=max_case_output_chars,
+    )
+
     row = {
         "question_id": f"codecontests_{source_problem_id}",
         "prompt": f"{STDIO_PROMPT_PREFIX}{_clean_prompt(prompt)}",
-        "test_cases": _dedupe_cases(test_cases, max_cases=max_tests),
+        "test_cases": prepared_cases["test_cases"],
+        "diagnostic_inputs": prepared_cases["diagnostic_inputs"],
+        "diagnostic_outputs": prepared_cases["diagnostic_outputs"],
         "reference_solution": solutions[0],
         "source": "codecontests",
         "io_mode": "stdio",
@@ -343,16 +465,42 @@ def _extract_codecontests_problem(example: dict[str, Any], index: int, max_tests
         "difficulty": _normalize_optional_string(example.get("difficulty")),
         "source_url": _normalize_optional_string(example.get("url")),
         "source_prompt": prompt.strip(),
+        "source_test_count": int(prepared_cases["source_test_count"]),
+        "selected_test_count": int(prepared_cases["selected_test_count"]),
+        "oversized_test_count": int(prepared_cases["oversized_test_count"]),
     }
     return row, None
 
 
-def normalize_source_record(source: str, example: dict[str, Any], index: int, max_tests: int) -> tuple[dict[str, Any] | None, str | None]:
+def normalize_source_record(
+    source: str,
+    example: dict[str, Any],
+    index: int,
+    max_tests: int,
+    max_case_input_chars: int = DEFAULT_MAX_CASE_INPUT_CHARS,
+    max_case_output_chars: int = DEFAULT_MAX_CASE_OUTPUT_CHARS,
+    max_diagnostic_cases: int = DEFAULT_MAX_DIAGNOSTIC_CASES,
+) -> tuple[dict[str, Any] | None, str | None]:
     normalized_source = str(source).strip().lower()
     if normalized_source in {"apps", "taco", "codeforces"}:
-        return _extract_apps_like_problem(normalized_source, example, index, max_tests=max_tests)
+        return _extract_apps_like_problem(
+            normalized_source,
+            example,
+            index,
+            max_tests=max_tests,
+            max_case_input_chars=max_case_input_chars,
+            max_case_output_chars=max_case_output_chars,
+            max_diagnostic_cases=max_diagnostic_cases,
+        )
     if normalized_source == "codecontests":
-        return _extract_codecontests_problem(example, index, max_tests=max_tests)
+        return _extract_codecontests_problem(
+            example,
+            index,
+            max_tests=max_tests,
+            max_case_input_chars=max_case_input_chars,
+            max_case_output_chars=max_case_output_chars,
+            max_diagnostic_cases=max_diagnostic_cases,
+        )
     return None, "unsupported_source"
 
 
@@ -459,6 +607,9 @@ def build_mixed_dataset_bundle(
     max_prompt_tokens: int = 2000,
     min_tests: int = 3,
     max_tests_per_problem: int = 10,
+    max_diagnostic_cases_per_problem: int = DEFAULT_MAX_DIAGNOSTIC_CASES,
+    max_case_input_chars: int = DEFAULT_MAX_CASE_INPUT_CHARS,
+    max_case_output_chars: int = DEFAULT_MAX_CASE_OUTPUT_CHARS,
     timeout_seconds: float = 2.0,
     target_total: int = 500,
     source_targets: dict[str, int] | None = None,
@@ -506,7 +657,15 @@ def build_mixed_dataset_bundle(
                     f"processed={index}/{len(raw_rows)} rejects={sum(1 for item in rejects if item['source'] == source)}"
                 )
             example_id = example.get("id", example.get("problem_id", example.get("name", index)))
-            normalized, reason = normalize_source_record(source, example, index=index, max_tests=max_tests_per_problem)
+            normalized, reason = normalize_source_record(
+                source,
+                example,
+                index=index,
+                max_tests=max_tests_per_problem,
+                max_case_input_chars=max_case_input_chars,
+                max_case_output_chars=max_case_output_chars,
+                max_diagnostic_cases=max_diagnostic_cases_per_problem,
+            )
             if normalized is None:
                 reject(source, example_id, reason or "normalize_failed")
                 continue
@@ -559,7 +718,6 @@ def build_mixed_dataset_bundle(
                 )
                 continue
 
-            normalized["source_test_count"] = len(test_cases)
             normalized["reference_exec_ok_count"] = sum(1 for result in exec_results if result.kind == "OK")
             normalized["prompt_token_estimate"] = _approx_token_count(prompt)
             per_source_candidates[source].append(normalized)
@@ -672,6 +830,12 @@ def build_mixed_dataset_bundle(
             "max": max(test_counts) if test_counts else 0,
             "mean": (sum(test_counts) / len(test_counts)) if test_counts else 0.0,
         },
+        "train_test_filtering": {
+            "max_tests_per_problem": max_tests_per_problem,
+            "max_diagnostic_cases_per_problem": max_diagnostic_cases_per_problem,
+            "max_case_input_chars": max_case_input_chars,
+            "max_case_output_chars": max_case_output_chars,
+        },
         "split_seed": split_seed,
         "output_files": {
             "merged": str(merged_path),
@@ -697,6 +861,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-prompt-tokens", type=int, default=2000)
     parser.add_argument("--min-tests", type=int, default=3)
     parser.add_argument("--max-tests-per-problem", type=int, default=10)
+    parser.add_argument("--max-diagnostic-cases-per-problem", type=int, default=DEFAULT_MAX_DIAGNOSTIC_CASES)
+    parser.add_argument("--max-case-input-chars", type=int, default=DEFAULT_MAX_CASE_INPUT_CHARS)
+    parser.add_argument("--max-case-output-chars", type=int, default=DEFAULT_MAX_CASE_OUTPUT_CHARS)
     parser.add_argument("--timeout-seconds", type=float, default=2.0)
     parser.add_argument("--target-total", type=int, default=500)
     parser.add_argument("--apps-target", type=int, default=100)
@@ -728,6 +895,9 @@ def main(argv: list[str] | None = None) -> int:
         max_prompt_tokens=args.max_prompt_tokens,
         min_tests=args.min_tests,
         max_tests_per_problem=args.max_tests_per_problem,
+        max_diagnostic_cases_per_problem=args.max_diagnostic_cases_per_problem,
+        max_case_input_chars=args.max_case_input_chars,
+        max_case_output_chars=args.max_case_output_chars,
         timeout_seconds=args.timeout_seconds,
         target_total=args.target_total,
         source_targets={

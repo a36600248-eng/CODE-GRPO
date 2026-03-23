@@ -68,6 +68,11 @@ def test_normalize_apps_like_record():
     assert row["io_mode"] == "stdio"
     assert row["source"] == "apps"
     assert len(row["test_cases"]) == 3
+    assert row["source_test_count"] == 3
+    assert row["selected_test_count"] == 3
+    assert row["oversized_test_count"] == 0
+    assert row["diagnostic_inputs"] == ["1 2\n", "7 8\n", "10 5\n"]
+    assert row["diagnostic_outputs"] == ["3\n", "15\n", "15\n"]
 
 
 def test_normalize_apps_like_rejects_fn_name():
@@ -105,6 +110,54 @@ def test_normalize_codecontests_record():
     assert row is not None
     assert row["source"] == "codecontests"
     assert len(row["test_cases"]) == 3
+
+
+def test_normalize_filters_oversized_cases_and_keeps_fixed_diagnostics():
+    example = {
+        "problem_id": "apps_heavy",
+        "question": "Echo the input.",
+        "input_output": json.dumps(
+            {
+                "fn_name": None,
+                "inputs": [
+                    "1\n",
+                    "2\n",
+                    "3\n",
+                    "4\n",
+                    "5\n",
+                    "6\n",
+                    "x" * 6001,
+                ],
+                "outputs": [
+                    "1\n",
+                    "2\n",
+                    "3\n",
+                    "4\n",
+                    "5\n",
+                    "6\n",
+                    "y\n",
+                ],
+            }
+        ),
+        "solutions": json.dumps(["import sys\nprint(sys.stdin.read(), end='')\n"]),
+    }
+    row, reason = normalize_source_record(
+        "apps",
+        example,
+        index=0,
+        max_tests=5,
+        max_case_input_chars=5000,
+        max_case_output_chars=5000,
+        max_diagnostic_cases=4,
+    )
+    assert reason is None
+    assert row is not None
+    assert row["source_test_count"] == 7
+    assert row["selected_test_count"] == 5
+    assert row["oversized_test_count"] == 1
+    assert len(row["test_cases"]) == 5
+    assert len(row["diagnostic_inputs"]) == 4
+    assert all(len(case["input"]) <= 5000 for case in row["test_cases"])
 
 
 def test_build_mixed_dataset_bundle_filters_trivial_and_dedupes(monkeypatch):
