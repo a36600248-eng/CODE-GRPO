@@ -78,7 +78,7 @@ def compute_soft_reward(
             s_prob = problem_logprob_cache.get(cache_key)
         if s_prob is None:
             s_prob = float(evaluator.logprob(problem_prompt, target_text))
-            if problem_logprob_cache is not None:
+            if problem_logprob_cache is not None and math.isfinite(s_prob):
                 problem_logprob_cache[cache_key] = s_prob
         if not math.isfinite(float(s_prob)):
             details.append(
