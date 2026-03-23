@@ -39,7 +39,7 @@ class CodeGRPOConfig(GRPOConfig):
     )
     context_round_window: int = field(default=2, metadata={"help": "Rounds of feedback to carry to next prompt."})
 
-    lambda_soft: float = field(default=0.2, metadata={"help": "Soft reward coefficient for code reward."})
+    lambda_soft: float = field(default=0.2, metadata={"help": "Legacy soft-reward coefficient field; the active main path uses bounded beta-per-test scaling instead."})
     code_compile_reward_scale: float = field(
         default=0.1,
         metadata={"help": "Residual reward scale for compile-success signal in main generation reward."},
@@ -115,26 +115,26 @@ class CodeGRPOConfig(GRPOConfig):
     )
     zero_pass_soft_reward_enabled: bool = field(
         default=True,
-        metadata={"help": "Compute soft reward only for zero-pass code candidates in baseline mode."},
+        metadata={"help": "Enable bounded soft reward for code candidates; field name is legacy."},
     )
     zero_pass_soft_reward_diag_count: int = field(
         default=4,
-        metadata={"help": "Maximum number of diagnostic IO cases used for zero-pass soft reward."},
+        metadata={"help": "Maximum number of diagnostic IO cases used for bounded soft reward; field name is legacy."},
     )
     zero_pass_soft_reward_clip_low: float = field(
         default=-2.0,
-        metadata={"help": "Lower clip bound for raw zero-pass soft reward before mapping to [0,1]."},
+        metadata={"help": "Lower clip bound for raw bounded soft reward before mapping to [0,1]; field name is legacy."},
     )
     zero_pass_soft_reward_clip_high: float = field(
         default=2.0,
-        metadata={"help": "Upper clip bound for raw zero-pass soft reward before mapping to [0,1]."},
+        metadata={"help": "Upper clip bound for raw bounded soft reward before mapping to [0,1]; field name is legacy."},
     )
     zero_pass_soft_reward_beta_scale: float = field(
         default=0.5,
         metadata={
             "help": (
-                "Soft reward scale numerator in baseline mode. Actual beta is min(beta_scale / k, (1-eps)/k), "
-                "so beta stays strictly below 1/k."
+                "Soft reward scale numerator for bounded soft reward. Actual beta is min(beta_scale / k, (1-eps)/k), "
+                "so beta stays strictly below the reward value of one passed test case."
             )
         },
     )

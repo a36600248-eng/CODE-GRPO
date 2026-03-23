@@ -227,6 +227,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "mean_R_code",
             "mean_pass_rate",
             "advantage/code_zero_rate",
+            "soft_reward_trigger_rate",
             "zero_pass_soft_trigger_rate",
             "soft_lift",
             "pseudo/original_coverage_remaining",
@@ -281,6 +282,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "question_prior/high_value_question_count",
             "question_prior/low_value_question_count",
             "question_prior/updated_question_count",
+            "soft_reward_trigger_rate",
             "zero_pass_soft_trigger_rate",
             "soft_lift",
             "mean_hard_reward",
@@ -317,6 +319,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "eval_compile_ok_rate",
             "eval_syntax_error_rate",
             "eval_timeout_rate",
+            "eval_soft_reward_trigger_rate",
             "eval_zero_pass_soft_trigger_rate",
             "eval_mean_hard_reward",
             "eval_mean_raw_soft_reward",
@@ -1122,12 +1125,12 @@ class CodeGRPOTrainer(GRPOTrainer):
         if not solved:
             solved = bool(any(float(getattr(sample, "pass_rate", 0.0) or 0.0) >= 1.0 for sample in rollout_samples))
         code_signal = 1.0 if solved else 0.0
-        zero_pass_trigger_rate = float(getattr(rollout, "eval_metrics", {}).get("zero_pass_soft_trigger_rate", 0.0) or 0.0)
+        soft_reward_trigger_rate = float(getattr(rollout, "eval_metrics", {}).get("soft_reward_trigger_rate", 0.0) or 0.0)
         mean_hard_reward = float(getattr(rollout, "eval_metrics", {}).get("mean_hard_reward", 0.0) or 0.0)
         mean_normalized_soft_reward = float(
             getattr(rollout, "eval_metrics", {}).get("mean_normalized_soft_reward", 0.0) or 0.0
         )
-        if zero_pass_trigger_rate > 0.0:
+        if soft_reward_trigger_rate > 0.0:
             reason_signal = mean_normalized_soft_reward
         else:
             reason_signal = mean_hard_reward

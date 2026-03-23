@@ -321,13 +321,20 @@ class CodeGRPOTreeRunner:
                 [float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in nodes]
             ),
             "mean_R_soft_effective": _mean(
-                [float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in nodes]
+                [
+                    float(node.exec_summary.get("normalized_soft_reward", 0.0))
+                    * float(node.exec_summary.get("soft_reward_beta", 0.0))
+                    for node in nodes
+                ]
             ),
             "soft_reward_eligible_rate": _mean(
                 [1.0 if bool(node.exec_summary.get("soft_reward_eligible", False)) else 0.0 for node in nodes]
             ),
             "main_sample_count": float(sum(1 for node in nodes if node.completion_text)),
             "code_io_aux_sample_count": float(sum(len(node.exec_summary.get("code_io_train_samples", [])) for node in nodes)),
+            "soft_reward_trigger_rate": _mean(
+                [1.0 if bool(node.exec_summary.get("soft_reward_triggered", False)) else 0.0 for node in nodes]
+            ),
             "zero_pass_soft_trigger_rate": _mean(
                 [1.0 if bool(node.exec_summary.get("zero_pass_soft_reward_triggered", False)) else 0.0 for node in nodes]
             ),
@@ -672,12 +679,13 @@ class CodeGRPOTreeRunner:
             break
 
         hard_reward = float(pass_cnt / test_count) if test_count > 0 else 0.0
-        zero_pass_triggered = bool(pass_cnt == 0 and test_count > 0 and bool(getattr(self.args, "zero_pass_soft_reward_enabled", True)))
+        zero_pass_triggered = bool(pass_cnt == 0 and test_count > 0)
+        soft_reward_triggered = bool(test_count > 0 and bool(getattr(self.args, "zero_pass_soft_reward_enabled", True)))
         raw_soft_reward = 0.0
         normalized_soft_reward = 0.0
         soft_reward_beta = 0.0
         soft_reward_details: list[dict[str, Any]] = []
-        if zero_pass_triggered:
+        if soft_reward_triggered:
             problem_payload = {
                 "prompt": prompt,
                 "test_cases": test_cases,
@@ -710,23 +718,20 @@ class CodeGRPOTreeRunner:
                 raw_soft_reward = 0.0
                 normalized_soft_reward = 0.0
                 soft_reward_beta = 0.0
-        soft_reward_eligible = zero_pass_triggered and _is_soft_reward_eligible(code, io_mode)
-        if zero_pass_triggered and not soft_reward_eligible:
+        soft_reward_eligible = soft_reward_triggered and _is_soft_reward_eligible(code, io_mode)
+        if soft_reward_triggered and not soft_reward_eligible:
             normalized_soft_reward *= float(getattr(self.args, "soft_reward_ineligible_scale", 0.3))
 
-        if pass_cnt > 0:
-            final_reward = _compute_code_reward(
-                pass_rate=hard_reward,
-                r_soft=0.0,
-                lambda_soft=0.0,
-                compile_score=compile_score,
-                compile_scale=self.args.code_compile_reward_scale,
-                generation_format_score=generation_format_score,
-                generation_format_scale=self.args.code_format_reward_scale,
-                aux_reward_scale=(1.0 if generation_format_ok else self.args.code_aux_reward_without_format_scale),
-            )
-        else:
-            final_reward = hard_reward + soft_reward_beta * normalized_soft_reward
+        final_reward = _compute_code_reward(
+            pass_rate=hard_reward,
+            r_soft=normalized_soft_reward,
+            lambda_soft=soft_reward_beta,
+            compile_score=compile_score,
+            compile_scale=self.args.code_compile_reward_scale,
+            generation_format_score=generation_format_score,
+            generation_format_scale=self.args.code_format_reward_scale,
+            aux_reward_scale=(1.0 if generation_format_ok else self.args.code_aux_reward_without_format_scale),
+        )
 
         code_io_train_samples = _build_code_io_aux_samples(
             question_id=question_id,
@@ -764,6 +769,7 @@ class CodeGRPOTreeRunner:
                 "pass_cnt": pass_cnt,
                 "test_count": test_count,
                 "hard_reward": hard_reward,
+                "soft_reward_triggered": soft_reward_triggered,
                 "zero_pass_soft_reward_triggered": zero_pass_triggered,
                 "raw_soft_reward": raw_soft_reward,
                 "normalized_soft_reward": normalized_soft_reward,
@@ -800,6 +806,7 @@ class CodeGRPOTreeRunner:
                         "pass_cnt": pass_cnt,
                         "test_count": test_count,
                         "hard_reward": hard_reward,
+                        "soft_reward_triggered": soft_reward_triggered,
                         "zero_pass_soft_reward_triggered": zero_pass_triggered,
                         "raw_soft_reward": raw_soft_reward,
                         "normalized_soft_reward": normalized_soft_reward,

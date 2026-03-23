@@ -106,6 +106,30 @@ def test_code_reward_margin_scaling():
     ) == 0.2
 
 
+
+def test_code_reward_keeps_compile_and_format_shaping_for_zero_pass():
+    assert _compute_code_reward(
+        pass_rate=0.0,
+        r_soft=1.0,
+        lambda_soft=0.125,
+        compile_score=1.0,
+        compile_scale=0.1,
+        generation_format_score=1.0,
+        generation_format_scale=0.05,
+    ) == 0.275
+
+
+def test_code_reward_applies_bounded_soft_reward_to_partial_pass_samples():
+    assert _compute_code_reward(
+        pass_rate=0.25,
+        r_soft=1.0,
+        lambda_soft=0.125,
+        compile_score=0.0,
+        compile_scale=0.0,
+        generation_format_score=0.0,
+        generation_format_scale=0.0,
+    ) == 0.375
+
 def test_lambda_soft_range_validation():
     CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, lambda_soft=0.0)
     CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, lambda_soft=1.0)
