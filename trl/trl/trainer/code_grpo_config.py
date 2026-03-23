@@ -213,6 +213,10 @@ class CodeGRPOConfig(GRPOConfig):
         default=0.2,
         metadata={"help": "Question prior weight when both code and reason EMA are low."},
     )
+    question_prior_min_seen_before_too_hard: int = field(
+        default=3,
+        metadata={"help": "Minimum number of observations before a question can be classified as too_hard."},
+    )
     question_prior_weight_default: float = field(
         default=0.8,
         metadata={"help": "Default question prior weight for intermediate cases."},
@@ -237,6 +241,10 @@ class CodeGRPOConfig(GRPOConfig):
     pseudo_iterative_select_count: int = field(
         default=3,
         metadata={"help": "How many iterative candidates to keep when a rollout group has no passing sample."},
+    )
+    pseudo_iterative_soft_priority_bonus_scale: float = field(
+        default=0.1,
+        metadata={"help": "Positive soft-reward bonus scale added to repair-shaped iterative-node priority."},
     )
     pseudo_original_downweight_after: int = field(
         default=2,
@@ -587,6 +595,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("question_prior_weight_mastered must be >= 0.")
         if self.question_prior_weight_too_hard < 0:
             raise ValueError("question_prior_weight_too_hard must be >= 0.")
+        if self.question_prior_min_seen_before_too_hard < 0:
+            raise ValueError("question_prior_min_seen_before_too_hard must be >= 0.")
         if self.pseudo_original_age_bonus_per_step < 0:
             raise ValueError("pseudo_original_age_bonus_per_step must be >= 0.")
         if self.pseudo_original_age_bonus_max < 0:
@@ -601,6 +611,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("pseudo_iterative_pool_capacity must be >= 0.")
         if self.pseudo_iterative_select_count < 0:
             raise ValueError("pseudo_iterative_select_count must be >= 0.")
+        if self.pseudo_iterative_soft_priority_bonus_scale < 0:
+            raise ValueError("pseudo_iterative_soft_priority_bonus_scale must be >= 0.")
         if self.pseudo_original_downweight_after < 0:
             raise ValueError("pseudo_original_downweight_after must be >= 0.")
         if not (0.0 <= self.pseudo_original_keep_prob_decay <= 1.0):

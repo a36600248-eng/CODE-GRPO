@@ -462,3 +462,58 @@ def test_sample_iterative_examples_preserves_io_mode_and_diagnostics():
     assert sampled[0]["io_mode"] == "stdio"
     assert sampled[0]["diagnostic_inputs"] == ["1\n"]
     assert sampled[0]["diagnostic_outputs"] == ["1\n"]
+
+
+def test_question_prior_too_hard_requires_min_seen_count():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer._question_prior_enabled = True
+    trainer.args = SimpleNamespace(
+        question_prior_high_threshold=0.7,
+        question_prior_low_threshold=0.3,
+        question_prior_gap_threshold=0.2,
+        question_prior_weight_mastered=0.4,
+        question_prior_weight_too_hard=0.2,
+        question_prior_weight_high_value=1.0,
+        question_prior_weight_mid_negative_gap=0.7,
+        question_prior_weight_default=0.8,
+        question_prior_min_seen_before_too_hard=3,
+    )
+
+    early_state = SimpleNamespace(
+        ema_code_success=0.1,
+        ema_reason_signal=0.1,
+        ema_learning_value=1.0,
+        seen_count=2,
+    )
+    mature_state = SimpleNamespace(
+        ema_code_success=0.1,
+        ema_reason_signal=0.1,
+        ema_learning_value=1.0,
+        seen_count=3,
+    )
+
+    assert trainer._compute_question_prior_weight_from_state(early_state) == 0.8
+    assert trainer._compute_question_prior_weight_from_state(mature_state) == 0.2
+
+
+def test_iterative_node_priority_prefers_mid_pass_rate_over_nearly_solved():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer.args = SimpleNamespace(pseudo_iterative_soft_priority_bonus_scale=0.1)
+    trainer._get_question_prior_weight = lambda qid: 1.0
+
+    mid_priority = trainer._compute_iterative_node_priority(
+        {"pass_rate": 0.5, "raw_soft_reward": 0.0},
+        "q1",
+    )
+    near_solved_priority = trainer._compute_iterative_node_priority(
+        {"pass_rate": 0.875, "raw_soft_reward": 0.0},
+        "q1",
+    )
+    zero_pass_soft_priority = trainer._compute_iterative_node_priority(
+        {"pass_rate": 0.0, "raw_soft_reward": 0.3},
+        "q1",
+    )
+
+    assert mid_priority > near_solved_priority
+    assert zero_pass_soft_priority > 1e-6
+    assert zero_pass_soft_priority < mid_priority

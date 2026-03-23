@@ -892,6 +892,15 @@ class CodeGRPOTrainer(GRPOTrainer):
         )
         return "\n".join(lines)
 
+    def _compute_iterative_node_priority(self, node_payload: dict[str, Any], base_question_id: str) -> float:
+        pass_rate = max(0.0, min(1.0, float(node_payload.get("pass_rate", 0.0) or 0.0)))
+        raw_soft_reward = max(0.0, float(node_payload.get("raw_soft_reward", 0.0) or 0.0))
+        repair_value = pass_rate * (1.0 - pass_rate) * 4.0
+        soft_bonus_scale = float(getattr(self.args, "pseudo_iterative_soft_priority_bonus_scale", 0.1) or 0.0)
+        base_priority = max(1e-6, repair_value + soft_bonus_scale * raw_soft_reward)
+        question_prior_weight = self._get_question_prior_weight(base_question_id)
+        return max(1e-6, base_priority * question_prior_weight)
+
     def _cleanup_iterative_pool(self, solved_base_qids: set[str] | None = None) -> int:
         if not self._pseudo_multiround_enabled or not self._pseudo_iterative_pool:
             return 0
@@ -985,18 +994,12 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         added = 0
         base_qid = self._base_question_id(source_example)
-        question_prior_weight = self._get_question_prior_weight(base_qid)
         capacity = max(0, int(getattr(self.args, "pseudo_iterative_pool_capacity", 0) or 0))
         for idx, tag in picks[:select_count]:
             node_payload = nodes[idx]
             self._pseudo_node_serial += 1
             iterative_qid = f"{base_qid}__iter_{self._pseudo_node_serial}"
             prompt = self._make_iterative_prompt(source_example, node_payload, tag)
-            base_priority = max(
-                1e-6,
-                float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0)
-                + max(0.0, float(node_payload.get("raw_soft_reward", 0.0) or 0.0)),
-            )
             record = _PseudoIterativeNode(
                 question_id=iterative_qid,
                 base_question_id=base_qid,
@@ -1004,7 +1007,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 source_prompt=str(source_example.get("source_prompt") or source_example.get("prompt", "")),
                 test_cases=copy.deepcopy(list(source_example.get("test_cases", []) or [])),
                 selection_tag=tag,
-                priority=max(1e-6, base_priority * question_prior_weight),
+                priority=self._compute_iterative_node_priority(node_payload, base_qid),
                 raw_soft_reward=float(node_payload.get("raw_soft_reward", 0.0) or 0.0),
                 final_reward=float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0),
                 pass_rate=float(node_payload.get("pass_rate", 0.0) or 0.0),
@@ -1127,9 +1130,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         high = float(getattr(self.args, "question_prior_high_threshold", 0.7))
         low = float(getattr(self.args, "question_prior_low_threshold", 0.3))
         gap = float(getattr(self.args, "question_prior_gap_threshold", 0.2))
+        min_seen_before_too_hard = int(getattr(self.args, "question_prior_min_seen_before_too_hard", 3) or 0)
         if code_value >= high and reason_value >= high:
             return float(getattr(self.args, "question_prior_weight_mastered", 0.4))
-        if code_value <= low and reason_value <= low:
+        if code_value <= low and reason_value <= low and int(state.seen_count) >= min_seen_before_too_hard:
             return float(getattr(self.args, "question_prior_weight_too_hard", 0.2))
         if (reason_value - code_value) >= gap:
             return float(getattr(self.args, "question_prior_weight_high_value", 1.0))
