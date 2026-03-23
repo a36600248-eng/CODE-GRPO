@@ -269,6 +269,8 @@ class CodeGRPOTreeRunner:
         question_id = str(sample["question_id"])
         prompt = str(sample["prompt"])
         test_cases = list(sample["test_cases"])
+        diagnostic_inputs = list(sample.get("diagnostic_inputs", []) or [])
+        diagnostic_outputs = list(sample.get("diagnostic_outputs", []) or [])
         io_mode = str(sample.get("io_mode", "call") or "call").strip().lower()
 
         root = Node(node_id="root", parent_id=None, round_idx=0, code=None, exec_summary={"history": []})
@@ -277,6 +279,8 @@ class CodeGRPOTreeRunner:
             parent=root,
             prompt=prompt,
             test_cases=test_cases,
+            diagnostic_inputs=diagnostic_inputs,
+            diagnostic_outputs=diagnostic_outputs,
             io_mode=io_mode,
             round_idx=1,
             node_serial=0,
@@ -370,6 +374,8 @@ class CodeGRPOTreeRunner:
         parent: Node,
         prompt: str,
         test_cases: list[dict[str, Any]],
+        diagnostic_inputs: list[Any],
+        diagnostic_outputs: list[Any],
         io_mode: str,
         round_idx: int,
         node_serial: int,
@@ -392,6 +398,7 @@ class CodeGRPOTreeRunner:
         )
         rendered_prompt_text = self._render_prompt_with_chat_template(prompt_text)
         generation_kwargs = self._code_generation_kwargs()
+        soft_reward_problem_logprob_cache: dict[tuple[str, str], float] = {}
 
         for retry_idx in range(int(self.args.M_retry) + 1):
             raw_outputs = self.backend.generate_many(
@@ -414,11 +421,14 @@ class CodeGRPOTreeRunner:
                         parent=parent,
                         prompt=prompt,
                         test_cases=test_cases,
+                        diagnostic_inputs=diagnostic_inputs,
+                        diagnostic_outputs=diagnostic_outputs,
                         io_mode=io_mode,
                         round_idx=round_idx,
                         prompt_text_override=rendered_prompt_text,
                         prompt_text_raw_override=prompt_text,
                         raw_output_override=raw_output,
+                        problem_logprob_cache=soft_reward_problem_logprob_cache,
                     )
                 )
             produced_total += len(accepted)
@@ -449,10 +459,13 @@ class CodeGRPOTreeRunner:
                     parent=parent,
                     prompt=prompt,
                     test_cases=test_cases,
+                    diagnostic_inputs=diagnostic_inputs,
+                    diagnostic_outputs=diagnostic_outputs,
                     io_mode=io_mode,
                     round_idx=round_idx,
                     prompt_text_override=rendered_prompt_text,
                     prompt_text_raw_override=prompt_text,
+                    problem_logprob_cache=soft_reward_problem_logprob_cache,
                 )
                 if abs(accepted[0].R_code - accepted[1].R_code) >= eps or abs(accepted[0].pass_rate - accepted[1].pass_rate) >= eps:
                     undiff_retry_succeeded += 1
@@ -469,12 +482,15 @@ class CodeGRPOTreeRunner:
         parent: Node,
         prompt: str,
         test_cases: list[dict[str, Any]],
+        diagnostic_inputs: list[Any],
+        diagnostic_outputs: list[Any],
         io_mode: str,
         round_idx: int,
         prompt_text_override: str | None = None,
         prompt_text_raw_override: str | None = None,
         raw_output_override: str | None = None,
         generation_kwargs_override: dict[str, Any] | None = None,
+        problem_logprob_cache: dict[tuple[str, str], float] | None = None,
         log_reward: bool = False,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
@@ -558,19 +574,20 @@ class CodeGRPOTreeRunner:
             problem_payload = {
                 "prompt": prompt,
                 "test_cases": test_cases,
-                "diagnostic_inputs": list(sample.get("diagnostic_inputs", []) or []),
-                "diagnostic_outputs": list(sample.get("diagnostic_outputs", []) or []),
+                "diagnostic_inputs": list(diagnostic_inputs),
+                "diagnostic_outputs": list(diagnostic_outputs),
                 "io_mode": io_mode,
             }
             diag_count = int(getattr(self.args, "zero_pass_soft_reward_diag_count", 0) or 0)
-            diagnostic_inputs = build_diagnostic_inputs(problem_payload, max_count=diag_count)
-            oracle_outputs = get_oracle_outputs(problem_payload, diagnostic_inputs)
+            selected_diagnostic_inputs = build_diagnostic_inputs(problem_payload, max_count=diag_count)
+            oracle_outputs = get_oracle_outputs(problem_payload, selected_diagnostic_inputs)
             raw_soft_reward, soft_reward_details = compute_soft_reward(
                 problem=problem_payload,
                 code=code,
-                diagnostic_inputs=diagnostic_inputs,
+                diagnostic_inputs=selected_diagnostic_inputs,
                 oracle_outputs=oracle_outputs,
                 evaluator=self.backend,
+                problem_logprob_cache=problem_logprob_cache,
             )
             normalized_soft_reward = normalize_soft_reward_to_unit_interval(
                 raw_value=raw_soft_reward,

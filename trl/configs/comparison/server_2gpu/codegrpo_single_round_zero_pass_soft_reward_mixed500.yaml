@@ -80,7 +80,7 @@ advantage_mode: mean_only
 code_grpo_loss_type: token_mean
 
 zero_pass_soft_reward_enabled: true
-zero_pass_soft_reward_diag_count: 4
+zero_pass_soft_reward_diag_count: 2
 zero_pass_soft_reward_clip_low: -2.0
 zero_pass_soft_reward_clip_high: 2.0
 zero_pass_soft_reward_beta_scale: 0.5

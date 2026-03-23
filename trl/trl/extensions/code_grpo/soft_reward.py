@@ -61,6 +61,7 @@ def compute_soft_reward(
     diagnostic_inputs: list[Any],
     oracle_outputs: list[Any],
     evaluator,
+    problem_logprob_cache: dict[tuple[str, str], float] | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     question_prompt = str(problem.get("prompt", ""))
     details: list[dict[str, Any]] = []
@@ -70,7 +71,14 @@ def compute_soft_reward(
         target_text = _normalize_output_text(oracle_output)
         problem_prompt = build_zero_pass_problem_view_prompt(question_prompt=question_prompt, case_input=case_input)
         code_prompt = build_zero_pass_code_view_prompt(code=code, case_input=case_input)
-        s_prob = float(evaluator.logprob(problem_prompt, target_text))
+        cache_key = (str(case_input), target_text)
+        s_prob = None
+        if problem_logprob_cache is not None:
+            s_prob = problem_logprob_cache.get(cache_key)
+        if s_prob is None:
+            s_prob = float(evaluator.logprob(problem_prompt, target_text))
+            if problem_logprob_cache is not None:
+                problem_logprob_cache[cache_key] = s_prob
         s_code = float(evaluator.logprob(code_prompt, target_text))
         delta = s_code - s_prob
         deltas.append(delta)

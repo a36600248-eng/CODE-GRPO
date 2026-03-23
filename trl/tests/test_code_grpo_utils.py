@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from trl.extensions.code_grpo.error_utils import summarize_error
 from trl.extensions.code_grpo.matcher import is_match, values_equal
 from trl.extensions.code_grpo.parser import build_generation_completion, parse_generation_output, parse_generation_response
+from trl.extensions.code_grpo.soft_reward import compute_soft_reward
 from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_node
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
@@ -173,3 +174,45 @@ def test_create_model_from_path_loads_adapter_checkpoint(monkeypatch, tmp_path):
         ("base", "base-model-id", {"dtype": trainer_utils.torch.float32, "device_map": "auto"}),
         ("adapter", "base-model", str(adapter_dir), False),
     ]
+
+
+def test_compute_soft_reward_reuses_problem_logprob_cache():
+    calls = []
+
+    class DummyEvaluator:
+        def logprob(self, prompt, target_text):
+            calls.append((prompt, target_text))
+            if "code view" in prompt.lower():
+                return 1.0
+            return 0.25
+
+    problem = {
+        "prompt": "Add two numbers",
+        "diagnostic_inputs": ["1 2\n", "3 4\n"],
+        "diagnostic_outputs": ["3\n", "7\n"],
+    }
+    cache = {}
+
+    reward1, details1 = compute_soft_reward(
+        problem=problem,
+        code="print(3)",
+        diagnostic_inputs=problem["diagnostic_inputs"],
+        oracle_outputs=problem["diagnostic_outputs"],
+        evaluator=DummyEvaluator(),
+        problem_logprob_cache=cache,
+    )
+    assert len(details1) == 2
+    assert len(cache) == 2
+    assert len(calls) == 4
+
+    reward2, details2 = compute_soft_reward(
+        problem=problem,
+        code="print(7)",
+        diagnostic_inputs=problem["diagnostic_inputs"],
+        oracle_outputs=problem["diagnostic_outputs"],
+        evaluator=DummyEvaluator(),
+        problem_logprob_cache=cache,
+    )
+    assert len(details2) == 2
+    assert reward1 == reward2
+    assert len(calls) == 6
