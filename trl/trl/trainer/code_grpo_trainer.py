@@ -628,6 +628,17 @@ class CodeGRPOTrainer(GRPOTrainer):
             self._shutdown_async_rollout_prefetch(wait=False)
             return None
 
+    def _should_log_rollout_progress(self, mode: str) -> bool:
+        if bool(getattr(self.args, "log_train_rollout_details", False)):
+            return True
+        if mode != "train":
+            return True
+        return int(getattr(self.state, "global_step", 0) or 0) < 10
+
+    def _log_rollout_progress(self, message: str, *args: Any, mode: str) -> None:
+        if self._should_log_rollout_progress(mode):
+            logger.info(message, *args)
+
     @staticmethod
     def _window_mean(values: list[float]) -> float:
         return sum(values) / len(values) if values else 0.0
@@ -1660,6 +1671,17 @@ class CodeGRPOTrainer(GRPOTrainer):
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
         examples, pseudo_prepare_metrics = self._prepare_examples_for_rollout(examples, mode, base_rng)
+        total_examples = len(examples)
+        self._log_rollout_progress(
+            "[rollout] mode=%s step=%s questions=%d k=%d batch_size=%s prefetch=%s start",
+            mode,
+            int(getattr(self.state, "global_step", 0) or 0),
+            total_examples,
+            int(getattr(self, "num_generations", 0) or 0),
+            getattr(self.args, "generation_batch_size", None),
+            bool(self._async_rollout_prefetch_enabled) if mode == "train" else False,
+            mode=mode,
+        )
 
         rollouts = []
         for _idx, example in enumerate(examples):
@@ -1679,7 +1701,27 @@ class CodeGRPOTrainer(GRPOTrainer):
                 rollout = self.tree_runner.run_question(example, rng=random.Random(rollout_seed))
                 self._attach_rollout_source_metadata(example, rollout)
                 rollouts.append(rollout)
+            elapsed_s = time.perf_counter() - rollout_t0
+            question_id = str(example.get("question_id", f"q_{_idx}"))
+            self._log_rollout_progress(
+                "[rollout] mode=%s step=%s done=%d/%d elapsed=%s qid=%s",
+                mode,
+                int(getattr(self.state, "global_step", 0) or 0),
+                _idx + 1,
+                total_examples,
+                time.strftime("%H:%M:%S", time.gmtime(max(elapsed_s, 0.0))),
+                question_id,
+                mode=mode,
+            )
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
+        self._log_rollout_progress(
+            "[rollout] mode=%s step=%s finished questions=%d elapsed=%s",
+            mode,
+            int(getattr(self.state, "global_step", 0) or 0),
+            total_examples,
+            time.strftime("%H:%M:%S", time.gmtime(max(rollout_time_s, 0.0))),
+            mode=mode,
+        )
 
         train_samples = [sample for rollout in rollouts for sample in rollout.train_samples]
         if not train_samples and examples:
