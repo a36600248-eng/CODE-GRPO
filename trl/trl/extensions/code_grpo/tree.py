@@ -368,6 +368,7 @@ class CodeGRPOTreeRunner:
 
     def run_question_eval_code_only(self, sample: dict[str, Any], rng: random.Random) -> QuestionRollout:
         return self.run_question(sample, rng)
+
     def _expand_parent(
         self,
         question_id: str,
