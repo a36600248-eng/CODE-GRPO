@@ -369,12 +369,30 @@ def test_make_iterative_prompt_uses_stdio_specific_instruction():
 
     stdio_prompt = trainer._make_iterative_prompt(
         source_example={"prompt": "Solve it", "io_mode": "stdio"},
-        node_payload={"code_text": "print(input())", "history": []},
+        node_payload={
+            "code_text": "print(input())",
+            "pass_cnt": 2,
+            "test_count": 8,
+            "error_summary": "NameError: x",
+            "raw_soft_reward": 0.1,
+            "normalized_soft_reward": 0.4,
+            "final_reward": 0.25,
+            "history": [{"failed_input": "3 5\n", "failed_actual": "NameError"}],
+        },
         selection_tag="best_pass",
     )
-    assert "stdin" in stdio_prompt
-    assert "stdout" in stdio_prompt
+    assert "standard input" in stdio_prompt
+    assert "standard output" in stdio_prompt
     assert "solve(x)" not in stdio_prompt
+    assert "Test result: passed 2 of 8 tests." in stdio_prompt
+    assert "Error: NameError: x" in stdio_prompt
+    assert "First failing input:" in stdio_prompt
+    assert "Actual output or error:" in stdio_prompt
+    assert "selection_tag" not in stdio_prompt
+    assert "selection_reason" not in stdio_prompt
+    assert "raw_soft_reward" not in stdio_prompt
+    assert "normalized_soft_reward" not in stdio_prompt
+    assert "final_reward" not in stdio_prompt
 
     call_prompt = trainer._make_iterative_prompt(
         source_example={"prompt": "Solve it", "io_mode": "call"},
@@ -382,6 +400,7 @@ def test_make_iterative_prompt_uses_stdio_specific_instruction():
         selection_tag="best_pass",
     )
     assert "solve(x)" in call_prompt
+    assert "function interface" in call_prompt
 
 
 def test_append_iterative_nodes_from_rollout_preserves_stdio_metadata():

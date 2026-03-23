@@ -835,58 +835,47 @@ class CodeGRPOTrainer(GRPOTrainer):
         return scores
 
     def _make_iterative_prompt(self, source_example: dict[str, Any], node_payload: dict[str, Any], selection_tag: str) -> str:
+        del selection_tag
         base_prompt = str(source_example.get("source_prompt") or source_example.get("prompt", "")).strip()
         io_mode = str(source_example.get("io_mode", "call") or "call").strip().lower()
         code_text = str(node_payload.get("code_text", "") or "").strip()
         pass_cnt = int(node_payload.get("pass_cnt", 0) or 0)
         test_count = int(node_payload.get("test_count", 0) or 0)
-        hard_reward = float(node_payload.get("hard_reward", 0.0) or 0.0)
-        raw_soft_reward = float(node_payload.get("raw_soft_reward", 0.0) or 0.0)
-        normalized_soft_reward = float(node_payload.get("normalized_soft_reward", 0.0) or 0.0)
-        final_reward = float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0)
         error_summary = str(node_payload.get("error_summary", "") or "").strip()
         history = list(node_payload.get("history", []) or [])
         latest = history[-1] if history else {}
         failed_input = latest.get("failed_input")
         failed_actual = latest.get("failed_actual")
-        selection_reason = {
-            "best_pass": "This candidate was closest to solving the task in the previous rollout.",
-            "best_soft": "This candidate most increased confidence in the correct answers under the soft evaluator.",
-            "novel": "This candidate was the most novel among the zero-pass samples and is kept for exploration.",
-        }.get(selection_tag, "This candidate was selected for iterative refinement.")
+        interface_instruction = (
+            "Read from standard input and write to standard output."
+            if io_mode == "stdio"
+            else "Keep the same solve(x) function interface."
+        )
 
         lines = [
             "You are revising a previous Python solution attempt.",
             "Return exactly one fenced Python code block.",
+            interface_instruction,
             "Do not output reasoning or explanations.",
+            "",
             "Original problem:",
             base_prompt,
-            "Previous candidate code:",
+            "",
+            "Previous code:",
             code_text,
-            "Previous rollout summary:",
-            f"- selection_tag={selection_tag}",
-            f"- selection_reason={selection_reason}",
-            f"- pass_cnt={pass_cnt}/{test_count}",
-            f"- hard_reward={hard_reward:.6f}",
-            f"- raw_soft_reward={raw_soft_reward:.6f}",
-            f"- normalized_soft_reward={normalized_soft_reward:.6f}",
-            f"- final_reward={final_reward:.6f}",
+            "",
+            f"Test result: passed {pass_cnt} of {test_count} tests.",
         ]
         if error_summary:
-            lines.append(f"- error_summary={error_summary}")
+            lines.append(f"Error: {error_summary}")
         if failed_input is not None:
-            lines.append(f"- failed_input={failed_input!r}")
+            lines.append(f"First failing input: {failed_input!r}")
         if failed_actual is not None:
-            lines.append(f"- failed_actual_or_error={failed_actual!r}")
-        interface_instruction = (
-            "Revise the previous code using the summary above. Keep reading from stdin and writing to stdout."
-            if io_mode == "stdio"
-            else "Revise the previous code using the summary above. Keep the same solve(x) interface."
-        )
+            lines.append(f"Actual output or error: {failed_actual!r}")
         lines.extend(
             [
-                "Task:",
-                interface_instruction,
+                "",
+                "Revise the code to fix the issue above.",
                 "Answer with one fenced Python code block only.",
             ]
         )
