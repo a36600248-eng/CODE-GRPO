@@ -6,7 +6,7 @@ from trl.extensions.code_grpo.error_utils import summarize_error
 from trl.extensions.code_grpo.matcher import is_match, values_equal
 from trl.extensions.code_grpo.parser import build_generation_completion, parse_generation_output, parse_generation_response
 from trl.extensions.code_grpo.soft_reward import compute_soft_reward
-from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_node
+from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_node, _is_soft_reward_eligible
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
 from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
@@ -111,6 +111,13 @@ def test_double_zero_node_detection():
     assert _is_double_zero_node(node)
     node.R_code = 1e-6
     assert not _is_double_zero_node(node)
+
+
+def test_soft_reward_eligible_accepts_stdio_without_solve():
+    stdio_code = "import sys\nprint(sys.stdin.read(), end='')\n"
+    assert _is_soft_reward_eligible(stdio_code, "stdio")
+    assert not _is_soft_reward_eligible(stdio_code, "call")
+    assert _is_soft_reward_eligible("def solve(x):\n    return x\n", "call")
 
 
 def test_code_grpo_trainer_syncs_vllm_weights_once_per_step():

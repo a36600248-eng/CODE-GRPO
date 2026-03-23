@@ -165,6 +165,15 @@ def _has_solve_entrypoint(code: str) -> bool:
     return False
 
 
+def _is_soft_reward_eligible(code: str, io_mode: str) -> bool:
+    if not isinstance(code, str) or not code.strip():
+        return False
+    normalized_io_mode = str(io_mode or "call").strip().lower()
+    if normalized_io_mode == "stdio":
+        return True
+    return _has_solve_entrypoint(code)
+
+
 class CodeGRPOTreeRunner:
     def __init__(self, backend, tokenizer, args, logger):
         self.backend = backend
@@ -599,7 +608,7 @@ class CodeGRPOTreeRunner:
                 test_count=test_count,
                 beta_scale=float(getattr(self.args, "zero_pass_soft_reward_beta_scale", 0.5)),
             )
-        soft_reward_eligible = zero_pass_triggered and _has_solve_entrypoint(code)
+        soft_reward_eligible = zero_pass_triggered and _is_soft_reward_eligible(code, io_mode)
         if zero_pass_triggered and not soft_reward_eligible:
             normalized_soft_reward *= float(getattr(self.args, "soft_reward_ineligible_scale", 0.3))
 
