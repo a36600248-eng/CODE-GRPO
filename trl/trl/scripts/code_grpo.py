@@ -96,6 +96,80 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _build_resume_signature(script_args, training_args, model_args, dataset_args) -> dict[str, Any]:
+    training_keys = (
+        "codegrpo_mode",
+        "backend",
+        "zero_pass_soft_reward_enabled",
+        "pseudo_multiround_enabled",
+        "question_prior_enabled",
+        "K",
+        "generation_batch_size",
+        "max_completion_length",
+        "max_completion_length_code",
+        "max_steps",
+        "eval_steps",
+        "seed",
+        "data_seed",
+    )
+    script_keys = (
+        "dataset_name",
+        "dataset_train_split",
+        "dataset_test_split",
+        "dataset_adapter",
+    )
+    return {
+        "dataset_tag": _first_dataset_tag(script_args, dataset_args),
+        "model_name_or_path": str(getattr(model_args, "model_name_or_path", "")),
+        "training_args": {key: _json_safe(getattr(training_args, key, None)) for key in training_keys},
+        "script_args": {key: _json_safe(getattr(script_args, key, None)) for key in script_keys},
+    }
+
+
+def _manifest_matches_resume_signature(manifest_path: str, signature: dict[str, Any]) -> bool:
+    if not os.path.exists(manifest_path):
+        return False
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return False
+
+    if str(payload.get("mode")) != str(signature["training_args"].get("codegrpo_mode")):
+        return False
+    if str(payload.get("model_args", {}).get("model_name_or_path", "")) != str(signature["model_name_or_path"]):
+        return False
+    if str(payload.get("script_args", {}).get("dataset_name", None)) != str(signature["script_args"].get("dataset_name", None)):
+        return False
+    if str(payload.get("paths", {}).get("mode", "")) != str(signature["training_args"].get("codegrpo_mode")):
+        return False
+
+    manifest_dataset_tag = _safe_slug(
+        str(payload.get("run_id", "")).split("__", 4)[3] if "__" in str(payload.get("run_id", "")) and len(str(payload.get("run_id", "")).split("__")) >= 5 else "",
+        "",
+        48,
+    )
+    if manifest_dataset_tag != _safe_slug(str(signature["dataset_tag"]), "", 48):
+        return False
+
+    for key, value in signature["training_args"].items():
+        if _json_safe(payload.get("training_args", {}).get(key)) != value:
+            return False
+    for key, value in signature["script_args"].items():
+        if _json_safe(payload.get("script_args", {}).get(key)) != value:
+            return False
+    return True
+
+
+def _baseline_eval_is_supported(training_args, trainer) -> tuple[bool, str | None]:
+    if str(getattr(training_args, "backend", "hf")) == "vllm":
+        return False, "backend='vllm' cannot guarantee a true base-model baseline."
+    unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
+    if not hasattr(unwrapped_model, "disable_adapter"):
+        return False, "baseline_eval requires a PEFT adapter that can be disabled."
+    return True, None
+
+
 def _get_rank() -> int:
     for key in ("RANK", "LOCAL_RANK"):
         value = os.environ.get(key)
@@ -111,6 +185,7 @@ def _configure_run_layout(script_args, training_args, model_args, dataset_args) 
     mode = _safe_slug(getattr(training_args, "codegrpo_mode", "train"), "train", 16)
     base_output_dir = os.path.abspath(training_args.output_dir)
     resume_from_checkpoint = getattr(training_args, "resume_from_checkpoint", None)
+    resume_signature = _build_resume_signature(script_args, training_args, model_args, dataset_args)
 
     def _checkpoint_step(path: str) -> tuple[int, float]:
         name = os.path.basename(path.rstrip("/\\"))
@@ -131,7 +206,14 @@ def _configure_run_layout(script_args, training_args, model_args, dataset_args) 
             checkpoint_dir = os.path.abspath(resume_from_checkpoint)
             return checkpoint_dir if os.path.isdir(checkpoint_dir) else None
         pattern = os.path.join(base_output_dir, mode, "*", "*_out", "checkpoint-*")
-        candidates = [path for path in glob.glob(pattern) if os.path.isdir(path)]
+        candidates = []
+        for path in glob.glob(pattern):
+            if not os.path.isdir(path):
+                continue
+            run_root = os.path.dirname(os.path.dirname(path))
+            manifest_path = os.path.join(run_root, "run_manifest.json")
+            if _manifest_matches_resume_signature(manifest_path, resume_signature):
+                candidates.append(path)
         if not candidates:
             return None
         candidates.sort(key=_checkpoint_step)
@@ -722,8 +804,12 @@ def _adapt_splits(
     test_split: str,
     max_train_samples: int | None = None,
     max_eval_samples: int | None = None,
+    *,
+    load_train_split: bool = True,
 ):
-    train_dataset = _limit_examples(adapter.adapt_dataset(dataset[train_split]), max_train_samples)
+    train_dataset = None
+    if load_train_split:
+        train_dataset = _limit_examples(adapter.adapt_dataset(dataset[train_split]), max_train_samples)
     eval_dataset = (
         _limit_examples(adapter.adapt_dataset(dataset[test_split]), max_eval_samples) if test_split in dataset else None
     )
@@ -754,6 +840,8 @@ def main(script_args, training_args, model_args, dataset_args):
         training_args.output_dir,
         run_layout["logs_dir"],
     )
+    if getattr(training_args, "resume_from_checkpoint", None) and not run_layout.get("resume_checkpoint_dir"):
+        logger.warning("resume_from_checkpoint was requested, but no matching checkpoint run was found under %s.", training_args.output_dir)
 
     adapter = load_dataset_adapter(script_args.dataset_adapter)
     dataset = _load_dataset(script_args, dataset_args)
@@ -778,6 +866,7 @@ def main(script_args, training_args, model_args, dataset_args):
         test_split=script_args.dataset_test_split,
         max_train_samples=script_args.max_train_samples,
         max_eval_samples=script_args.max_eval_samples,
+        load_train_split=training_args.codegrpo_mode != "test",
     )
 
     trainer = CodeGRPOTrainer(
@@ -799,17 +888,12 @@ def main(script_args, training_args, model_args, dataset_args):
         and eval_dataset is not None
         and getattr(training_args, "run_base_model_baseline_eval", False)
     ):
-        if str(getattr(training_args, "backend", "hf")) == "vllm":
-            logger.warning(
-                "Skipping run_base_model_baseline_eval because backend='vllm' cannot guarantee a true base-model baseline."
-            )
+        baseline_supported, reason = _baseline_eval_is_supported(training_args, trainer)
+        if not baseline_supported:
+            logger.warning("Skipping run_base_model_baseline_eval because %s", reason)
         else:
             unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
-            if hasattr(unwrapped_model, "disable_adapter"):
-                with use_adapter(unwrapped_model, adapter_name=None):
-                    baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
-            else:
-                logger.warning("run_base_model_baseline_eval requested, but trainer model has no PEFT adapter to disable.")
+            with use_adapter(unwrapped_model, adapter_name=None):
                 baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
             trainer.log_metrics("baseline_eval", baseline_metrics)
             trainer.save_metrics("baseline_eval", baseline_metrics)

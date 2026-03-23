@@ -358,8 +358,8 @@ class CodeGRPOConfig(GRPOConfig):
         default=None,
         metadata={
             "help": (
-                "Optional eval-only maximum code-repair rounds. When set, code-only eval can run for more rounds "
-                "than training T_max."
+                "Optional eval-only maximum code-repair rounds. Ignored when eval_code_only_single_trajectory=True; "
+                "in that mode eval only runs the actually executed repair trajectory."
             )
         },
     )

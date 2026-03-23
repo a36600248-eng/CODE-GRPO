@@ -631,6 +631,39 @@ def test_configure_run_layout_reuses_existing_checkpoint_run():
     base_output_dir = Path("trl/tests/tmp_resume_layout") / f"run_{random.randint(0, 1_000_000)}" / "runs"
     checkpoint_dir = base_output_dir / "train" / "existing-run" / "train_out" / "checkpoint-40"
     checkpoint_dir.mkdir(parents=True)
+    manifest_path = checkpoint_dir.parent.parent / "run_manifest.json"
+    manifest_path.write_text(
+        """
+{
+  "run_id": "20260324_000000__train__qwen2.5-coder-7b-instruct__dataset__vllm",
+  "mode": "train",
+  "paths": {"mode": "train"},
+  "script_args": {
+    "dataset_name": null,
+    "dataset_train_split": null,
+    "dataset_test_split": null,
+    "dataset_adapter": null
+  },
+  "training_args": {
+    "codegrpo_mode": "train",
+    "backend": "vllm",
+    "zero_pass_soft_reward_enabled": null,
+    "pseudo_multiround_enabled": null,
+    "question_prior_enabled": null,
+    "K": null,
+    "generation_batch_size": null,
+    "max_completion_length": null,
+    "max_completion_length_code": null,
+    "max_steps": null,
+    "eval_steps": null,
+    "seed": null,
+    "data_seed": null
+  },
+  "model_args": {"model_name_or_path": "Qwen/Qwen2.5-Coder-7B-Instruct"}
+}
+""".strip(),
+        encoding="utf-8",
+    )
 
     script_args = SimpleNamespace(dataset_name=None)
     training_args = SimpleNamespace(
@@ -651,3 +684,115 @@ def test_configure_run_layout_reuses_existing_checkpoint_run():
     assert layout["resume_checkpoint_dir"] == str(checkpoint_dir.resolve())
     assert layout["run_id"] == "existing-run"
     assert training_args.output_dir == str(checkpoint_dir.parent.resolve())
+
+
+def test_configure_run_layout_ignores_mismatched_checkpoint_run():
+    base_output_dir = Path("trl/tests/tmp_resume_layout") / f"run_{random.randint(0, 1_000_000)}" / "runs"
+    checkpoint_dir = base_output_dir / "train" / "old-run" / "train_out" / "checkpoint-40"
+    checkpoint_dir.mkdir(parents=True)
+    manifest_path = checkpoint_dir.parent.parent / "run_manifest.json"
+    manifest_path.write_text(
+        """
+{
+  "run_id": "old-run",
+  "mode": "train",
+  "paths": {"mode": "train"},
+  "script_args": {
+    "dataset_name": null,
+    "dataset_train_split": "train",
+    "dataset_test_split": "validation",
+    "dataset_adapter": "default"
+  },
+  "training_args": {
+    "codegrpo_mode": "train",
+    "backend": "vllm",
+    "zero_pass_soft_reward_enabled": false,
+    "pseudo_multiround_enabled": false,
+    "question_prior_enabled": false,
+    "K": 8,
+    "generation_batch_size": 16,
+    "max_completion_length": 512,
+    "max_completion_length_code": 512,
+    "max_steps": 120,
+    "eval_steps": 20,
+    "seed": 42,
+    "data_seed": 42
+  },
+  "model_args": {"model_name_or_path": "Qwen/Qwen2.5-Coder-7B-Instruct"}
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    script_args = SimpleNamespace(
+        dataset_name=None,
+        dataset_train_split="train",
+        dataset_test_split="validation",
+        dataset_adapter="default",
+    )
+    training_args = SimpleNamespace(
+        output_dir=str(base_output_dir),
+        codegrpo_mode="train",
+        backend="vllm",
+        tensorboard_root_dir=None,
+        logging_dir=None,
+        debug_trace_dir=None,
+        run_name=None,
+        resume_from_checkpoint=True,
+        zero_pass_soft_reward_enabled=True,
+        pseudo_multiround_enabled=False,
+        question_prior_enabled=False,
+        K=8,
+        generation_batch_size=16,
+        max_completion_length=512,
+        max_completion_length_code=512,
+        max_steps=120,
+        eval_steps=20,
+        seed=42,
+        data_seed=42,
+    )
+    model_args = SimpleNamespace(model_name_or_path="Qwen/Qwen2.5-Coder-7B-Instruct")
+    dataset_args = SimpleNamespace(datasets=[])
+
+    layout = code_grpo_script._configure_run_layout(script_args, training_args, model_args, dataset_args)
+
+    assert layout["resume_checkpoint_dir"] is None
+    assert layout["run_id"] != "old-run"
+
+
+def test_adapt_splits_can_skip_train_split_for_test_mode():
+    class DummyAdapter:
+        def adapt_dataset(self, split):
+            return split
+
+    dataset = {"validation": [1, 2, 3]}
+    train_dataset, eval_dataset = code_grpo_script._adapt_splits(
+        dataset=dataset,
+        adapter=DummyAdapter(),
+        train_split="train",
+        test_split="validation",
+        load_train_split=False,
+    )
+
+    assert train_dataset is None
+    assert eval_dataset == [1, 2, 3]
+
+
+def test_baseline_eval_support_requires_hf_and_peft():
+    training_args = SimpleNamespace(backend="vllm")
+    trainer = SimpleNamespace(
+        accelerator=SimpleNamespace(unwrap_model=lambda model: model),
+        model=SimpleNamespace(disable_adapter=lambda: None),
+    )
+    supported, reason = code_grpo_script._baseline_eval_is_supported(training_args, trainer)
+    assert not supported
+    assert "vllm" in reason
+
+    training_args = SimpleNamespace(backend="hf")
+    trainer = SimpleNamespace(
+        accelerator=SimpleNamespace(unwrap_model=lambda model: object()),
+        model=object(),
+    )
+    supported, reason = code_grpo_script._baseline_eval_is_supported(training_args, trainer)
+    assert not supported
+    assert "PEFT" in reason

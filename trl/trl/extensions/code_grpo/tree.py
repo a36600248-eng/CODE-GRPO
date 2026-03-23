@@ -412,6 +412,14 @@ class CodeGRPOTreeRunner:
 
     def run_question_eval_code_only(self, sample: dict[str, Any], rng: random.Random) -> QuestionRollout:
         del rng
+        if int(getattr(self.args, "eval_T_max_override", 0) or 0) > 1 and not getattr(
+            self, "_warned_eval_tmax_override_ignored", False
+        ):
+            self.logger.warning(
+                "eval_T_max_override=%s is ignored because eval_code_only_single_trajectory runs one actual repair trajectory.",
+                getattr(self.args, "eval_T_max_override", None),
+            )
+            self._warned_eval_tmax_override_ignored = True
         question_id = str(sample["question_id"])
         prompt = str(sample["prompt"])
         test_cases = list(sample["test_cases"])
