@@ -3,7 +3,7 @@
 This project now keeps only the current main algorithm path:
 
 1. Single-round code GRPO.
-2. Each problem generates `K=num_generations` code candidates once.
+2. Each problem generates a primary batch of `K=num_generations` code candidates in one round, with optional bounded retry only for degenerate retry paths such as `M_retry` or `undiff_retry`.
 3. Hard reward is unit-test pass rate.
 4. Candidates can receive a bounded soft reward in addition to hard reward.
 5. Optional `code + input -> output/error` auxiliary training uses a separate auxiliary SFT loss.
@@ -17,7 +17,7 @@ Legacy logic-audit, exec-audit, final-reason, and heavy multiround search are no
 For each problem:
 
 1. Build one code-generation prompt from the problem text plus optional recent iterative history.
-2. Generate `K` code candidates.
+2. Generate `K` primary code candidates.
 3. Run unit tests for each candidate.
 4. Compute `hard_reward = pass_cnt / test_count`.
 5. If bounded soft reward is enabled, compute soft reward on the selected diagnostic set.
@@ -34,7 +34,7 @@ where:
 - `beta < 1 / test_count`
 - the soft term is `beta * effective_normalized_soft_reward`
 - if no valid diagnostic evidence is available, `effective_normalized_soft_reward = 0`
-- if the sample is soft-reward-ineligible, the normalized soft reward is additionally downscaled before applying `beta`
+- if the sample is soft-reward-ineligible, `effective_normalized_soft_reward` first applies the configured ineligible scaling before `beta`
 
 This keeps soft reward strictly below genuine hard-reward progress and avoids treating `no evidence` as a positive signal.
 
