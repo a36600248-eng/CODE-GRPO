@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
+import logging
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 _SUPPORTED_VLLM_OVERRIDES = {
     "max_new_tokens",
@@ -58,11 +62,34 @@ class HFBackend(Backend):
         tokenizer,
         device,
         generation_defaults: dict | None = None,
+        log_cuda_memory_metrics: bool = False,
+        log_cuda_memory_logprob_min_seq_len: int = 1024,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.generation_defaults = generation_defaults or {}
+        self.log_cuda_memory_metrics = bool(log_cuda_memory_metrics)
+        self.log_cuda_memory_logprob_min_seq_len = int(log_cuda_memory_logprob_min_seq_len or 0)
+
+    def _maybe_log_cuda_memory(self, label: str, seq_len: int | None = None) -> None:
+        if not self.log_cuda_memory_metrics or not torch.cuda.is_available():
+            return
+        if seq_len is not None and seq_len < self.log_cuda_memory_logprob_min_seq_len:
+            return
+        alloc_gb = torch.cuda.memory_allocated(self.device) / (1024**3)
+        reserved_gb = torch.cuda.memory_reserved(self.device) / (1024**3)
+        max_alloc_gb = torch.cuda.max_memory_allocated(self.device) / (1024**3)
+        max_reserved_gb = torch.cuda.max_memory_reserved(self.device) / (1024**3)
+        logger.info(
+            "[mem] stage=%s alloc=%.2fGB reserved=%.2fGB max_alloc=%.2fGB max_reserved=%.2fGB%s",
+            label,
+            alloc_gb,
+            reserved_gb,
+            max_alloc_gb,
+            max_reserved_gb,
+            f" seq_len={seq_len}" if seq_len is not None else "",
+        )
 
     def generate(self, prompt: str, **gen_cfg) -> str:
         cfg = {**self.generation_defaults, **gen_cfg}
@@ -118,6 +145,7 @@ class HFBackend(Backend):
         target_ids = target_ids.to(self.device)
         input_ids = torch.cat([prompt_ids, target_ids], dim=1)
         attention_mask = torch.ones_like(input_ids)
+        self._maybe_log_cuda_memory("hf_logprob_start", seq_len=prompt_len + target_len)
         try:
             with torch.no_grad():
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
@@ -133,7 +161,10 @@ class HFBackend(Backend):
         selected_logits = log_probs[:, positions, :]
         target = target_ids.unsqueeze(-1)
         selected = torch.gather(selected_logits, dim=-1, index=target).squeeze(-1)
-        return selected.mean().item()
+        result = selected.mean().item()
+        del logits, log_probs, selected_logits, selected
+        self._maybe_log_cuda_memory("hf_logprob_end", seq_len=prompt_len + target_len)
+        return result
 
 
 class VLLMBackend(Backend):
@@ -213,8 +244,17 @@ def build_backend(
     device,
     generation_defaults: dict | None = None,
     vllm_generation=None,
+    log_cuda_memory_metrics: bool = False,
+    log_cuda_memory_logprob_min_seq_len: int = 1024,
 ) -> Backend:
-    hf_backend = HFBackend(model=model, tokenizer=tokenizer, device=device, generation_defaults=generation_defaults)
+    hf_backend = HFBackend(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        generation_defaults=generation_defaults,
+        log_cuda_memory_metrics=log_cuda_memory_metrics,
+        log_cuda_memory_logprob_min_seq_len=log_cuda_memory_logprob_min_seq_len,
+    )
     if backend_name == "hf":
         return hf_backend
     if backend_name == "vllm":

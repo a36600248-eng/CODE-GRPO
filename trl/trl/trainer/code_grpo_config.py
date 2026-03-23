@@ -473,6 +473,14 @@ class CodeGRPOConfig(GRPOConfig):
             "help": "Compute and log KL divergence as a monitoring metric even when it is not part of the loss."
         },
     )
+    log_cuda_memory_metrics: bool = field(
+        default=False,
+        metadata={"help": "Whether to log CUDA allocated/reserved memory at key training boundaries."},
+    )
+    log_cuda_memory_logprob_min_seq_len: int = field(
+        default=1024,
+        metadata={"help": "Only emit HF logprob CUDA memory logs when prompt+target length reaches this threshold."},
+    )
     review_bundle_trace_sample_size: int = field(
         default=2,
         metadata={"help": "How many trace files to copy into review_bundle."},
@@ -528,6 +536,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("max_train_trace_files must be >= 0.")
         if self.review_bundle_trace_sample_size < 0:
             raise ValueError("review_bundle_trace_sample_size must be >= 0.")
+        if self.log_cuda_memory_logprob_min_seq_len < 0:
+            raise ValueError("log_cuda_memory_logprob_min_seq_len must be >= 0.")
         if self.undiff_retry_max < 0:
             raise ValueError("undiff_retry_max must be non-negative.")
         if self.sampling_refresh_steps < 0:

@@ -393,6 +393,10 @@ class CodeGRPOTrainer(GRPOTrainer):
             device=self.accelerator.device,
             generation_defaults=generation_defaults,
             vllm_generation=vllm_generation,
+            log_cuda_memory_metrics=bool(getattr(self.args, "log_cuda_memory_metrics", False)),
+            log_cuda_memory_logprob_min_seq_len=int(
+                getattr(self.args, "log_cuda_memory_logprob_min_seq_len", 1024) or 0
+            ),
         )
         self.tree_runner = CodeGRPOTreeRunner(
             backend=self.code_backend,
@@ -439,6 +443,27 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._step_samples_path = os.path.join(logs_dir, f"step_samples_rank{self.accelerator.process_index}.jsonl")
         self._initialize_original_coverage_state()
         self._runtime_state_loaded = False
+
+    def _maybe_log_cuda_memory(self, stage: str, *, mode: str | None = None) -> None:
+        if not bool(getattr(self.args, "log_cuda_memory_metrics", False)):
+            return
+        if not torch.cuda.is_available():
+            return
+        device = self.accelerator.device
+        alloc_gb = torch.cuda.memory_allocated(device) / (1024**3)
+        reserved_gb = torch.cuda.memory_reserved(device) / (1024**3)
+        max_alloc_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+        max_reserved_gb = torch.cuda.max_memory_reserved(device) / (1024**3)
+        logger.info(
+            "[mem] step=%s mode=%s stage=%s alloc=%.2fGB reserved=%.2fGB max_alloc=%.2fGB max_reserved=%.2fGB",
+            int(getattr(self.state, "global_step", 0) or 0),
+            mode or ("train" if self.model.training else "eval"),
+            stage,
+            alloc_gb,
+            reserved_gb,
+            max_alloc_gb,
+            max_reserved_gb,
+        )
 
     @staticmethod
     def _resolve_resume_checkpoint_path(output_dir: str, resume_from_checkpoint) -> str | None:
@@ -1458,20 +1483,24 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _compute_reference_kl_metric(
         self,
         per_token_logps: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
         completion_mask: torch.Tensor,
-        logits_to_keep: int,
+        ref_per_token_logps: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        logits_to_keep: int | None = None,
     ) -> float | None:
         if not self._should_record_kl_metric("train" if self.model.training else "eval"):
             return None
 
         with torch.no_grad():
-            ref_per_token_logps = self._get_reference_per_token_logps(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                logits_to_keep=logits_to_keep,
-            )
+            if ref_per_token_logps is None:
+                if input_ids is None or attention_mask is None or logits_to_keep is None:
+                    return None
+                ref_per_token_logps = self._get_reference_per_token_logps(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    logits_to_keep=logits_to_keep,
+                )
             if ref_per_token_logps is None:
                 return None
 
@@ -1669,6 +1698,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         logits_to_keep = completion_ids.size(1)
 
+        self._maybe_log_cuda_memory("before_old_logps_attach", mode="train")
         with torch.no_grad(), disable_gradient_checkpointing(self.model, self.args.gradient_checkpointing_kwargs):
             old_per_token_logps, _ = self._get_per_token_logps_and_entropies(
                 self.model,
@@ -1679,9 +1709,11 @@ class CodeGRPOTrainer(GRPOTrainer):
             )
 
         batch["old_per_token_logps"] = old_per_token_logps.detach()
+        self._maybe_log_cuda_memory("after_old_logps_attach", mode="train")
 
     def _compute_rollout_result(self, inputs: list[dict[str, Any]], mode: str) -> _CodeGRPORolloutResult:
         examples = self._unique_examples(inputs)
+        self._maybe_log_cuda_memory("rollout_start", mode=mode)
         rollout_t0 = time.perf_counter()
         seed_offset = self.state.global_step if mode == "train" else self.state.global_step + 1_000_000
         base_rng = random.Random(self.args.seed + seed_offset)
@@ -1732,6 +1764,7 @@ class CodeGRPOTrainer(GRPOTrainer):
                 mode=mode,
             )
         rollout_time_s = max(time.perf_counter() - rollout_t0, 1e-8)
+        self._maybe_log_cuda_memory("rollout_end", mode=mode)
         self._log_rollout_progress(
             "[rollout] mode=%s step=%s finished questions=%d elapsed=%s",
             mode,
@@ -1966,6 +1999,8 @@ class CodeGRPOTrainer(GRPOTrainer):
         return self._compute_loss(model, inputs)
 
     def _compute_loss(self, model, inputs):
+        mode = "train" if self.model.training else "eval"
+        self._maybe_log_cuda_memory("loss_start", mode=mode)
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
@@ -2013,6 +2048,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             loss_code = loss_code_per_seq.mean()
             loss_sft = loss_sft_per_seq.mean()
         loss = loss_code + self.args.beta_sft * loss_sft
+        ref_per_token_logps = None
         if self.beta != 0.0:
             ref_per_token_logps = self._get_reference_per_token_logps(
                 input_ids=input_ids,
@@ -2025,7 +2061,6 @@ class CodeGRPOTrainer(GRPOTrainer):
                 seq_kl = (per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1).clamp(min=1.0)
                 loss = loss + self.beta * seq_kl.mean()
 
-        mode = "train" if self.model.training else "eval"
         normalizer = self.current_gradient_accumulation_steps if mode == "train" else 1.0
         loss = loss / normalizer
 
@@ -2073,13 +2108,15 @@ class CodeGRPOTrainer(GRPOTrainer):
             self._metrics[mode]["tokens_per_update"].append(completion_mask.sum().item())
         kl_value = self._compute_reference_kl_metric(
             per_token_logps=per_token_logps,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
             completion_mask=completion_mask,
-            logits_to_keep=logits_to_keep,
+            ref_per_token_logps=ref_per_token_logps,
+            input_ids=input_ids if ref_per_token_logps is None else None,
+            attention_mask=attention_mask if ref_per_token_logps is None else None,
+            logits_to_keep=logits_to_keep if ref_per_token_logps is None else None,
         )
         if kl_value is not None:
             self._metrics[mode]["kl"].append(kl_value)
+        self._maybe_log_cuda_memory("loss_end", mode=mode)
         return loss
 
     def evaluate(self, *args, **kwargs):

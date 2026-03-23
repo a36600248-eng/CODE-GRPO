@@ -536,3 +536,29 @@ def test_iterative_node_priority_prefers_mid_pass_rate_over_nearly_solved():
     assert mid_priority > near_solved_priority
     assert zero_pass_soft_priority > 1e-6
     assert zero_pass_soft_priority < mid_priority
+
+
+def test_compute_reference_kl_metric_reuses_precomputed_ref_logps():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer.model = SimpleNamespace(training=True)
+    trainer.args = SimpleNamespace(log_kl_metrics=True)
+    trainer.state = SimpleNamespace(global_step=0)
+    trainer.accelerator = SimpleNamespace(gather=lambda tensor: tensor.unsqueeze(0))
+    trainer._should_record_kl_metric = lambda mode: True
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("ref forward should be reused, not recomputed")
+
+    trainer._get_reference_per_token_logps = fail_if_called
+
+    per_token_logps = trainer_utils.torch.tensor([[0.1, 0.2]], dtype=trainer_utils.torch.float32)
+    ref_per_token_logps = trainer_utils.torch.tensor([[0.15, 0.25]], dtype=trainer_utils.torch.float32)
+    completion_mask = trainer_utils.torch.tensor([[1.0, 1.0]], dtype=trainer_utils.torch.float32)
+
+    value = trainer._compute_reference_kl_metric(
+        per_token_logps=per_token_logps,
+        completion_mask=completion_mask,
+        ref_per_token_logps=ref_per_token_logps,
+    )
+
+    assert isinstance(value, float)
