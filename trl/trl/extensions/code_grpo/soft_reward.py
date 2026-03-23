@@ -1,4 +1,5 @@
 import json
+import math
 from typing import Any
 
 from .prompts import build_zero_pass_code_view_prompt, build_zero_pass_problem_view_prompt
@@ -79,7 +80,33 @@ def compute_soft_reward(
             s_prob = float(evaluator.logprob(problem_prompt, target_text))
             if problem_logprob_cache is not None:
                 problem_logprob_cache[cache_key] = s_prob
+        if not math.isfinite(float(s_prob)):
+            details.append(
+                {
+                    "input": case_input,
+                    "oracle_output": oracle_output,
+                    "target_text": target_text,
+                    "s_prob": s_prob,
+                    "s_code": float("nan"),
+                    "delta": 0.0,
+                    "skipped": "problem_logprob_unavailable",
+                }
+            )
+            continue
         s_code = float(evaluator.logprob(code_prompt, target_text))
+        if not math.isfinite(s_code):
+            details.append(
+                {
+                    "input": case_input,
+                    "oracle_output": oracle_output,
+                    "target_text": target_text,
+                    "s_prob": s_prob,
+                    "s_code": s_code,
+                    "delta": 0.0,
+                    "skipped": "code_logprob_unavailable",
+                }
+            )
+            continue
         delta = s_code - s_prob
         deltas.append(delta)
         details.append(

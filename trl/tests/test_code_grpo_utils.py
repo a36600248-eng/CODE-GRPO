@@ -223,3 +223,35 @@ def test_compute_soft_reward_reuses_problem_logprob_cache():
     assert len(details2) == 2
     assert reward1 == reward2
     assert len(calls) == 6
+
+
+def test_compute_soft_reward_skips_nonfinite_logprob():
+    class DummyEvaluator:
+        def __init__(self):
+            self.calls = 0
+
+        def logprob(self, prompt, target_text):
+            del prompt, target_text
+            self.calls += 1
+            if self.calls == 1:
+                return float("nan")
+            return 1.0
+
+    problem = {
+        "prompt": "Add two numbers",
+        "diagnostic_inputs": ["1 2\n"],
+        "diagnostic_outputs": ["3\n"],
+    }
+
+    reward, details = compute_soft_reward(
+        problem=problem,
+        code="print(3)",
+        diagnostic_inputs=problem["diagnostic_inputs"],
+        oracle_outputs=problem["diagnostic_outputs"],
+        evaluator=DummyEvaluator(),
+        problem_logprob_cache={},
+    )
+
+    assert reward == 0.0
+    assert len(details) == 1
+    assert details[0]["skipped"] == "problem_logprob_unavailable"

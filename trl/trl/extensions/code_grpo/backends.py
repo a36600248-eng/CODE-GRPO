@@ -28,6 +28,15 @@ def _truncate_at_stop_strings(text: str, stop_strings: list[str] | tuple[str, ..
     return text[:best_end] if best_end is not None else text
 
 
+def _safe_model_max_length(tokenizer) -> int | None:
+    value = getattr(tokenizer, "model_max_length", None)
+    if not isinstance(value, int):
+        return None
+    if value <= 0 or value >= 10_000_000:
+        return None
+    return value
+
+
 class Backend(ABC):
     @abstractmethod
     def generate(self, prompt: str, **gen_cfg) -> str:
@@ -94,20 +103,31 @@ class HFBackend(Backend):
 
     def logprob(self, prompt: str, target_text: str, **cfg) -> float:
         del cfg
-        prompt_ids = self.tokenizer(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"].to(self.device)
-        target_ids = self.tokenizer(target_text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(
-            self.device
-        )
-        input_ids = torch.cat([prompt_ids, target_ids], dim=1)
-        attention_mask = torch.ones_like(input_ids)
-        with torch.no_grad():
-            logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
-        log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)
-
+        prompt_ids = self.tokenizer(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"]
+        target_ids = self.tokenizer(target_text, add_special_tokens=False, return_tensors="pt")["input_ids"]
         prompt_len = prompt_ids.shape[1]
         target_len = target_ids.shape[1]
         if target_len == 0:
             return 0.0
+
+        max_supported = _safe_model_max_length(self.tokenizer)
+        if max_supported is not None and (prompt_len + target_len) > max_supported:
+            return float("nan")
+
+        prompt_ids = prompt_ids.to(self.device)
+        target_ids = target_ids.to(self.device)
+        input_ids = torch.cat([prompt_ids, target_ids], dim=1)
+        attention_mask = torch.ones_like(input_ids)
+        try:
+            with torch.no_grad():
+                logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return float("nan")
+        log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)
 
         positions = torch.arange(prompt_len - 1, prompt_len - 1 + target_len, device=self.device)
         selected_logits = log_probs[:, positions, :]
