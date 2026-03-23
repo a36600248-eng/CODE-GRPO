@@ -108,25 +108,65 @@ def _get_rank() -> int:
 
 
 def _configure_run_layout(script_args, training_args, model_args, dataset_args) -> dict[str, str]:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     mode = _safe_slug(getattr(training_args, "codegrpo_mode", "train"), "train", 16)
-    backend = _safe_slug(getattr(training_args, "backend", "hf"), "hf", 16)
-    model_tag = _safe_slug(os.path.basename(str(model_args.model_name_or_path).rstrip("/\\")), "model", 48)
-    dataset_tag = _first_dataset_tag(script_args, dataset_args)
-    run_id = f"{timestamp}__{mode}__{model_tag}__{dataset_tag}__{backend}"
-
     base_output_dir = os.path.abspath(training_args.output_dir)
-    run_root = os.path.join(base_output_dir, mode, run_id)
-    artifacts_dir = os.path.join(run_root, "test_out" if mode == "test" else "train_out")
-    logs_dir = os.path.join(run_root, "logs")
-    traces_dir = os.path.join(run_root, "traces", "rollout")
+    resume_from_checkpoint = getattr(training_args, "resume_from_checkpoint", None)
+
+    def _checkpoint_step(path: str) -> tuple[int, float]:
+        name = os.path.basename(path.rstrip("/\\"))
+        try:
+            step = int(name.split("-")[-1])
+        except Exception:
+            step = -1
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = -1.0
+        return step, mtime
+
+    def _find_resume_checkpoint() -> str | None:
+        if not resume_from_checkpoint:
+            return None
+        if isinstance(resume_from_checkpoint, str):
+            checkpoint_dir = os.path.abspath(resume_from_checkpoint)
+            return checkpoint_dir if os.path.isdir(checkpoint_dir) else None
+        pattern = os.path.join(base_output_dir, mode, "*", "*_out", "checkpoint-*")
+        candidates = [path for path in glob.glob(pattern) if os.path.isdir(path)]
+        if not candidates:
+            return None
+        candidates.sort(key=_checkpoint_step)
+        return os.path.abspath(candidates[-1])
+
+    checkpoint_dir = _find_resume_checkpoint()
     tensorboard_root_dir = getattr(training_args, "tensorboard_root_dir", None)
-    if tensorboard_root_dir:
-        tensorboard_dir = os.path.join(os.path.abspath(tensorboard_root_dir), mode, run_id)
+    if checkpoint_dir:
+        artifacts_dir = os.path.dirname(checkpoint_dir)
+        run_root = os.path.dirname(artifacts_dir)
+        run_id = os.path.basename(run_root)
+        logs_dir = os.path.join(run_root, "logs")
+        traces_dir = os.path.join(run_root, "traces", "rollout")
+        if tensorboard_root_dir:
+            tensorboard_dir = os.path.join(os.path.abspath(tensorboard_root_dir), mode, run_id)
+        else:
+            tensorboard_dir = os.path.join(run_root, "tensorboard")
+        for path in (run_root, artifacts_dir, logs_dir, traces_dir, tensorboard_dir):
+            os.makedirs(path, exist_ok=True)
     else:
-        tensorboard_dir = os.path.join(run_root, "tensorboard")
-    for path in (run_root, artifacts_dir, logs_dir, traces_dir, tensorboard_dir):
-        os.makedirs(path, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backend = _safe_slug(getattr(training_args, "backend", "hf"), "hf", 16)
+        model_tag = _safe_slug(os.path.basename(str(model_args.model_name_or_path).rstrip("/\\")), "model", 48)
+        dataset_tag = _first_dataset_tag(script_args, dataset_args)
+        run_id = f"{timestamp}__{mode}__{model_tag}__{dataset_tag}__{backend}"
+        run_root = os.path.join(base_output_dir, mode, run_id)
+        artifacts_dir = os.path.join(run_root, "test_out" if mode == "test" else "train_out")
+        logs_dir = os.path.join(run_root, "logs")
+        traces_dir = os.path.join(run_root, "traces", "rollout")
+        if tensorboard_root_dir:
+            tensorboard_dir = os.path.join(os.path.abspath(tensorboard_root_dir), mode, run_id)
+        else:
+            tensorboard_dir = os.path.join(run_root, "tensorboard")
+        for path in (run_root, artifacts_dir, logs_dir, traces_dir, tensorboard_dir):
+            os.makedirs(path, exist_ok=True)
 
     training_args.output_dir = artifacts_dir
     training_args.logging_dir = tensorboard_dir
@@ -142,6 +182,7 @@ def _configure_run_layout(script_args, training_args, model_args, dataset_args) 
         "traces_dir": traces_dir,
         "tensorboard_dir": tensorboard_dir,
         "mode": mode,
+        "resume_checkpoint_dir": checkpoint_dir,
     }
 
 
@@ -758,21 +799,28 @@ def main(script_args, training_args, model_args, dataset_args):
         and eval_dataset is not None
         and getattr(training_args, "run_base_model_baseline_eval", False)
     ):
-        unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
-        if hasattr(unwrapped_model, "disable_adapter"):
-            with use_adapter(unwrapped_model, adapter_name=None):
-                baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
+        if str(getattr(training_args, "backend", "hf")) == "vllm":
+            logger.warning(
+                "Skipping run_base_model_baseline_eval because backend='vllm' cannot guarantee a true base-model baseline."
+            )
         else:
-            logger.warning("run_base_model_baseline_eval requested, but trainer model has no PEFT adapter to disable.")
-            baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
-        trainer.log_metrics("baseline_eval", baseline_metrics)
-        trainer.save_metrics("baseline_eval", baseline_metrics)
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
+            if hasattr(unwrapped_model, "disable_adapter"):
+                with use_adapter(unwrapped_model, adapter_name=None):
+                    baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
+            else:
+                logger.warning("run_base_model_baseline_eval requested, but trainer model has no PEFT adapter to disable.")
+                baseline_metrics = trainer.evaluate(eval_dataset=eval_dataset)
+            trainer.log_metrics("baseline_eval", baseline_metrics)
+            trainer.save_metrics("baseline_eval", baseline_metrics)
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     if training_args.codegrpo_mode == "test":
-        test_dataset = eval_dataset if eval_dataset is not None else train_dataset
+        if eval_dataset is None:
+            raise ValueError("codegrpo_mode=test requires an eval/test split; refusing to fall back to train_dataset.")
+        test_dataset = eval_dataset
         metrics = trainer.evaluate(eval_dataset=test_dataset)
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
@@ -790,7 +838,7 @@ def main(script_args, training_args, model_args, dataset_args):
         return
 
     try:
-        train_result = trainer.train()
+        train_result = trainer.train(resume_from_checkpoint=run_layout.get("resume_checkpoint_dir"))
         trainer.log_metrics("train", train_result.metrics)
         trainer.save_metrics("train", train_result.metrics)
         trainer.save_state()

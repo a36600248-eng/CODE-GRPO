@@ -245,6 +245,8 @@ class CodeGRPOTreeRunner:
     def _build_round_record(self, round_idx: int, nodes: list[Node], stage: str = "search") -> dict[str, Any]:
         payload_nodes: list[dict[str, Any]] = []
         for node in nodes:
+            normalized_soft_reward = float(node.exec_summary.get("normalized_soft_reward", 0.0))
+            soft_reward_beta = float(node.exec_summary.get("soft_reward_beta", 0.0))
             payload_nodes.append(
                 {
                     "node_id": node.node_id,
@@ -256,12 +258,16 @@ class CodeGRPOTreeRunner:
                     "A_code": node.A_code,
                     "status_code": node.status_code,
                     "code": node.code,
+                    "code_text": str(node.code or ""),
                     "prompt_text": node.prompt_text,
                     "main_sample_active": bool(node.completion_text),
+                    "pass_cnt": int(node.exec_summary.get("pass_cnt", 0) or 0),
+                    "test_count": int(node.exec_summary.get("test_count", 0) or 0),
                     "hard_reward": float(node.exec_summary.get("hard_reward", node.pass_rate)),
                     "raw_soft_reward": float(node.exec_summary.get("raw_soft_reward", 0.0)),
-                    "normalized_soft_reward": float(node.exec_summary.get("normalized_soft_reward", 0.0)),
-                    "soft_reward_beta": float(node.exec_summary.get("soft_reward_beta", 0.0)),
+                    "normalized_soft_reward": normalized_soft_reward,
+                    "soft_reward_beta": soft_reward_beta,
+                    "R_soft_effective": normalized_soft_reward * soft_reward_beta,
                     "final_reward": float(node.exec_summary.get("final_reward", node.R_code)),
                     "compile_score": float(node.exec_summary.get("compile_score", 0.0)),
                     "generation_format_ok": bool(node.exec_summary.get("generation_format_ok", False)),
@@ -682,15 +688,20 @@ class CodeGRPOTreeRunner:
                 evaluator=self.backend,
                 problem_logprob_cache=problem_logprob_cache,
             )
-            normalized_soft_reward = normalize_soft_reward_to_unit_interval(
-                raw_value=raw_soft_reward,
-                clip_low=float(getattr(self.args, "zero_pass_soft_reward_clip_low", -2.0)),
-                clip_high=float(getattr(self.args, "zero_pass_soft_reward_clip_high", 2.0)),
-            )
-            soft_reward_beta = compute_zero_pass_beta(
-                test_count=test_count,
-                beta_scale=float(getattr(self.args, "zero_pass_soft_reward_beta_scale", 0.5)),
-            )
+            if math.isfinite(raw_soft_reward):
+                normalized_soft_reward = normalize_soft_reward_to_unit_interval(
+                    raw_value=raw_soft_reward,
+                    clip_low=float(getattr(self.args, "zero_pass_soft_reward_clip_low", -2.0)),
+                    clip_high=float(getattr(self.args, "zero_pass_soft_reward_clip_high", 2.0)),
+                )
+                soft_reward_beta = compute_zero_pass_beta(
+                    test_count=test_count,
+                    beta_scale=float(getattr(self.args, "zero_pass_soft_reward_beta_scale", 0.5)),
+                )
+            else:
+                raw_soft_reward = 0.0
+                normalized_soft_reward = 0.0
+                soft_reward_beta = 0.0
         soft_reward_eligible = zero_pass_triggered and _is_soft_reward_eligible(code, io_mode)
         if zero_pass_triggered and not soft_reward_eligible:
             normalized_soft_reward *= float(getattr(self.args, "soft_reward_ineligible_scale", 0.3))
@@ -867,13 +878,18 @@ class CodeGRPOTreeRunner:
         flat_nodes = [round_item["nodes"][0] for round_item in eval_rounds if round_item.get("nodes")]
         cumulative_solved = False
         cumulative_best = 0.0
-        eval_max_rounds = int(getattr(self.args, "eval_T_max_override", 0) or self.args.T_max)
-        max_rounds = max(eval_max_rounds, len(flat_nodes))
+        max_rounds = len(flat_nodes)
+        if max_rounds == 0:
+            metrics["pass_at_1_round_1"] = 0.0
+            metrics["best_pass_rate_round_1"] = 0.0
+            metrics["pass_at_1"] = 0.0
+            metrics["pass_at_k_round_n"] = 0.0
+            metrics["best_pass_rate_overall"] = 0.0
+            return metrics
         for round_idx in range(1, max_rounds + 1):
-            if round_idx <= len(flat_nodes):
-                node = flat_nodes[round_idx - 1]
-                cumulative_solved = cumulative_solved or (float(node.get("pass_rate", 0.0)) == 1.0)
-                cumulative_best = max(cumulative_best, float(node.get("pass_rate", 0.0)))
+            node = flat_nodes[round_idx - 1]
+            cumulative_solved = cumulative_solved or (float(node.get("pass_rate", 0.0)) == 1.0)
+            cumulative_best = max(cumulative_best, float(node.get("pass_rate", 0.0)))
             metrics[f"pass_at_1_round_{round_idx}"] = 1.0 if cumulative_solved else 0.0
             metrics[f"best_pass_rate_round_{round_idx}"] = cumulative_best
         metrics["pass_at_1"] = metrics.get(f"pass_at_1_round_{max_rounds}", 0.0)

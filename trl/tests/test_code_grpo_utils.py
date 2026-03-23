@@ -1,6 +1,8 @@
 # Copyright 2020-2026 The HuggingFace Team. All rights reserved.
 
+import math
 import random
+from pathlib import Path
 from types import SimpleNamespace
 
 from trl.extensions.code_grpo import tree as tree_module
@@ -8,6 +10,7 @@ from trl.extensions.code_grpo.error_utils import summarize_error
 from trl.extensions.code_grpo.matcher import is_match, values_equal
 from trl.extensions.code_grpo.parser import build_generation_completion, parse_generation_output, parse_generation_response
 from trl.extensions.code_grpo.soft_reward import compute_soft_reward
+from trl.scripts import code_grpo as code_grpo_script
 from trl.extensions.code_grpo.tree import (
     CodeGRPOTreeRunner,
     _compute_code_reward,
@@ -259,9 +262,37 @@ def test_compute_soft_reward_skips_nonfinite_logprob():
         problem_logprob_cache={},
     )
 
-    assert reward == 0.0
+    assert math.isnan(reward)
     assert len(details) == 1
     assert details[0]["skipped"] == "problem_logprob_unavailable"
+
+
+def test_build_round_record_preserves_iterative_prompt_fields():
+    runner = object.__new__(CodeGRPOTreeRunner)
+    node = Node(
+        node_id="n1",
+        parent_id="root",
+        round_idx=1,
+        code="print(input())",
+        pass_rate=0.25,
+        R_code=0.2,
+        exec_summary={
+            "pass_cnt": 2,
+            "test_count": 8,
+            "normalized_soft_reward": 0.4,
+            "soft_reward_beta": 0.05,
+            "history": [],
+            "generation_debug": {},
+        },
+    )
+
+    record = runner._build_round_record(1, [node], stage="search")
+    payload = record["nodes"][0]
+
+    assert payload["code_text"] == "print(input())"
+    assert payload["pass_cnt"] == 2
+    assert payload["test_count"] == 8
+    assert math.isclose(payload["R_soft_effective"], 0.02)
 
 
 def test_run_question_eval_code_only_uses_single_generation(monkeypatch):
@@ -402,6 +433,18 @@ def test_make_iterative_prompt_uses_stdio_specific_instruction():
     assert "solve(x)" in call_prompt
     assert "function interface" in call_prompt
 
+    fallback_prompt = trainer._make_iterative_prompt(
+        source_example={
+            "prompt": "Solve it",
+            "io_mode": "stdio",
+            "test_cases": [{"input": "x", "output": "y"} for _ in range(8)],
+        },
+        node_payload={"code": "print(input())", "pass_rate": 0.25, "history": []},
+        selection_tag="best_pass",
+    )
+    assert "Previous code:\nprint(input())" in fallback_prompt
+    assert "Test result: passed 2 of 8 tests." in fallback_prompt
+
 
 def test_append_iterative_nodes_from_rollout_preserves_stdio_metadata():
     trainer = object.__new__(CodeGRPOTrainer)
@@ -483,6 +526,26 @@ def test_sample_iterative_examples_preserves_io_mode_and_diagnostics():
     assert sampled[0]["diagnostic_outputs"] == ["1\n"]
 
 
+def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():
+    runner = object.__new__(CodeGRPOTreeRunner)
+    runner.args = SimpleNamespace(eval_round_n=3, eval_T_max_override=4, T_max=4)
+
+    metrics = runner._compute_code_only_eval_metrics(
+        [
+            {
+                "stage": "search",
+                "nodes": [{"pass_rate": 0.25}],
+            }
+        ]
+    )
+
+    assert metrics["pass_at_1_round_1"] == 0.0
+    assert metrics["best_pass_rate_round_1"] == 0.25
+    assert "pass_at_1_round_2" not in metrics
+    assert metrics["pass_at_1"] == 0.0
+    assert metrics["pass_at_k_round_n"] == 0.0
+
+
 def test_question_prior_too_hard_requires_min_seen_count():
     trainer = object.__new__(CodeGRPOTrainer)
     trainer._question_prior_enabled = True
@@ -562,3 +625,29 @@ def test_compute_reference_kl_metric_reuses_precomputed_ref_logps():
     )
 
     assert isinstance(value, float)
+
+
+def test_configure_run_layout_reuses_existing_checkpoint_run():
+    base_output_dir = Path("trl/tests/tmp_resume_layout") / f"run_{random.randint(0, 1_000_000)}" / "runs"
+    checkpoint_dir = base_output_dir / "train" / "existing-run" / "train_out" / "checkpoint-40"
+    checkpoint_dir.mkdir(parents=True)
+
+    script_args = SimpleNamespace(dataset_name=None)
+    training_args = SimpleNamespace(
+        output_dir=str(base_output_dir),
+        codegrpo_mode="train",
+        backend="vllm",
+        tensorboard_root_dir=None,
+        logging_dir=None,
+        debug_trace_dir=None,
+        run_name=None,
+        resume_from_checkpoint=True,
+    )
+    model_args = SimpleNamespace(model_name_or_path="Qwen/Qwen2.5-Coder-7B-Instruct")
+    dataset_args = SimpleNamespace(datasets=[])
+
+    layout = code_grpo_script._configure_run_layout(script_args, training_args, model_args, dataset_args)
+
+    assert layout["resume_checkpoint_dir"] == str(checkpoint_dir.resolve())
+    assert layout["run_id"] == "existing-run"
+    assert training_args.output_dir == str(checkpoint_dir.parent.resolve())

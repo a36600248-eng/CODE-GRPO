@@ -45,6 +45,19 @@ def test_default_adapter_accepts_stdio_rows():
     assert example["test_cases"] == [{"input": "1\n", "output": "2\n"}]
 
 
+def test_default_adapter_infers_stdio_from_stdin_stdout_rows():
+    adapter = DefaultCodeDatasetAdapter()
+    example = adapter.adapt_example(
+        {
+            "id": "q3",
+            "question": "demo",
+            "tests": [{"stdin": "1\n", "stdout": "2\n"}],
+        },
+        0,
+    )
+    assert example["io_mode"] == "stdio"
+
+
 def test_normalize_apps_like_record():
     example = {
         "problem_id": "apps_1",

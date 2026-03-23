@@ -845,7 +845,7 @@ class CodeGRPOTrainer(GRPOTrainer):
 
     @staticmethod
     def _code_novelty_scores(nodes: list[dict[str, Any]]) -> list[float]:
-        codes = [str(node.get("code_text", "") or "") for node in nodes]
+        codes = [str(node.get("code_text") or node.get("code") or "") for node in nodes]
         if len(codes) <= 1:
             return [1.0 for _ in codes]
         scores: list[float] = []
@@ -863,9 +863,14 @@ class CodeGRPOTrainer(GRPOTrainer):
         del selection_tag
         base_prompt = str(source_example.get("source_prompt") or source_example.get("prompt", "")).strip()
         io_mode = str(source_example.get("io_mode", "call") or "call").strip().lower()
-        code_text = str(node_payload.get("code_text", "") or "").strip()
-        pass_cnt = int(node_payload.get("pass_cnt", 0) or 0)
-        test_count = int(node_payload.get("test_count", 0) or 0)
+        code_text = str(node_payload.get("code_text") or node_payload.get("code") or "").strip()
+        test_count = int(
+            node_payload.get("test_count", 0)
+            or len(list(source_example.get("test_cases", []) or []))
+            or 0
+        )
+        fallback_pass_cnt = int(round(float(node_payload.get("pass_rate", 0.0) or 0.0) * test_count)) if test_count > 0 else 0
+        pass_cnt = int(node_payload.get("pass_cnt", fallback_pass_cnt) or 0)
         error_summary = str(node_payload.get("error_summary", "") or "").strip()
         history = list(node_payload.get("history", []) or [])
         latest = history[-1] if history else {}
@@ -1011,6 +1016,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         capacity = max(0, int(getattr(self.args, "pseudo_iterative_pool_capacity", 0) or 0))
         for idx, tag in picks[:select_count]:
             node_payload = nodes[idx]
+            code_text = str(node_payload.get("code_text") or node_payload.get("code") or "").strip()
+            if not code_text:
+                continue
             self._pseudo_node_serial += 1
             iterative_qid = f"{base_qid}__iter_{self._pseudo_node_serial}"
             prompt = self._make_iterative_prompt(source_example, node_payload, tag)

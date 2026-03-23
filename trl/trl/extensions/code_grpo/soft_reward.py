@@ -120,5 +120,5 @@ def compute_soft_reward(
             }
         )
 
-    raw_soft_reward = sum(deltas) / len(deltas) if deltas else 0.0
+    raw_soft_reward = (sum(deltas) / len(deltas)) if deltas else float("nan")
     return raw_soft_reward, details

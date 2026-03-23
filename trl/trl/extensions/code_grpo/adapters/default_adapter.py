@@ -21,6 +21,17 @@ def _to_test_cases(value: Any, example: dict[str, Any]) -> list[dict[str, Any]]:
     raise ValueError("Could not normalize test cases. Expected list of {input, output} or parallel input/output lists.")
 
 
+def _infer_io_mode(example: dict[str, Any], test_cases_source: Any) -> str:
+    explicit = example.get("io_mode")
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip().lower()
+    if isinstance(test_cases_source, list):
+        for item in test_cases_source:
+            if isinstance(item, dict) and "stdin" in item and "stdout" in item:
+                return "stdio"
+    return "call"
+
+
 class DefaultCodeDatasetAdapter(DatasetAdapter):
     """Heuristic adapter to normalize common code dataset schemas."""
 
@@ -38,7 +49,7 @@ class DefaultCodeDatasetAdapter(DatasetAdapter):
 
         test_cases_source = example.get("test_cases", example.get("tests"))
         test_cases = _to_test_cases(test_cases_source, example)
-        io_mode = str(example.get("io_mode", "call") or "call").strip().lower()
+        io_mode = _infer_io_mode(example, test_cases_source)
         if io_mode not in {"call", "stdio"}:
             raise ValueError(f"Example {question_id} has unsupported io_mode: {io_mode}")
 
