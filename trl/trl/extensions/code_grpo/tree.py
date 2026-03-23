@@ -273,6 +273,72 @@ class CodeGRPOTreeRunner:
             )
         return {"round_idx": round_idx, "stage": stage, "nodes": payload_nodes}
 
+    def _build_main_train_samples(self, question_id: str, nodes: list[Node]) -> list[TrainSample]:
+        train_samples: list[TrainSample] = []
+        for node in nodes:
+            if not node.completion_text:
+                continue
+            train_samples.append(
+                TrainSample(
+                    question_id=question_id,
+                    prompt_text=node.prompt_text,
+                    completion_text=node.completion_text,
+                    code_token_mask=node.code_token_mask,
+                    A_code=node.A_code,
+                    sft_token_mask=[0] * len(node.code_token_mask),
+                    sft_weight=0.0,
+                    R_code=node.R_code,
+                    pass_rate=node.pass_rate,
+                )
+            )
+        return train_samples
+
+    def _build_rollout_summary_metrics(self, nodes: list[Node]) -> dict[str, float]:
+        if not nodes:
+            return {}
+        r_code = [node.R_code for node in nodes]
+        return {
+            "search_node_count": float(len(nodes)),
+            "generation_format_ok_rate": _mean(
+                [
+                    float(node.exec_summary.get("generation_format_ok", 0.0))
+                    for node in nodes
+                    if node.completion_text
+                ]
+            ),
+            "compile_ok_rate": _mean([float(node.exec_summary.get("compile_score", 0.0)) for node in nodes]),
+            "syntax_error_rate": _mean([1.0 if node.status_code == "SYNTAX_ERROR" else 0.0 for node in nodes]),
+            "timeout_rate": _mean([1.0 if node.status_code == "TIMEOUT" else 0.0 for node in nodes]),
+            "soft_lift": _mean([max(0.0, node.R_code - node.pass_rate) for node in nodes]),
+            "mean_R_soft_raw": _mean([float(node.exec_summary.get("raw_soft_reward", 0.0)) for node in nodes]),
+            "mean_R_soft_match_raw": _mean(
+                [float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in nodes]
+            ),
+            "mean_R_soft_effective": _mean(
+                [float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in nodes]
+            ),
+            "soft_reward_eligible_rate": _mean(
+                [1.0 if bool(node.exec_summary.get("soft_reward_eligible", False)) else 0.0 for node in nodes]
+            ),
+            "main_sample_count": float(sum(1 for node in nodes if node.completion_text)),
+            "code_io_aux_sample_count": float(sum(len(node.exec_summary.get("code_io_train_samples", [])) for node in nodes)),
+            "zero_pass_soft_trigger_rate": _mean(
+                [1.0 if bool(node.exec_summary.get("zero_pass_soft_reward_triggered", False)) else 0.0 for node in nodes]
+            ),
+            "mean_hard_reward": _mean([float(node.exec_summary.get("hard_reward", node.pass_rate)) for node in nodes]),
+            "mean_raw_soft_reward": _mean([float(node.exec_summary.get("raw_soft_reward", 0.0)) for node in nodes]),
+            "mean_normalized_soft_reward": _mean(
+                [float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in nodes]
+            ),
+            "mean_soft_reward_beta": _mean([float(node.exec_summary.get("soft_reward_beta", 0.0)) for node in nodes]),
+            "sibling_group_zero_std_R_code_rate": 1.0 if _std(r_code) <= 1e-8 else 0.0,
+            "pair_same_R_code_rate": (
+                1.0
+                if len(nodes) == 2 and abs(float(nodes[0].R_code) - float(nodes[1].R_code)) <= 1e-8
+                else 0.0
+            ),
+        }
+
     def run_question(self, sample: dict[str, Any], rng: random.Random) -> QuestionRollout:
         del rng
         question_id = str(sample["question_id"])
@@ -297,22 +363,8 @@ class CodeGRPOTreeRunner:
         )
         rounds = [self._build_round_record(1, siblings, stage="search")] if siblings else []
 
-        train_samples: list[TrainSample] = []
+        train_samples: list[TrainSample] = self._build_main_train_samples(question_id, siblings)
         for node in siblings:
-            if node.completion_text:
-                train_samples.append(
-                    TrainSample(
-                        question_id=question_id,
-                        prompt_text=node.prompt_text,
-                        completion_text=node.completion_text,
-                        code_token_mask=node.code_token_mask,
-                        A_code=node.A_code,
-                        sft_token_mask=[0] * len(node.code_token_mask),
-                        sft_weight=0.0,
-                        R_code=node.R_code,
-                        pass_rate=node.pass_rate,
-                    )
-                )
             for item in node.exec_summary.get("code_io_train_samples", []):
                 aux_prompt_text = str(item.get("prompt_text", ""))
                 aux_completion_text = str(item.get("completion_text", ""))
@@ -338,30 +390,7 @@ class CodeGRPOTreeRunner:
         r_code = [node.R_code for node in siblings]
         pass_rates = [node.pass_rate for node in siblings]
         eval_metrics = self._compute_eval_metrics(rounds)
-        if siblings:
-            eval_metrics.update(
-                {
-                    "search_node_count": float(len(siblings)),
-                    "generation_format_ok_rate": _mean([float(node.exec_summary.get("generation_format_ok", 0.0)) for node in siblings if node.completion_text]),
-                    "compile_ok_rate": _mean([float(node.exec_summary.get("compile_score", 0.0)) for node in siblings]),
-                    "syntax_error_rate": _mean([1.0 if node.status_code == "SYNTAX_ERROR" else 0.0 for node in siblings]),
-                    "timeout_rate": _mean([1.0 if node.status_code == "TIMEOUT" else 0.0 for node in siblings]),
-                    "soft_lift": _mean([max(0.0, node.R_code - node.pass_rate) for node in siblings]),
-                    "mean_R_soft_raw": _mean([float(node.exec_summary.get("raw_soft_reward", 0.0)) for node in siblings]),
-                    "mean_R_soft_match_raw": _mean([float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in siblings]),
-                    "mean_R_soft_effective": _mean([float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in siblings]),
-                    "soft_reward_eligible_rate": _mean([1.0 if bool(node.exec_summary.get("soft_reward_eligible", False)) else 0.0 for node in siblings]),
-                    "main_sample_count": float(sum(1 for node in siblings if node.completion_text)),
-                    "code_io_aux_sample_count": float(sum(len(node.exec_summary.get("code_io_train_samples", [])) for node in siblings)),
-                    "zero_pass_soft_trigger_rate": _mean([1.0 if bool(node.exec_summary.get("zero_pass_soft_reward_triggered", False)) else 0.0 for node in siblings]),
-                    "mean_hard_reward": _mean([float(node.exec_summary.get("hard_reward", node.pass_rate)) for node in siblings]),
-                    "mean_raw_soft_reward": _mean([float(node.exec_summary.get("raw_soft_reward", 0.0)) for node in siblings]),
-                    "mean_normalized_soft_reward": _mean([float(node.exec_summary.get("normalized_soft_reward", 0.0)) for node in siblings]),
-                    "mean_soft_reward_beta": _mean([float(node.exec_summary.get("soft_reward_beta", 0.0)) for node in siblings]),
-                    "sibling_group_zero_std_R_code_rate": 1.0 if _std(r_code) <= 1e-8 else 0.0,
-                    "pair_same_R_code_rate": (1.0 if len(siblings) == 2 and abs(float(siblings[0].R_code) - float(siblings[1].R_code)) <= 1e-8 else 0.0),
-                }
-            )
+        eval_metrics.update(self._build_rollout_summary_metrics(siblings))
 
         return QuestionRollout(
             question_id=question_id,
@@ -376,7 +405,61 @@ class CodeGRPOTreeRunner:
         )
 
     def run_question_eval_code_only(self, sample: dict[str, Any], rng: random.Random) -> QuestionRollout:
-        return self.run_question(sample, rng)
+        del rng
+        question_id = str(sample["question_id"])
+        prompt = str(sample["prompt"])
+        test_cases = list(sample["test_cases"])
+        diagnostic_inputs = list(sample.get("diagnostic_inputs", []) or [])
+        diagnostic_outputs = list(sample.get("diagnostic_outputs", []) or [])
+        io_mode = str(sample.get("io_mode", "call") or "call").strip().lower()
+
+        root = Node(node_id="root", parent_id=None, round_idx=0, code=None, exec_summary={"history": []})
+        prompt_text_raw = build_generation_prompt(
+            question_prompt=prompt,
+            history=[],
+            parent_code=root.code,
+        )
+        prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
+        generation_kwargs = self._code_generation_kwargs(eval_mode=True)
+        raw_output = self.backend.generate(prompt_text, **generation_kwargs)
+        retried_outputs = self._retry_empty_generation_outputs(
+            prompt_text,
+            [raw_output],
+            generation_kwargs=generation_kwargs,
+        )
+        raw_output = retried_outputs[0] if retried_outputs else raw_output
+        node = self._generate_node(
+            question_id=question_id,
+            node_id="n1",
+            parent=root,
+            prompt=prompt,
+            test_cases=test_cases,
+            diagnostic_inputs=diagnostic_inputs,
+            diagnostic_outputs=diagnostic_outputs,
+            io_mode=io_mode,
+            round_idx=1,
+            prompt_text_override=prompt_text,
+            prompt_text_raw_override=prompt_text_raw,
+            raw_output_override=raw_output,
+            generation_kwargs_override=generation_kwargs,
+        )
+        siblings = [node]
+        self._assign_group_advantages(siblings)
+        rounds = [self._build_round_record(1, siblings, stage="search")]
+        eval_metrics = self._compute_code_only_eval_metrics(rounds)
+        eval_metrics.update(self._build_rollout_summary_metrics(siblings))
+
+        return QuestionRollout(
+            question_id=question_id,
+            rounds=rounds,
+            node_count=1,
+            resample_count=0,
+            train_samples=self._build_main_train_samples(question_id, siblings),
+            mean_R_code=node.R_code,
+            mean_pass_rate=node.pass_rate,
+            std_R_code=0.0,
+            eval_metrics=eval_metrics,
+        )
 
     def _expand_parent(
         self,

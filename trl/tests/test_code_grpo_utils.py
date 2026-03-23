@@ -2,11 +2,17 @@
 
 from types import SimpleNamespace
 
+from trl.extensions.code_grpo import tree as tree_module
 from trl.extensions.code_grpo.error_utils import summarize_error
 from trl.extensions.code_grpo.matcher import is_match, values_equal
 from trl.extensions.code_grpo.parser import build_generation_completion, parse_generation_output, parse_generation_response
 from trl.extensions.code_grpo.soft_reward import compute_soft_reward
-from trl.extensions.code_grpo.tree import _compute_code_reward, _is_double_zero_node, _is_soft_reward_eligible
+from trl.extensions.code_grpo.tree import (
+    CodeGRPOTreeRunner,
+    _compute_code_reward,
+    _is_double_zero_node,
+    _is_soft_reward_eligible,
+)
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
 from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
@@ -255,3 +261,103 @@ def test_compute_soft_reward_skips_nonfinite_logprob():
     assert reward == 0.0
     assert len(details) == 1
     assert details[0]["skipped"] == "problem_logprob_unavailable"
+
+
+def test_run_question_eval_code_only_uses_single_generation(monkeypatch):
+    class DummyBackend:
+        def __init__(self):
+            self.generate_calls = 0
+            self.generate_many_calls = 0
+
+        def generate(self, prompt_text, **kwargs):
+            del prompt_text, kwargs
+            self.generate_calls += 1
+            return "```python\nprint('ok')\n```"
+
+        def generate_many(self, prompts, **kwargs):
+            del prompts, kwargs
+            self.generate_many_calls += 1
+            return ["```python\nprint('wrong')\n```"]
+
+        def logprob(self, prompt, target_text, **kwargs):
+            del prompt, target_text, kwargs
+            return 0.0
+
+    class DummyTokenizer:
+        is_fast = False
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            del tokenize, add_generation_prompt
+            return messages[0]["content"]
+
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+            del add_special_tokens, return_offsets_mapping
+            return {"input_ids": [1] * max(1, len(text))}
+
+    def fake_execute_batch(code, case_inputs, timeout_s, error_max_chars, error_max_lines, io_mode):
+        del code, case_inputs, timeout_s, error_max_chars, error_max_lines, io_mode
+        return [ExecResult(kind="OK", value="ok\n")]
+
+    monkeypatch.setattr(tree_module, "execute_batch", fake_execute_batch)
+
+    args = SimpleNamespace(
+        use_chat_template_for_codegrpo=True,
+        max_completion_length=32,
+        max_completion_length_code=32,
+        generation_min_new_tokens_code=0,
+        generation_temperature_code=0.7,
+        eval_generation_temperature_code=0.0,
+        generation_top_p_code=0.95,
+        generation_empty_retry_count=0,
+        generation_outside_noise_chars=0,
+        context_round_window=1,
+        K=8,
+        N_max=8,
+        M_retry=0,
+        error_max_chars=200,
+        error_max_lines=20,
+        code_timeout_seconds=1.0,
+        zero_pass_soft_reward_enabled=False,
+        zero_pass_soft_reward_diag_count=0,
+        zero_pass_soft_reward_clip_low=-2.0,
+        zero_pass_soft_reward_clip_high=2.0,
+        zero_pass_soft_reward_beta_scale=0.5,
+        soft_reward_ineligible_scale=0.3,
+        code_compile_reward_scale=0.0,
+        code_format_reward_scale=0.0,
+        code_aux_reward_without_format_scale=1.0,
+        code_io_aux_training_enabled=False,
+        code_io_aux_case_count=0,
+        code_io_aux_include_correct=True,
+        code_io_aux_include_incorrect=True,
+        code_io_aux_include_errors=True,
+        code_io_aux_sft_weight_correct=1.0,
+        code_io_aux_sft_weight_incorrect=1.0,
+        advantage_base="R_code",
+        advantage_mode="mean_only",
+        trace_store_full_text=False,
+        eval_round_n=1,
+        eval_k_list=[1],
+        eval_T_max_override=1,
+        T_max=1,
+        num_generations_eval=1,
+    )
+    backend = DummyBackend()
+    runner = CodeGRPOTreeRunner(backend=backend, tokenizer=DummyTokenizer(), args=args, logger=SimpleNamespace(info=lambda *a, **k: None))
+    sample = {
+        "question_id": "q1",
+        "prompt": "Print ok",
+        "test_cases": [{"input": "", "output": "ok\n"}],
+        "diagnostic_inputs": [],
+        "diagnostic_outputs": [],
+        "io_mode": "stdio",
+    }
+
+    rollout = runner.run_question_eval_code_only(sample, rng=None)
+
+    assert backend.generate_calls == 1
+    assert backend.generate_many_calls == 0
+    assert rollout.node_count == 1
+    assert len(rollout.rounds) == 1
+    assert len(rollout.rounds[0]["nodes"]) == 1
+    assert rollout.eval_metrics["pass_at_1"] == 1.0

@@ -1679,12 +1679,15 @@ class CodeGRPOTrainer(GRPOTrainer):
         base_rng = random.Random(self.args.seed + seed_offset)
         examples, pseudo_prepare_metrics = self._prepare_examples_for_rollout(examples, mode, base_rng)
         total_examples = len(examples)
+        rollout_k = int(getattr(self, "num_generations", 0) or 0)
+        if mode == "eval" and getattr(self.args, "eval_code_only_single_trajectory", True):
+            rollout_k = int(getattr(self.args, "num_generations_eval", 1) or 1)
         self._log_rollout_progress(
             "[rollout] mode=%s step=%s questions=%d k=%d batch_size=%s prefetch=%s start",
             mode,
             int(getattr(self.state, "global_step", 0) or 0),
             total_examples,
-            int(getattr(self, "num_generations", 0) or 0),
+            rollout_k,
             getattr(self.args, "generation_batch_size", None),
             bool(self._async_rollout_prefetch_enabled) if mode == "train" else False,
             mode=mode,
