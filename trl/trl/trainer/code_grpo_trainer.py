@@ -110,6 +110,9 @@ class _PseudoIterativeNode:
     final_reward: float
     pass_rate: float
     created_step: int
+    io_mode: str = "call"
+    diagnostic_inputs: list[Any] = field(default_factory=list)
+    diagnostic_outputs: list[Any] = field(default_factory=list)
 
 
 class _WeightedRepeatSampler(RepeatSampler):
@@ -833,6 +836,7 @@ class CodeGRPOTrainer(GRPOTrainer):
 
     def _make_iterative_prompt(self, source_example: dict[str, Any], node_payload: dict[str, Any], selection_tag: str) -> str:
         base_prompt = str(source_example.get("source_prompt") or source_example.get("prompt", "")).strip()
+        io_mode = str(source_example.get("io_mode", "call") or "call").strip().lower()
         code_text = str(node_payload.get("code_text", "") or "").strip()
         pass_cnt = int(node_payload.get("pass_cnt", 0) or 0)
         test_count = int(node_payload.get("test_count", 0) or 0)
@@ -874,10 +878,15 @@ class CodeGRPOTrainer(GRPOTrainer):
             lines.append(f"- failed_input={failed_input!r}")
         if failed_actual is not None:
             lines.append(f"- failed_actual_or_error={failed_actual!r}")
+        interface_instruction = (
+            "Revise the previous code using the summary above. Keep reading from stdin and writing to stdout."
+            if io_mode == "stdio"
+            else "Revise the previous code using the summary above. Keep the same solve(x) interface."
+        )
         lines.extend(
             [
                 "Task:",
-                "Revise the previous code using the summary above. Keep the same solve(x) interface.",
+                interface_instruction,
                 "Answer with one fenced Python code block only.",
             ]
         )
@@ -1000,6 +1009,9 @@ class CodeGRPOTrainer(GRPOTrainer):
                 final_reward=float(node_payload.get("final_reward", node_payload.get("R_code", 0.0)) or 0.0),
                 pass_rate=float(node_payload.get("pass_rate", 0.0) or 0.0),
                 created_step=int(self.state.global_step),
+                io_mode=str(source_example.get("io_mode", "call") or "call").strip().lower(),
+                diagnostic_inputs=copy.deepcopy(list(source_example.get("diagnostic_inputs", []) or [])),
+                diagnostic_outputs=copy.deepcopy(list(source_example.get("diagnostic_outputs", []) or [])),
             )
             self._pseudo_iterative_pool.append(record)
             added += 1
@@ -1034,6 +1046,9 @@ class CodeGRPOTrainer(GRPOTrainer):
                     "prompt": record.prompt,
                     "source_prompt": record.source_prompt,
                     "test_cases": copy.deepcopy(record.test_cases),
+                    "diagnostic_inputs": copy.deepcopy(record.diagnostic_inputs),
+                    "diagnostic_outputs": copy.deepcopy(record.diagnostic_outputs),
+                    "io_mode": record.io_mode,
                     "source_kind": "iterative_node",
                     "source_selection_tag": record.selection_tag,
                 }

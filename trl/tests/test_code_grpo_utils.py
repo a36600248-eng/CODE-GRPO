@@ -1,5 +1,6 @@
 # Copyright 2020-2026 The HuggingFace Team. All rights reserved.
 
+import random
 from types import SimpleNamespace
 
 from trl.extensions.code_grpo import tree as tree_module
@@ -15,7 +16,7 @@ from trl.extensions.code_grpo.tree import (
 )
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
-from trl.trainer.code_grpo_trainer import CodeGRPOTrainer
+from trl.trainer.code_grpo_trainer import CodeGRPOTrainer, _PseudoIterativeNode
 from trl.trainer import utils as trainer_utils
 
 
@@ -361,3 +362,103 @@ def test_run_question_eval_code_only_uses_single_generation(monkeypatch):
     assert len(rollout.rounds) == 1
     assert len(rollout.rounds[0]["nodes"]) == 1
     assert rollout.eval_metrics["pass_at_1"] == 1.0
+
+
+def test_make_iterative_prompt_uses_stdio_specific_instruction():
+    trainer = object.__new__(CodeGRPOTrainer)
+
+    stdio_prompt = trainer._make_iterative_prompt(
+        source_example={"prompt": "Solve it", "io_mode": "stdio"},
+        node_payload={"code_text": "print(input())", "history": []},
+        selection_tag="best_pass",
+    )
+    assert "stdin" in stdio_prompt
+    assert "stdout" in stdio_prompt
+    assert "solve(x)" not in stdio_prompt
+
+    call_prompt = trainer._make_iterative_prompt(
+        source_example={"prompt": "Solve it", "io_mode": "call"},
+        node_payload={"code_text": "def solve(x):\n    return x", "history": []},
+        selection_tag="best_pass",
+    )
+    assert "solve(x)" in call_prompt
+
+
+def test_append_iterative_nodes_from_rollout_preserves_stdio_metadata():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer._pseudo_multiround_enabled = True
+    trainer._pseudo_iterative_pool = []
+    trainer._pseudo_node_serial = 0
+    trainer.state = SimpleNamespace(global_step=7)
+    trainer.args = SimpleNamespace(pseudo_iterative_select_count=1, pseudo_iterative_pool_capacity=8)
+    trainer._code_novelty_scores = lambda nodes: [0.0 for _ in nodes]
+    trainer._get_question_prior_weight = lambda qid: 1.0
+    trainer._base_question_id = lambda example: str(example.get("base_question_id", example["question_id"]))
+
+    rollout = SimpleNamespace(
+        rounds=[
+            {
+                "stage": "search",
+                "nodes": [
+                    {
+                        "main_sample_active": True,
+                        "pass_rate": 0.25,
+                        "final_reward": 0.25,
+                        "R_code": 0.25,
+                        "raw_soft_reward": 0.1,
+                        "normalized_soft_reward": 0.4,
+                        "history": [],
+                        "code_text": "print(input())",
+                    }
+                ],
+            }
+        ]
+    )
+    source_example = {
+        "question_id": "apps_1",
+        "base_question_id": "apps_1",
+        "prompt": "Echo input",
+        "source_prompt": "Echo input",
+        "test_cases": [{"input": "a\n", "output": "a\n"}],
+        "diagnostic_inputs": ["1\n"],
+        "diagnostic_outputs": ["1\n"],
+        "io_mode": "stdio",
+    }
+
+    added = trainer._append_iterative_nodes_from_rollout(rollout, source_example)
+
+    assert added == 1
+    assert len(trainer._pseudo_iterative_pool) == 1
+    record = trainer._pseudo_iterative_pool[0]
+    assert record.io_mode == "stdio"
+    assert record.diagnostic_inputs == ["1\n"]
+    assert record.diagnostic_outputs == ["1\n"]
+
+
+def test_sample_iterative_examples_preserves_io_mode_and_diagnostics():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer._pseudo_iterative_pool = [
+        _PseudoIterativeNode(
+            question_id="apps_1__iter_1",
+            base_question_id="apps_1",
+            prompt="Refine",
+            source_prompt="Echo input",
+            test_cases=[{"input": "a\n", "output": "a\n"}],
+            selection_tag="best_pass",
+            priority=1.0,
+            raw_soft_reward=0.1,
+            final_reward=0.2,
+            pass_rate=0.25,
+            created_step=3,
+            io_mode="stdio",
+            diagnostic_inputs=["1\n"],
+            diagnostic_outputs=["1\n"],
+        )
+    ]
+
+    sampled = trainer._sample_iterative_examples(1, rng=random.Random(0))
+
+    assert len(sampled) == 1
+    assert sampled[0]["io_mode"] == "stdio"
+    assert sampled[0]["diagnostic_inputs"] == ["1\n"]
+    assert sampled[0]["diagnostic_outputs"] == ["1\n"]
