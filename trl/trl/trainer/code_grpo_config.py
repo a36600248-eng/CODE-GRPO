@@ -350,7 +350,7 @@ class CodeGRPOConfig(GRPOConfig):
         metadata={
             "help": (
                 "Use code-only eval with a single repair trajectory. "
-                "No logic/exec audit is run during eval; metrics report cumulative pass@1 within <= round r."
+                "No logic/exec audit is run during eval; each round generates one repair candidate and metrics report cumulative pass@1 within <= round r."
             )
         },
     )
@@ -358,8 +358,8 @@ class CodeGRPOConfig(GRPOConfig):
         default=None,
         metadata={
             "help": (
-                "Optional eval-only maximum code-repair rounds. Ignored when eval_code_only_single_trajectory=True; "
-                "in that mode eval only runs the actually executed repair trajectory."
+                "Optional eval-only maximum code-repair rounds. When eval_code_only_single_trajectory=True, "
+                "this controls how many consecutive single-trajectory repair rounds are actually executed."
             )
         },
     )

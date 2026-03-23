@@ -419,14 +419,6 @@ class CodeGRPOTreeRunner:
 
     def run_question_eval_code_only(self, sample: dict[str, Any], rng: random.Random) -> QuestionRollout:
         del rng
-        if int(getattr(self.args, "eval_T_max_override", 0) or 0) > 1 and not getattr(
-            self, "_warned_eval_tmax_override_ignored", False
-        ):
-            self.logger.warning(
-                "eval_T_max_override=%s is ignored because eval_code_only_single_trajectory runs one actual repair trajectory.",
-                getattr(self.args, "eval_T_max_override", None),
-            )
-            self._warned_eval_tmax_override_ignored = True
         question_id = str(sample["question_id"])
         prompt = str(sample["prompt"])
         test_cases = list(sample["test_cases"])
@@ -435,49 +427,61 @@ class CodeGRPOTreeRunner:
         io_mode = str(sample.get("io_mode", "call") or "call").strip().lower()
 
         root = Node(node_id="root", parent_id=None, round_idx=0, code=None, exec_summary={"history": []})
-        prompt_text_raw = build_generation_prompt(
-            question_prompt=prompt,
-            history=[],
-            parent_code=root.code,
-        )
-        prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
         generation_kwargs = self._code_generation_kwargs(eval_mode=True)
-        raw_output = self.backend.generate(prompt_text, **generation_kwargs)
-        retried_outputs = self._retry_empty_generation_outputs(
-            prompt_text,
-            [raw_output],
-            generation_kwargs=generation_kwargs,
-        )
-        raw_output = retried_outputs[0] if retried_outputs else raw_output
-        node = self._generate_node(
-            question_id=question_id,
-            node_id="n1",
-            parent=root,
-            prompt=prompt,
-            test_cases=test_cases,
-            diagnostic_inputs=diagnostic_inputs,
-            diagnostic_outputs=diagnostic_outputs,
-            io_mode=io_mode,
-            round_idx=1,
-            prompt_text_override=prompt_text,
-            prompt_text_raw_override=prompt_text_raw,
-            raw_output_override=raw_output,
-            generation_kwargs_override=generation_kwargs,
-        )
-        siblings = [node]
-        self._assign_group_advantages(siblings)
-        rounds = [self._build_round_record(1, siblings, stage="search")]
+        eval_round_limit = int(getattr(self.args, "eval_T_max_override", 0) or 0)
+        if eval_round_limit <= 0:
+            eval_round_limit = int(getattr(self.args, "T_max", 1) or 1)
+        eval_round_limit = max(1, eval_round_limit)
+
+        rounds: list[dict[str, Any]] = []
+        siblings: list[Node] = []
+        parent = root
+        for round_idx in range(1, eval_round_limit + 1):
+            prompt_text_raw = build_generation_prompt(
+                question_prompt=prompt,
+                history=list(parent.exec_summary.get("history", []))[-self.args.context_round_window :],
+                parent_code=parent.code,
+            )
+            prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
+            raw_output = self.backend.generate(prompt_text, **generation_kwargs)
+            retried_outputs = self._retry_empty_generation_outputs(
+                prompt_text,
+                [raw_output],
+                generation_kwargs=generation_kwargs,
+            )
+            raw_output = retried_outputs[0] if retried_outputs else raw_output
+            node = self._generate_node(
+                question_id=question_id,
+                node_id=f"n{round_idx}",
+                parent=parent,
+                prompt=prompt,
+                test_cases=test_cases,
+                diagnostic_inputs=diagnostic_inputs,
+                diagnostic_outputs=diagnostic_outputs,
+                io_mode=io_mode,
+                round_idx=round_idx,
+                prompt_text_override=prompt_text,
+                prompt_text_raw_override=prompt_text_raw,
+                raw_output_override=raw_output,
+                generation_kwargs_override=generation_kwargs,
+            )
+            siblings = [node]
+            self._assign_group_advantages(siblings)
+            rounds.append(self._build_round_record(round_idx, siblings, stage="search"))
+            parent = node
+            if float(node.pass_rate) >= 1.0:
+                break
         eval_metrics = self._compute_code_only_eval_metrics(rounds)
         eval_metrics.update(self._build_rollout_summary_metrics(siblings))
 
         return QuestionRollout(
             question_id=question_id,
             rounds=rounds,
-            node_count=1,
+            node_count=len(rounds),
             resample_count=0,
             train_samples=self._build_main_train_samples(question_id, siblings),
-            mean_R_code=node.R_code,
-            mean_pass_rate=node.pass_rate,
+            mean_R_code=float(siblings[-1].R_code) if siblings else 0.0,
+            mean_pass_rate=float(siblings[-1].pass_rate) if siblings else 0.0,
             std_R_code=0.0,
             eval_metrics=eval_metrics,
         )

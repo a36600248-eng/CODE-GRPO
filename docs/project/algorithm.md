@@ -102,8 +102,9 @@ The `too_hard` bucket is gated by a minimum observation count before it can acti
 The active eval path is code-only single-trajectory eval:
 
 - one actual repair trajectory is executed per eval sample
-- `pass_at_1` and `best_pass_rate_*` reflect only executed eval rounds
-- when `eval_code_only_single_trajectory=true`, `eval_T_max_override` does not create synthetic extra rounds
+- each executed round generates exactly one repair candidate, then either stops on success or continues with the next repair round
+- `pass_at_1_round_r` and `best_pass_rate_round_r` reflect only the rounds that were actually executed
+- when `eval_code_only_single_trajectory=true`, `eval_T_max_override` controls the maximum number of consecutive single-trajectory repair rounds
 
 ### Original-Problem Recovery
 
