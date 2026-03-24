@@ -1,5 +1,6 @@
 ﻿import ast
 import math
+import copy
 import random
 from typing import Any
 
@@ -377,6 +378,7 @@ class CodeGRPOTreeRunner:
                     "compile_score": float(node.exec_summary.get("compile_score", 0.0)),
                     "generation_format_ok": bool(node.exec_summary.get("generation_format_ok", False)),
                     "code_io_aux_sample_count": len(node.exec_summary.get("code_io_train_samples", [])),
+                    "code_io_train_samples": copy.deepcopy(list(node.exec_summary.get("code_io_train_samples", []))),
                     "error_summary": str(node.exec_summary.get("error_summary", "")),
                     "history": list(node.exec_summary.get("history", [])),
                     "generation_debug": dict(node.exec_summary.get("generation_debug", {})),
@@ -482,28 +484,29 @@ class CodeGRPOTreeRunner:
         rounds = [self._build_round_record(1, siblings, stage="search")] if siblings else []
 
         train_samples: list[TrainSample] = self._build_main_train_samples(question_id, siblings)
-        for node in siblings:
-            for item in node.exec_summary.get("code_io_train_samples", []):
-                aux_prompt_text = str(item.get("prompt_text", ""))
-                aux_completion_text = str(item.get("completion_text", ""))
-                if not aux_prompt_text or not aux_completion_text:
-                    continue
-                token_ids = self.tokenizer(aux_completion_text, add_special_tokens=False)["input_ids"]
-                if not token_ids:
-                    continue
-                train_samples.append(
-                    TrainSample(
-                        question_id=question_id,
-                        prompt_text=aux_prompt_text,
-                        completion_text=aux_completion_text,
-                        code_token_mask=[0] * len(token_ids),
-                        A_code=0.0,
-                        sft_token_mask=[1] * len(token_ids),
-                        sft_weight=float(item.get("sft_weight", 0.0)),
-                        R_code=node.R_code,
-                        pass_rate=node.pass_rate,
+        if not bool(getattr(self.args, "code_io_ce_buffer_enabled", False)):
+            for node in siblings:
+                for item in node.exec_summary.get("code_io_train_samples", []):
+                    aux_prompt_text = str(item.get("prompt_text", ""))
+                    aux_completion_text = str(item.get("completion_text", ""))
+                    if not aux_prompt_text or not aux_completion_text:
+                        continue
+                    token_ids = self.tokenizer(aux_completion_text, add_special_tokens=False)["input_ids"]
+                    if not token_ids:
+                        continue
+                    train_samples.append(
+                        TrainSample(
+                            question_id=question_id,
+                            prompt_text=aux_prompt_text,
+                            completion_text=aux_completion_text,
+                            code_token_mask=[0] * len(token_ids),
+                            A_code=0.0,
+                            sft_token_mask=[1] * len(token_ids),
+                            sft_weight=float(item.get("sft_weight", 0.0)),
+                            R_code=node.R_code,
+                            pass_rate=node.pass_rate,
+                        )
                     )
-                )
 
         r_code = [node.R_code for node in siblings]
         pass_rates = [node.pass_rate for node in siblings]
@@ -889,7 +892,10 @@ class CodeGRPOTreeRunner:
             case_inputs=case_inputs,
             exec_results=exec_results,
             pass_flags=pass_flags,
-            enabled=bool(getattr(self.args, "code_io_aux_training_enabled", False)),
+            enabled=bool(
+                getattr(self.args, "code_io_aux_training_enabled", False)
+                or getattr(self.args, "code_io_ce_buffer_enabled", False)
+            ),
             case_count=int(getattr(self.args, "code_io_aux_case_count", 0) or 0),
             include_correct=bool(getattr(self.args, "code_io_aux_include_correct", True)),
             include_incorrect=bool(getattr(self.args, "code_io_aux_include_incorrect", True)),

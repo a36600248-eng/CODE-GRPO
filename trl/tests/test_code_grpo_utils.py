@@ -2,6 +2,7 @@
 
 import math
 import random
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -797,6 +798,92 @@ def test_sample_iterative_examples_preserves_io_mode_and_diagnostics():
     assert sampled[0]["io_mode"] == "stdio"
     assert sampled[0]["diagnostic_inputs"] == ["1\n"]
     assert sampled[0]["diagnostic_outputs"] == ["1\n"]
+
+
+def test_append_iterative_nodes_from_rollout_skips_novelty_when_disabled():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer._pseudo_multiround_enabled = True
+    trainer.args = SimpleNamespace(
+        pseudo_iterative_select_count=3,
+        pseudo_iterative_pool_capacity=16,
+        pseudo_iterative_include_novelty=False,
+        pseudo_iterative_soft_priority_bonus_scale=0.1,
+    )
+    trainer.state = SimpleNamespace(global_step=5)
+    trainer._pseudo_iterative_pool = []
+    trainer._pseudo_node_serial = 0
+    trainer._get_question_prior_weight = lambda qid: 1.0
+    trainer._base_question_id = lambda example: str(example.get("base_question_id") or example["question_id"])
+
+    rollout = SimpleNamespace(
+        rounds=[
+            {
+                "stage": "search",
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "main_sample_active": True,
+                        "code_text": "print(1)",
+                        "pass_rate": 0.5,
+                        "final_reward": 0.5,
+                        "raw_soft_reward": 0.1,
+                    },
+                    {
+                        "node_id": "n2",
+                        "main_sample_active": True,
+                        "code_text": "print(2)",
+                        "pass_rate": 0.1,
+                        "final_reward": 0.1,
+                        "raw_soft_reward": 0.9,
+                    },
+                ],
+            }
+        ]
+    )
+    source_example = {
+        "question_id": "q1",
+        "prompt": "Print something",
+        "test_cases": [{"input": "", "output": "1\n"}],
+        "io_mode": "stdio",
+    }
+
+    added = trainer._append_iterative_nodes_from_rollout(rollout, source_example)
+
+    assert added == 2
+    assert {record.selection_tag for record in trainer._pseudo_iterative_pool} == {"best_pass", "best_soft"}
+
+
+def test_deferred_code_io_ce_selects_best_pass_and_random_executable():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer.args = SimpleNamespace(
+        code_io_ce_select_best_pass=True,
+        code_io_ce_select_random_executable=True,
+        code_io_ce_sample_count_per_question=2,
+    )
+
+    nodes = [
+        {"node_id": "a", "compile_score": 1.0, "pass_rate": 0.8, "final_reward": 0.8},
+        {"node_id": "b", "compile_score": 1.0, "pass_rate": 0.2, "final_reward": 0.2},
+        {"node_id": "c", "compile_score": 0.0, "pass_rate": 0.0, "final_reward": 0.0},
+    ]
+
+    chosen = trainer._choose_deferred_code_io_nodes(nodes, random.Random(0))
+
+    assert len(chosen) == 2
+    assert chosen[0][1] == "best_pass"
+    assert chosen[0][0]["node_id"] == "a"
+    assert chosen[1][1] == "random_executable"
+    assert chosen[1][0]["node_id"] == "b"
+
+
+def test_should_run_deferred_code_io_ce_step_uses_periodic_schedule():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer.model = SimpleNamespace(training=True)
+    trainer.args = SimpleNamespace(code_io_ce_buffer_enabled=True, code_io_ce_every_n_steps=20)
+    trainer.state = SimpleNamespace(global_step=19)
+    trainer._code_io_ce_buffer = deque([SimpleNamespace()])
+
+    assert trainer._should_run_deferred_code_io_ce_step() is True
 
 
 def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():

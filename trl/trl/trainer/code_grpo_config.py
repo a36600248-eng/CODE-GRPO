@@ -199,6 +199,35 @@ class CodeGRPOConfig(GRPOConfig):
         default=1.0,
         metadata={"help": "Supervised-loss weight assigned to incorrect code-IO auxiliary training samples."},
     )
+    code_io_ce_buffer_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable deferred code-IO CE training via a separate in-memory buffer. "
+                "When enabled, code behavior samples are queued from rollout execution and consumed on periodic pure-SFT steps."
+            )
+        },
+    )
+    code_io_ce_every_n_steps: int = field(
+        default=0,
+        metadata={"help": "Run one deferred code-IO CE-only update every N trainer steps. 0 disables periodic CE steps."},
+    )
+    code_io_ce_buffer_capacity: int = field(
+        default=512,
+        metadata={"help": "Maximum number of deferred code-IO CE samples kept in the in-memory buffer."},
+    )
+    code_io_ce_sample_count_per_question: int = field(
+        default=2,
+        metadata={"help": "Maximum number of deferred code-IO CE samples queued per rollout question."},
+    )
+    code_io_ce_select_best_pass: bool = field(
+        default=True,
+        metadata={"help": "Whether deferred code-IO CE should always include the best executable candidate by pass rate."},
+    )
+    code_io_ce_select_random_executable: bool = field(
+        default=True,
+        metadata={"help": "Whether deferred code-IO CE should also include one additional random executable candidate."},
+    )
     question_prior_enabled: bool = field(
         default=False,
         metadata={
@@ -269,6 +298,10 @@ class CodeGRPOConfig(GRPOConfig):
     pseudo_iterative_select_count: int = field(
         default=3,
         metadata={"help": "How many iterative candidates to keep when a rollout group has no passing sample."},
+    )
+    pseudo_iterative_include_novelty: bool = field(
+        default=False,
+        metadata={"help": "Whether pseudo-multiround iterative selection may include a novelty-based candidate."},
     )
     pseudo_iterative_soft_priority_bonus_scale: float = field(
         default=0.1,
@@ -628,6 +661,12 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("code_io_aux_sft_weight_correct must be >= 0.")
         if self.code_io_aux_sft_weight_incorrect < 0:
             raise ValueError("code_io_aux_sft_weight_incorrect must be >= 0.")
+        if self.code_io_ce_every_n_steps < 0:
+            raise ValueError("code_io_ce_every_n_steps must be >= 0.")
+        if self.code_io_ce_buffer_capacity < 0:
+            raise ValueError("code_io_ce_buffer_capacity must be >= 0.")
+        if self.code_io_ce_sample_count_per_question < 0:
+            raise ValueError("code_io_ce_sample_count_per_question must be >= 0.")
         if not (0.0 <= self.question_prior_ema_momentum < 1.0):
             raise ValueError("question_prior_ema_momentum must be in [0, 1).")
         if not (0.0 <= self.question_prior_low_threshold <= 1.0):

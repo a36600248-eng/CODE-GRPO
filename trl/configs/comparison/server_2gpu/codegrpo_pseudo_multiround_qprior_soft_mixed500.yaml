@@ -50,7 +50,7 @@ weight_decay: 0.0
 beta: 0.001
 gradient_checkpointing: true
 gradient_accumulation_steps: 1
-generation_batch_size: 16
+generation_batch_size: 8
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 max_completion_length: 512
@@ -88,6 +88,16 @@ zero_pass_soft_reward_clip_low: -2.0
 zero_pass_soft_reward_clip_high: 2.0
 zero_pass_soft_reward_beta_scale: 0.5
 code_io_aux_training_enabled: false
+code_io_aux_case_count: 1
+code_io_aux_include_correct: true
+code_io_aux_include_incorrect: true
+code_io_aux_include_errors: true
+code_io_ce_buffer_enabled: true
+code_io_ce_every_n_steps: 20
+code_io_ce_buffer_capacity: 512
+code_io_ce_sample_count_per_question: 2
+code_io_ce_select_best_pass: true
+code_io_ce_select_random_executable: true
 
 question_prior_enabled: true
 sampling_refresh_steps: 50
@@ -96,6 +106,7 @@ question_prior_min_seen_before_too_hard: 3
 pseudo_multiround_enabled: true
 pseudo_iterative_pool_capacity: 512
 pseudo_iterative_select_count: 2
+pseudo_iterative_include_novelty: false
 pseudo_iterative_soft_priority_bonus_scale: 0.1
 pseudo_original_downweight_after: 3
 pseudo_original_keep_prob_decay: 0.5

@@ -82,6 +82,16 @@ class _CodeGRPORolloutResult:
 
 
 @dataclass
+class _DeferredCodeIOSample:
+    question_id: str
+    prompt_text: str
+    completion_text: str
+    sft_weight: float
+    pass_rate: float
+    source_tag: str
+
+
+@dataclass
 class _PseudoQuestionState:
     no_pass_streak: int = 0
     total_original_attempts: int = 0
@@ -231,6 +241,10 @@ class CodeGRPOTrainer(GRPOTrainer):
             "zero_pass_soft_trigger_rate",
             "soft_lift",
             "pseudo/original_coverage_remaining",
+            "code_io_ce_buffer/size",
+            "code_io_ce_buffer/enqueued",
+            "code_io_ce_buffer/consumed",
+            "code_io_ce_only_step",
         }
     )
     _TRAIN_LOG_KEYS = frozenset(
@@ -285,6 +299,11 @@ class CodeGRPOTrainer(GRPOTrainer):
             "soft_reward_trigger_rate",
             "zero_pass_soft_trigger_rate",
             "soft_lift",
+            "code_io_ce_buffer/size",
+            "code_io_ce_buffer/enqueued",
+            "code_io_ce_buffer/selected_nodes",
+            "code_io_ce_buffer/consumed",
+            "code_io_ce_only_step",
             "mean_hard_reward",
             "mean_raw_soft_reward",
             "mean_normalized_soft_reward",
@@ -433,6 +452,9 @@ class CodeGRPOTrainer(GRPOTrainer):
             )
         self._pseudo_iterative_pool: list[_PseudoIterativeNode] = []
         self._pseudo_node_serial = 0
+        self._code_io_ce_buffer: deque[_DeferredCodeIOSample] = deque(
+            maxlen=max(0, int(getattr(self.args, "code_io_ce_buffer_capacity", 0) or 0)) or None
+        )
         self._async_rollout_executor: ThreadPoolExecutor | None = None
         self._prefetched_rollout_future: Future | None = None
         self._prefetched_rollout_batch_id: int | None = None
@@ -493,6 +515,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "pseudo_node_serial": int(self._pseudo_node_serial),
             "pseudo_original_pending_qids": list(self._pseudo_original_pending_qids),
             "pseudo_iterative_pool": [asdict(record) for record in self._pseudo_iterative_pool],
+            "code_io_ce_buffer": [asdict(record) for record in self._code_io_ce_buffer],
             "pseudo_question_states": {qid: asdict(state) for qid, state in self._pseudo_question_states.items()},
             "question_prior_states": {qid: asdict(state) for qid, state in self._question_prior_states.items()},
         }
@@ -527,6 +550,10 @@ class CodeGRPOTrainer(GRPOTrainer):
         self._pseudo_iterative_pool = [
             _PseudoIterativeNode(**item) for item in list(payload.get("pseudo_iterative_pool", []) or [])
         ]
+        self._code_io_ce_buffer = deque(
+            [_DeferredCodeIOSample(**item) for item in list(payload.get("code_io_ce_buffer", []) or [])],
+            maxlen=max(0, int(getattr(self.args, "code_io_ce_buffer_capacity", 0) or 0)) or None,
+        )
         self._pseudo_question_states = {
             str(qid): _PseudoQuestionState(**state)
             for qid, state in dict(payload.get("pseudo_question_states", {}) or {}).items()
@@ -982,18 +1009,20 @@ class CodeGRPOTrainer(GRPOTrainer):
             ),
             reverse=True,
         )
-        ranked_novel = sorted(
-            range(len(nodes)),
-            key=lambda i: (
-                float(nodes[i].get("_novelty_score", 0.0) or 0.0),
-                float(nodes[i].get("raw_soft_reward", 0.0) or 0.0),
-            ),
-            reverse=True,
-        )
-
         picks: list[tuple[int, str]] = []
         used: set[int] = set()
-        for ranked, tag in ((ranked_pass, "best_pass"), (ranked_soft, "best_soft"), (ranked_novel, "novel")):
+        ranked_sources: list[tuple[list[int], str]] = [(ranked_pass, "best_pass"), (ranked_soft, "best_soft")]
+        if bool(getattr(self.args, "pseudo_iterative_include_novelty", False)):
+            ranked_novel = sorted(
+                range(len(nodes)),
+                key=lambda i: (
+                    float(nodes[i].get("_novelty_score", 0.0) or 0.0),
+                    float(nodes[i].get("raw_soft_reward", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
+            ranked_sources.append((ranked_novel, "novel"))
+        for ranked, tag in ranked_sources:
             for idx in ranked:
                 if idx in used:
                     continue
@@ -1082,6 +1111,148 @@ class CodeGRPOTrainer(GRPOTrainer):
                 }
             )
         return chosen
+
+    def _deferred_code_io_ce_enabled(self) -> bool:
+        return bool(getattr(self.args, "code_io_ce_buffer_enabled", False)) and int(
+            getattr(self.args, "code_io_ce_every_n_steps", 0) or 0
+        ) > 0
+
+    @staticmethod
+    def _node_is_executable(node_payload: dict[str, Any]) -> bool:
+        return bool(float(node_payload.get("compile_score", 0.0) or 0.0) > 0.0)
+
+    def _choose_deferred_code_io_nodes(
+        self,
+        nodes: list[dict[str, Any]],
+        rng: random.Random,
+    ) -> list[tuple[dict[str, Any], str]]:
+        if not nodes:
+            return []
+        executable = [node for node in nodes if self._node_is_executable(node)]
+        if not executable:
+            return []
+
+        selected: list[tuple[dict[str, Any], str]] = []
+        used_ids: set[str] = set()
+        if bool(getattr(self.args, "code_io_ce_select_best_pass", True)):
+            best_pass = max(
+                executable,
+                key=lambda node: (
+                    float(node.get("pass_rate", 0.0) or 0.0),
+                    float(node.get("final_reward", node.get("R_code", 0.0)) or 0.0),
+                ),
+            )
+            selected.append((best_pass, "best_pass"))
+            used_ids.add(str(best_pass.get("node_id", "")))
+
+        if bool(getattr(self.args, "code_io_ce_select_random_executable", True)):
+            remaining = [node for node in executable if str(node.get("node_id", "")) not in used_ids]
+            if remaining:
+                picked = remaining[rng.randrange(len(remaining))]
+                selected.append((picked, "random_executable"))
+                used_ids.add(str(picked.get("node_id", "")))
+
+        limit = max(0, int(getattr(self.args, "code_io_ce_sample_count_per_question", 0) or 0))
+        if limit > 0:
+            selected = selected[:limit]
+        return selected
+
+    def _enqueue_deferred_code_io_ce_from_rollouts(
+        self,
+        rollouts: list[Any],
+        *,
+        rng: random.Random,
+    ) -> dict[str, float]:
+        if not self._deferred_code_io_ce_enabled():
+            return {}
+
+        added = 0
+        chosen_nodes = 0
+        capacity = max(0, int(getattr(self.args, "code_io_ce_buffer_capacity", 0) or 0))
+        for rollout in rollouts:
+            rounds = list(getattr(rollout, "rounds", []) or [])
+            search_round = next((item for item in rounds if str(item.get("stage", "search")) == "search"), None)
+            if search_round is None:
+                continue
+            nodes = [node for node in list(search_round.get("nodes", []) or []) if bool(node.get("main_sample_active", False))]
+            chosen = self._choose_deferred_code_io_nodes(nodes, rng)
+            chosen_nodes += len(chosen)
+            for node_payload, source_tag in chosen:
+                aux_samples = list(node_payload.get("code_io_train_samples", []) or [])
+                if not aux_samples:
+                    continue
+                item = aux_samples[0]
+                prompt_text = str(item.get("prompt_text", "") or "")
+                completion_text = str(item.get("completion_text", "") or "")
+                if not prompt_text or not completion_text:
+                    continue
+                self._code_io_ce_buffer.append(
+                    _DeferredCodeIOSample(
+                        question_id=str(rollout.question_id),
+                        prompt_text=prompt_text,
+                        completion_text=completion_text,
+                        sft_weight=float(item.get("sft_weight", 0.0) or 0.0),
+                        pass_rate=float(node_payload.get("pass_rate", 0.0) or 0.0),
+                        source_tag=source_tag,
+                    )
+                )
+                added += 1
+        if capacity > 0:
+            buffer_size = min(len(self._code_io_ce_buffer), capacity)
+        else:
+            buffer_size = len(self._code_io_ce_buffer)
+        return {
+            "code_io_ce_buffer/enqueued": float(added),
+            "code_io_ce_buffer/selected_nodes": float(chosen_nodes),
+            "code_io_ce_buffer/size": float(buffer_size),
+        }
+
+    def _should_run_deferred_code_io_ce_step(self) -> bool:
+        if not self.model.training or not self._deferred_code_io_ce_enabled():
+            return False
+        interval = int(getattr(self.args, "code_io_ce_every_n_steps", 0) or 0)
+        if interval <= 0 or not self._code_io_ce_buffer:
+            return False
+        next_step = int(getattr(self.state, "global_step", 0) or 0) + 1
+        return next_step % interval == 0
+
+    def _build_deferred_code_io_ce_batch(self) -> dict[str, torch.Tensor | Any] | None:
+        if not self._code_io_ce_buffer:
+            return None
+        max_samples = max(1, int(getattr(self.args, "code_io_ce_sample_count_per_question", 0) or 1))
+        picked: list[_DeferredCodeIOSample] = []
+        for _ in range(min(max_samples, len(self._code_io_ce_buffer))):
+            picked.append(self._code_io_ce_buffer.popleft())
+        train_samples = []
+        for sample in picked:
+            token_ids = self.code_tokenizer(sample.completion_text, add_special_tokens=False)["input_ids"]
+            if not token_ids:
+                continue
+            train_samples.append(
+                {
+                    "question_id": sample.question_id,
+                    "prompt_text": sample.prompt_text,
+                    "completion_text": sample.completion_text,
+                    "code_token_mask": [0] * len(token_ids),
+                    "A_code": 0.0,
+                    "sft_token_mask": [1] * len(token_ids),
+                    "sft_weight": sample.sft_weight,
+                    "R_code": 0.0,
+                    "pass_rate": sample.pass_rate,
+                }
+            )
+        if not train_samples:
+            return None
+
+        class Obj:
+            def __init__(self, d):
+                self.__dict__.update(d)
+
+        batch = self._build_training_batch([Obj(item) for item in train_samples], to_device=False)
+        self._metrics["train"]["code_io_ce_buffer/consumed"].append(float(len(train_samples)))
+        self._metrics["train"]["code_io_ce_buffer/size"].append(float(len(self._code_io_ce_buffer)))
+        self._metrics["train"]["code_io_ce_only_step"].append(1.0)
+        return batch
 
     def _original_keep_probability(self, base_question_id: str) -> float:
         prior_weight = self._get_question_prior_weight(base_question_id)
@@ -1890,6 +2061,7 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         if mode == "train":
             metric_updates.update(self._update_pseudo_multiround_state(examples, rollouts))
+            metric_updates.update(self._enqueue_deferred_code_io_ce_from_rollouts(rollouts, rng=base_rng))
 
         metric_keys = sorted({key for rollout in rollouts for key in rollout.eval_metrics.keys()})
         merged_eval_metrics: dict[str, float] = {}
@@ -1991,6 +2163,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         return self._finalize_rollout_result(result)
 
     def _prepare_inputs(self, generation_batch: dict[str, torch.Tensor | Any]) -> dict[str, torch.Tensor | Any]:
+        ce_batch = self._build_deferred_code_io_ce_batch() if self._should_run_deferred_code_io_ce_step() else None
+        if ce_batch is not None:
+            return self._move_batch_to_device(ce_batch)
         if self.model.training and isinstance(generation_batch, _CodeGRPOLookaheadBatch):
             current_batch = generation_batch.current_batch
             result = self._pop_prefetched_rollout_result(current_batch)
