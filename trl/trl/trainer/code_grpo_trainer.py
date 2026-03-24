@@ -988,10 +988,6 @@ class CodeGRPOTrainer(GRPOTrainer):
         if select_count == 0:
             return 0
 
-        novelty_scores = self._code_novelty_scores(nodes)
-        for node, novelty in zip(nodes, novelty_scores, strict=True):
-            node["_novelty_score"] = novelty
-
         ranked_pass = sorted(
             range(len(nodes)),
             key=lambda i: (
@@ -1013,6 +1009,9 @@ class CodeGRPOTrainer(GRPOTrainer):
         used: set[int] = set()
         ranked_sources: list[tuple[list[int], str]] = [(ranked_pass, "best_pass"), (ranked_soft, "best_soft")]
         if bool(getattr(self.args, "pseudo_iterative_include_novelty", False)):
+            novelty_scores = self._code_novelty_scores(nodes)
+            for node, novelty in zip(nodes, novelty_scores, strict=True):
+                node["_novelty_score"] = novelty
             ranked_novel = sorted(
                 range(len(nodes)),
                 key=lambda i: (
@@ -1168,7 +1167,6 @@ class CodeGRPOTrainer(GRPOTrainer):
 
         added = 0
         chosen_nodes = 0
-        capacity = max(0, int(getattr(self.args, "code_io_ce_buffer_capacity", 0) or 0))
         for rollout in rollouts:
             rounds = list(getattr(rollout, "rounds", []) or [])
             search_round = next((item for item in rounds if str(item.get("stage", "search")) == "search"), None)
@@ -1197,14 +1195,10 @@ class CodeGRPOTrainer(GRPOTrainer):
                     )
                 )
                 added += 1
-        if capacity > 0:
-            buffer_size = min(len(self._code_io_ce_buffer), capacity)
-        else:
-            buffer_size = len(self._code_io_ce_buffer)
         return {
             "code_io_ce_buffer/enqueued": float(added),
             "code_io_ce_buffer/selected_nodes": float(chosen_nodes),
-            "code_io_ce_buffer/size": float(buffer_size),
+            "code_io_ce_buffer/size": float(len(self._code_io_ce_buffer)),
         }
 
     def _should_run_deferred_code_io_ce_step(self) -> bool:
@@ -1213,6 +1207,7 @@ class CodeGRPOTrainer(GRPOTrainer):
         interval = int(getattr(self.args, "code_io_ce_every_n_steps", 0) or 0)
         if interval <= 0 or not self._code_io_ce_buffer:
             return False
+        # _prepare_inputs runs before Trainer increments global_step for the current update.
         next_step = int(getattr(self.state, "global_step", 0) or 0) + 1
         return next_step % interval == 0
 

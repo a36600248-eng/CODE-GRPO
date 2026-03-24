@@ -1,6 +1,5 @@
 ﻿import ast
 import math
-import copy
 import random
 from typing import Any
 
@@ -378,7 +377,7 @@ class CodeGRPOTreeRunner:
                     "compile_score": float(node.exec_summary.get("compile_score", 0.0)),
                     "generation_format_ok": bool(node.exec_summary.get("generation_format_ok", False)),
                     "code_io_aux_sample_count": len(node.exec_summary.get("code_io_train_samples", [])),
-                    "code_io_train_samples": copy.deepcopy(list(node.exec_summary.get("code_io_train_samples", []))),
+                    "code_io_train_samples": list(node.exec_summary.get("code_io_train_samples", [])),
                     "error_summary": str(node.exec_summary.get("error_summary", "")),
                     "history": list(node.exec_summary.get("history", [])),
                     "generation_debug": dict(node.exec_summary.get("generation_debug", {})),
@@ -832,7 +831,11 @@ class CodeGRPOTreeRunner:
 
         hard_reward = float(pass_cnt / test_count) if test_count > 0 else 0.0
         zero_pass_triggered = bool(pass_cnt == 0 and test_count > 0)
-        soft_reward_triggered = bool(test_count > 0 and bool(getattr(self.args, "zero_pass_soft_reward_enabled", True)))
+        soft_reward_triggered = bool(
+            test_count > 0
+            and pass_rate < 1.0
+            and bool(getattr(self.args, "zero_pass_soft_reward_enabled", True))
+        )
         raw_soft_reward = 0.0
         normalized_soft_reward = 0.0
         soft_reward_beta = 0.0

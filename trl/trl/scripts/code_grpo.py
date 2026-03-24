@@ -535,6 +535,7 @@ def _build_review_summary(run_layout: dict[str, str], rank: int) -> dict[str, An
         "train_mean_pass_rate_last": _last_numeric(train_rows, "mean_pass_rate"),
         "train_mean_R_code_last": _last_numeric(train_rows, "mean_R_code"),
         "train_advantage_code_zero_rate_last": _last_numeric(train_rows, "advantage/code_zero_rate"),
+        "train_soft_reward_trigger_rate_last": _last_numeric(train_rows, "soft_reward_trigger_rate"),
         "train_zero_pass_soft_trigger_rate_last": _last_numeric(train_rows, "zero_pass_soft_trigger_rate"),
         "train_soft_lift_last": _last_numeric(train_rows, "soft_lift"),
         "train_pseudo_iterative_pool_size_last": _last_numeric(train_rows, "pseudo/iterative_pool_size"),

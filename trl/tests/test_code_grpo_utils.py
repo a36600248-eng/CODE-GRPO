@@ -853,6 +853,59 @@ def test_append_iterative_nodes_from_rollout_skips_novelty_when_disabled():
     assert {record.selection_tag for record in trainer._pseudo_iterative_pool} == {"best_pass", "best_soft"}
 
 
+def test_append_iterative_nodes_from_rollout_does_not_compute_novelty_when_disabled():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer._pseudo_multiround_enabled = True
+    trainer.args = SimpleNamespace(
+        pseudo_iterative_select_count=2,
+        pseudo_iterative_pool_capacity=16,
+        pseudo_iterative_include_novelty=False,
+        pseudo_iterative_soft_priority_bonus_scale=0.1,
+    )
+    trainer.state = SimpleNamespace(global_step=5)
+    trainer._pseudo_iterative_pool = []
+    trainer._pseudo_node_serial = 0
+    trainer._get_question_prior_weight = lambda qid: 1.0
+    trainer._base_question_id = lambda example: str(example.get("base_question_id") or example["question_id"])
+    trainer._code_novelty_scores = lambda nodes: (_ for _ in ()).throw(AssertionError("novelty should not be computed"))
+
+    rollout = SimpleNamespace(
+        rounds=[
+            {
+                "stage": "search",
+                "nodes": [
+                    {
+                        "node_id": "n1",
+                        "main_sample_active": True,
+                        "code_text": "print(1)",
+                        "pass_rate": 0.5,
+                        "final_reward": 0.5,
+                        "raw_soft_reward": 0.1,
+                    },
+                    {
+                        "node_id": "n2",
+                        "main_sample_active": True,
+                        "code_text": "print(2)",
+                        "pass_rate": 0.1,
+                        "final_reward": 0.1,
+                        "raw_soft_reward": 0.9,
+                    },
+                ],
+            }
+        ]
+    )
+    source_example = {
+        "question_id": "q1",
+        "prompt": "Print something",
+        "test_cases": [{"input": "", "output": "1\n"}],
+        "io_mode": "stdio",
+    }
+
+    added = trainer._append_iterative_nodes_from_rollout(rollout, source_example)
+
+    assert added == 2
+
+
 def test_deferred_code_io_ce_selects_best_pass_and_random_executable():
     trainer = object.__new__(CodeGRPOTrainer)
     trainer.args = SimpleNamespace(
@@ -904,6 +957,82 @@ def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():
     assert "pass_at_1_within_2" not in metrics
     assert metrics["pass_at_1"] == 0.0
     assert metrics["pass_at_k_within_n"] == 0.0
+
+
+def test_generate_node_skips_soft_reward_scoring_for_fully_passing_candidate(monkeypatch):
+    class DummyBackend:
+        def generate(self, prompt_text, **kwargs):
+            del prompt_text, kwargs
+            raise AssertionError("generate should not be called")
+
+        def logprob(self, prompt, target_text, **kwargs):
+            del prompt, target_text, kwargs
+            raise AssertionError("logprob should not be called for pass_rate=1.0")
+
+    class DummyTokenizer:
+        is_fast = False
+
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+            del add_special_tokens, return_offsets_mapping
+            return {"input_ids": [1] * max(1, len(text))}
+
+    def fake_execute_batch(code, case_inputs, timeout_s, error_max_chars, error_max_lines, io_mode):
+        del code, case_inputs, timeout_s, error_max_chars, error_max_lines, io_mode
+        return [ExecResult(kind="OK", value="ok\n")]
+
+    monkeypatch.setattr(tree_module, "execute_batch", fake_execute_batch)
+
+    runner = object.__new__(CodeGRPOTreeRunner)
+    runner.backend = DummyBackend()
+    runner.tokenizer = DummyTokenizer()
+    runner.args = SimpleNamespace(
+        context_round_window=1,
+        generation_outside_noise_chars=0,
+        error_max_chars=256,
+        error_max_lines=8,
+        code_timeout_seconds=1.0,
+        zero_pass_soft_reward_enabled=True,
+        zero_pass_soft_reward_diag_count=2,
+        zero_pass_soft_reward_clip_low=-2.0,
+        zero_pass_soft_reward_clip_high=2.0,
+        zero_pass_soft_reward_beta_scale=0.5,
+        code_compile_reward_scale=0.0,
+        code_format_reward_scale=0.0,
+        code_aux_reward_without_format_scale=1.0,
+        code_io_aux_training_enabled=False,
+        code_io_ce_buffer_enabled=False,
+        code_io_aux_case_count=1,
+        code_io_aux_include_correct=True,
+        code_io_aux_include_incorrect=True,
+        code_io_aux_include_errors=True,
+        code_io_aux_sft_weight_correct=1.0,
+        code_io_aux_sft_weight_incorrect=1.0,
+    )
+    runner._code_completion_length = lambda: 64
+    runner._count_tokens = lambda text: len(text)
+    runner._retry_empty_generation_outputs = lambda prompt_text, outputs, generation_kwargs=None: outputs
+    runner._maybe_truncate_generated_code = lambda code, token_cap=0: (code, False, len(code))
+
+    node = runner._generate_node(
+        question_id="q1",
+        node_id="n1",
+        parent=Node(node_id="root", parent_id=None, round_idx=0, code="", exec_summary={"history": []}),
+        prompt="Print ok",
+        test_cases=[{"input": "", "output": "ok\n"}],
+        diagnostic_inputs=[""],
+        diagnostic_outputs=["ok\n"],
+        io_mode="stdio",
+        round_idx=1,
+        prompt_text_override="Print ok",
+        prompt_text_raw_override="Print ok",
+        raw_output_override="```python\nprint('ok')\n```",
+        generation_kwargs_override={"max_new_tokens": 32},
+    )
+
+    assert node.pass_rate == 1.0
+    assert node.exec_summary["soft_reward_eligible"] is False
+    assert node.exec_summary["raw_soft_reward"] == 0.0
+    assert node.exec_summary["soft_reward_beta"] == 0.0
 
 
 def test_question_prior_too_hard_requires_min_seen_count():
