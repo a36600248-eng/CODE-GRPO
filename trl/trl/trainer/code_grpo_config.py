@@ -220,6 +220,10 @@ class CodeGRPOConfig(GRPOConfig):
         default=2,
         metadata={"help": "Maximum number of deferred code-IO CE samples queued per rollout question."},
     )
+    code_io_ce_batch_size: int = field(
+        default=16,
+        metadata={"help": "Maximum number of deferred code-IO CE samples consumed on each CE-only step."},
+    )
     code_io_ce_select_best_pass: bool = field(
         default=True,
         metadata={"help": "Whether deferred code-IO CE should always include the best executable candidate by pass rate."},
@@ -667,6 +671,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("code_io_ce_buffer_capacity must be >= 0.")
         if self.code_io_ce_sample_count_per_question < 0:
             raise ValueError("code_io_ce_sample_count_per_question must be >= 0.")
+        if self.code_io_ce_batch_size < 0:
+            raise ValueError("code_io_ce_batch_size must be >= 0.")
         if not (0.0 <= self.question_prior_ema_momentum < 1.0):
             raise ValueError("question_prior_ema_momentum must be in [0, 1).")
         if not (0.0 <= self.question_prior_low_threshold <= 1.0):

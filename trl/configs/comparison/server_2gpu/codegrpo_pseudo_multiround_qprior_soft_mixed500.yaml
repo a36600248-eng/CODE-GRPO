@@ -96,6 +96,7 @@ code_io_ce_buffer_enabled: true
 code_io_ce_every_n_steps: 20
 code_io_ce_buffer_capacity: 512
 code_io_ce_sample_count_per_question: 2
+code_io_ce_batch_size: 16
 code_io_ce_select_best_pass: true
 code_io_ce_select_random_executable: true
 

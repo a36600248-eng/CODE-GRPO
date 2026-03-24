@@ -2,7 +2,7 @@
 
 import math
 import random
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +20,7 @@ from trl.extensions.code_grpo.tree import (
 )
 from trl.extensions.code_grpo.types import ExecResult, Node
 from trl.trainer.code_grpo_config import CodeGRPOConfig
-from trl.trainer.code_grpo_trainer import CodeGRPOTrainer, _PseudoIterativeNode
+from trl.trainer.code_grpo_trainer import CodeGRPOTrainer, _DeferredCodeIOSample, _PseudoIterativeNode
 from trl.trainer import utils as trainer_utils
 
 
@@ -937,6 +937,34 @@ def test_should_run_deferred_code_io_ce_step_uses_periodic_schedule():
     trainer._code_io_ce_buffer = deque([SimpleNamespace()])
 
     assert trainer._should_run_deferred_code_io_ce_step() is True
+
+
+def test_build_deferred_code_io_ce_batch_uses_batch_size_limit():
+    trainer = object.__new__(CodeGRPOTrainer)
+    trainer.args = SimpleNamespace(code_io_ce_batch_size=3)
+    trainer.code_tokenizer = lambda text, add_special_tokens=False: {"input_ids": [1] * max(1, len(text))}
+    trainer._metrics = {"train": defaultdict(list)}
+    trainer._build_training_batch = lambda train_samples, to_device=False: {"sample_count": len(train_samples), "to_device": to_device}
+    trainer._code_io_ce_buffer = deque(
+        [
+            _DeferredCodeIOSample(
+                question_id=f"q{i}",
+                prompt_text="p",
+                completion_text="c",
+                sft_weight=1.0,
+                pass_rate=0.0,
+                source_tag="best_pass",
+            )
+            for i in range(5)
+        ]
+    )
+
+    batch = trainer._build_deferred_code_io_ce_batch()
+
+    assert batch == {"sample_count": 3, "to_device": False}
+    assert len(trainer._code_io_ce_buffer) == 2
+    assert trainer._metrics["train"]["code_io_ce_buffer/consumed"][-1] == 3.0
+    assert trainer._metrics["train"]["code_io_ce_buffer/size"][-1] == 2.0
 
 
 def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():

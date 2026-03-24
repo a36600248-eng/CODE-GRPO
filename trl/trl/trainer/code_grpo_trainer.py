@@ -1214,7 +1214,7 @@ class CodeGRPOTrainer(GRPOTrainer):
     def _build_deferred_code_io_ce_batch(self) -> dict[str, torch.Tensor | Any] | None:
         if not self._code_io_ce_buffer:
             return None
-        max_samples = max(1, int(getattr(self.args, "code_io_ce_sample_count_per_question", 0) or 1))
+        max_samples = max(1, int(getattr(self.args, "code_io_ce_batch_size", 0) or 1))
         picked: list[_DeferredCodeIOSample] = []
         for _ in range(min(max_samples, len(self._code_io_ce_buffer))):
             picked.append(self._code_io_ce_buffer.popleft())
