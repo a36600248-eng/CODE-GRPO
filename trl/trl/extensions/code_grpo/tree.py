@@ -1074,20 +1074,20 @@ class CodeGRPOTreeRunner:
         cumulative_best = 0.0
         max_rounds = len(flat_nodes)
         if max_rounds == 0:
-            metrics["pass_at_1_round_1"] = 0.0
-            metrics["best_pass_rate_round_1"] = 0.0
+            metrics["pass_at_1_within_1"] = 0.0
+            metrics["best_pass_rate_within_1"] = 0.0
             metrics["pass_at_1"] = 0.0
-            metrics["pass_at_k_round_n"] = 0.0
+            metrics["pass_at_k_within_n"] = 0.0
             metrics["best_pass_rate_overall"] = 0.0
             return metrics
         for round_idx in range(1, max_rounds + 1):
             node = flat_nodes[round_idx - 1]
             cumulative_solved = cumulative_solved or (float(node.get("pass_rate", 0.0)) == 1.0)
             cumulative_best = max(cumulative_best, float(node.get("pass_rate", 0.0)))
-            metrics[f"pass_at_1_round_{round_idx}"] = 1.0 if cumulative_solved else 0.0
-            metrics[f"best_pass_rate_round_{round_idx}"] = cumulative_best
-        metrics["pass_at_1"] = metrics.get(f"pass_at_1_round_{max_rounds}", 0.0)
+            metrics[f"pass_at_1_within_{round_idx}"] = 1.0 if cumulative_solved else 0.0
+            metrics[f"best_pass_rate_within_{round_idx}"] = cumulative_best
+        metrics["pass_at_1"] = metrics.get(f"pass_at_1_within_{max_rounds}", 0.0)
         eval_round_n = min(max(1, int(self.args.eval_round_n)), max_rounds)
-        metrics["pass_at_k_round_n"] = metrics.get(f"pass_at_1_round_{eval_round_n}", 0.0)
+        metrics["pass_at_k_within_n"] = metrics.get(f"pass_at_1_within_{eval_round_n}", 0.0)
         metrics["best_pass_rate_overall"] = max((float(node["pass_rate"]) for node in flat_nodes), default=0.0)
         return metrics

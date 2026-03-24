@@ -103,7 +103,7 @@ The active eval path is code-only single-trajectory eval:
 
 - one actual repair trajectory is executed per eval sample
 - each executed round generates exactly one repair candidate, then either stops on success or continues with the next repair round
-- `pass_at_1_round_r` and `best_pass_rate_round_r` reflect only the rounds that were actually executed
+- `pass_at_1_within_r` and `best_pass_rate_within_r` are cumulative within-round metrics over the actually executed repair rounds
 - when `eval_code_only_single_trajectory=true`, `eval_T_max_override` controls the maximum number of consecutive single-trajectory repair rounds
 
 ### Original-Problem Recovery

@@ -327,7 +327,7 @@ class CodeGRPOTrainer(GRPOTrainer):
             "eval_mean_soft_reward_beta",
         }
     )
-    _EVAL_LOG_PREFIXES = ("eval_pass_at_1_round_", "eval_best_pass_rate_round_")
+    _EVAL_LOG_PREFIXES = ("eval_pass_at_1_within_", "eval_best_pass_rate_within_")
 
     def __init__(
         self,

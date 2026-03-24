@@ -574,7 +574,7 @@ def _generate_review_plots(bundle_root: str, logs_bundle: str, artifacts_bundle:
         return
 
     train_rows = [row for row in rows if isinstance(row.get("logs"), dict) and "loss" in row["logs"]]
-    eval_rows = [row for row in rows if isinstance(row.get("logs"), dict) and "eval_pass_at_1_round_1" in row["logs"]]
+    eval_rows = [row for row in rows if isinstance(row.get("logs"), dict) and "eval_pass_at_1_within_1" in row["logs"]]
 
     # 1. Training reward curves
     reward_key_candidates = {
@@ -612,7 +612,7 @@ def _generate_review_plots(bundle_root: str, logs_bundle: str, artifacts_bundle:
     eval_round_keys: dict[int, str] = {}
     for row in eval_rows:
         for key in row["logs"].keys():
-            match = re.fullmatch(r"eval_pass_at_1_round_(\d+)", key)
+            match = re.fullmatch(r"eval_pass_at_1_within_(\d+)", key)
             if match:
                 eval_round_keys[int(match.group(1))] = key
     fig, ax = plt.subplots(figsize=(9, 5))

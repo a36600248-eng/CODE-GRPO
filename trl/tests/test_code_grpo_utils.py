@@ -582,9 +582,9 @@ def test_run_question_eval_code_only_supports_multiple_single_trajectory_rounds(
     assert backend.generate_many_calls == 0
     assert rollout.node_count == 2
     assert len(rollout.rounds) == 2
-    assert rollout.eval_metrics["pass_at_1_round_1"] == 0.0
-    assert rollout.eval_metrics["pass_at_1_round_2"] == 1.0
-    assert rollout.eval_metrics["best_pass_rate_round_2"] == 1.0
+    assert rollout.eval_metrics["pass_at_1_within_1"] == 0.0
+    assert rollout.eval_metrics["pass_at_1_within_2"] == 1.0
+    assert rollout.eval_metrics["best_pass_rate_within_2"] == 1.0
     assert rollout.eval_metrics["pass_at_1"] == 1.0
 
 
@@ -812,11 +812,11 @@ def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():
         ]
     )
 
-    assert metrics["pass_at_1_round_1"] == 0.0
-    assert metrics["best_pass_rate_round_1"] == 0.25
-    assert "pass_at_1_round_2" not in metrics
+    assert metrics["pass_at_1_within_1"] == 0.0
+    assert metrics["best_pass_rate_within_1"] == 0.25
+    assert "pass_at_1_within_2" not in metrics
     assert metrics["pass_at_1"] == 0.0
-    assert metrics["pass_at_k_round_n"] == 0.0
+    assert metrics["pass_at_k_within_n"] == 0.0
 
 
 def test_question_prior_too_hard_requires_min_seen_count():
