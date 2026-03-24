@@ -113,6 +113,16 @@ class CodeGRPOConfig(GRPOConfig):
         default=1,
         metadata={"help": "How many times to retry a main-generation sample when the decoded output is empty."},
     )
+    train_generation_truncate_tokens: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Optional train-only post-generation truncation cap in tokens. "
+                "If > 0, generated code longer than this cap is truncated before execution/reward/model training. "
+                "Eval is unaffected."
+            )
+        },
+    )
     zero_pass_soft_reward_enabled: bool = field(
         default=True,
         metadata={"help": "Enable bounded soft reward for code candidates; field name is legacy."},
@@ -575,6 +585,8 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("generation_min_new_tokens_code must be >= 0.")
         if self.generation_empty_retry_count < 0:
             raise ValueError("generation_empty_retry_count must be >= 0.")
+        if self.train_generation_truncate_tokens < 0:
+            raise ValueError("train_generation_truncate_tokens must be >= 0.")
         if self.zero_pass_soft_reward_diag_count < 0:
             raise ValueError("zero_pass_soft_reward_diag_count must be >= 0.")
         if self.zero_pass_soft_reward_clip_low >= self.zero_pass_soft_reward_clip_high:

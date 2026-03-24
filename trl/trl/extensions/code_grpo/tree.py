@@ -217,6 +217,27 @@ class CodeGRPOTreeRunner:
             kwargs["top_p"] = float(top_p)
         return kwargs
 
+    def _maybe_truncate_generated_code(
+        self,
+        code: str,
+        *,
+        token_cap: int,
+    ) -> tuple[str, bool, int]:
+        if token_cap <= 0:
+            return code, False, 0
+        code_token_ids = self.tokenizer(code or "", add_special_tokens=False)["input_ids"]
+        original_token_count = len(code_token_ids)
+        if original_token_count <= token_cap:
+            return code, False, original_token_count
+        truncated_token_ids = code_token_ids[:token_cap]
+        if hasattr(self.tokenizer, "decode"):
+            truncated_code = self.tokenizer.decode(truncated_token_ids, skip_special_tokens=True)
+        elif hasattr(self.tokenizer, "batch_decode"):
+            truncated_code = self.tokenizer.batch_decode([truncated_token_ids], skip_special_tokens=True)[0]
+        else:
+            truncated_code = code
+        return str(truncated_code or "").strip(), True, original_token_count
+
     def _use_zero_pass_baseline(self) -> bool:
         return True
 
@@ -547,6 +568,9 @@ class CodeGRPOTreeRunner:
                         prompt_text_raw_override=prompt_text,
                         raw_output_override=raw_output,
                         problem_logprob_cache=soft_reward_problem_logprob_cache,
+                        truncate_completion_token_cap=int(
+                            getattr(self.args, "train_generation_truncate_tokens", 0) or 0
+                        ),
                     )
                 )
             produced_total += len(accepted)
@@ -584,6 +608,7 @@ class CodeGRPOTreeRunner:
                     prompt_text_override=rendered_prompt_text,
                     prompt_text_raw_override=prompt_text,
                     problem_logprob_cache=soft_reward_problem_logprob_cache,
+                    truncate_completion_token_cap=int(getattr(self.args, "train_generation_truncate_tokens", 0) or 0),
                 )
                 if abs(accepted[0].R_code - accepted[1].R_code) >= eps or abs(accepted[0].pass_rate - accepted[1].pass_rate) >= eps:
                     undiff_retry_succeeded += 1
@@ -609,6 +634,7 @@ class CodeGRPOTreeRunner:
         raw_output_override: str | None = None,
         generation_kwargs_override: dict[str, Any] | None = None,
         problem_logprob_cache: dict[tuple[str, str], float] | None = None,
+        truncate_completion_token_cap: int = 0,
         log_reward: bool = False,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
@@ -649,6 +675,12 @@ class CodeGRPOTreeRunner:
         trace_store_full_text = bool(getattr(self.args, "trace_store_full_text", False))
 
         code = parsed_code or ""
+        code, generation_truncated, original_code_token_count = self._maybe_truncate_generated_code(
+            code,
+            token_cap=max(0, int(truncate_completion_token_cap or 0)),
+        )
+        if generation_truncated:
+            generation_format_ok = False
         completion_text = build_generation_completion(code)
         token_ids, _, _ = build_token_masks(self.tokenizer, completion_text)
         code_mask = [1] * len(token_ids)
@@ -767,6 +799,9 @@ class CodeGRPOTreeRunner:
             exec_summary={
                 "error_summary": error_summary,
                 "generation_format_ok": generation_format_ok,
+                "generation_truncated": bool(generation_truncated),
+                "original_code_token_count": int(original_code_token_count),
+                "truncated_code_token_count": len(token_ids),
                 "generation_format_score": generation_format_score,
                 "compile_score": compile_score,
                 "soft_reward_eligible": bool(soft_reward_eligible),
@@ -806,6 +841,7 @@ class CodeGRPOTreeRunner:
                         "failed_input": failed_case_input,
                         "failed_actual": failed_case_actual,
                         "generation_format_ok": generation_format_ok,
+                        "generation_truncated": bool(generation_truncated),
                         "compile_score": compile_score,
                         "pass_cnt": pass_cnt,
                         "test_count": test_count,

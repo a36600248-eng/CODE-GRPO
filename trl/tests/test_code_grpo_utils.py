@@ -130,12 +130,44 @@ def test_code_reward_applies_bounded_soft_reward_to_partial_pass_samples():
         generation_format_scale=0.0,
     ) == 0.375
 
+
+def test_maybe_truncate_generated_code_caps_train_side_tokens():
+    runner = object.__new__(CodeGRPOTreeRunner)
+
+    class DummyTokenizer:
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+            del add_special_tokens, return_offsets_mapping
+            return {"input_ids": [ord(ch) for ch in text]}
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            del skip_special_tokens
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    runner.tokenizer = DummyTokenizer()
+
+    code, truncated, original_token_count = runner._maybe_truncate_generated_code("abcdef", token_cap=3)
+    assert code == "abc"
+    assert truncated is True
+    assert original_token_count == 6
+
+    code2, truncated2, original_token_count2 = runner._maybe_truncate_generated_code("abc", token_cap=3)
+    assert code2 == "abc"
+    assert truncated2 is False
+    assert original_token_count2 == 3
+
+
 def test_lambda_soft_range_validation():
     CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, lambda_soft=0.0)
     CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, lambda_soft=1.0)
     try:
         CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, lambda_soft=1.1)
         assert False, "Expected ValueError for lambda_soft > 1"
+    except ValueError:
+        pass
+    CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, train_generation_truncate_tokens=0)
+    try:
+        CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, train_generation_truncate_tokens=-1)
+        assert False, "Expected ValueError for negative train_generation_truncate_tokens"
     except ValueError:
         pass
 
