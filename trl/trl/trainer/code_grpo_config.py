@@ -123,6 +123,24 @@ class CodeGRPOConfig(GRPOConfig):
             )
         },
     )
+    train_generation_total_token_cap: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Optional train-only total token budget for rendered prompt + generated code. "
+                "When > 0, training generation dynamically reduces max_new_tokens to stay within this budget."
+            )
+        },
+    )
+    train_generation_completion_reserve_tokens: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Preferred train-only completion token reserve when train_generation_total_token_cap is enabled. "
+                "The trainer will first try to trim carried history to preserve at least this much completion space."
+            )
+        },
+    )
     zero_pass_soft_reward_enabled: bool = field(
         default=True,
         metadata={"help": "Enable bounded soft reward for code candidates; field name is legacy."},
@@ -587,6 +605,17 @@ class CodeGRPOConfig(GRPOConfig):
             raise ValueError("generation_empty_retry_count must be >= 0.")
         if self.train_generation_truncate_tokens < 0:
             raise ValueError("train_generation_truncate_tokens must be >= 0.")
+        if self.train_generation_total_token_cap < 0:
+            raise ValueError("train_generation_total_token_cap must be >= 0.")
+        if self.train_generation_completion_reserve_tokens < 0:
+            raise ValueError("train_generation_completion_reserve_tokens must be >= 0.")
+        if (
+            self.train_generation_total_token_cap > 0
+            and self.train_generation_completion_reserve_tokens > self.train_generation_total_token_cap
+        ):
+            raise ValueError(
+                "train_generation_completion_reserve_tokens must be <= train_generation_total_token_cap."
+            )
         if self.zero_pass_soft_reward_diag_count < 0:
             raise ValueError("zero_pass_soft_reward_diag_count must be >= 0.")
         if self.zero_pass_soft_reward_clip_low >= self.zero_pass_soft_reward_clip_high:

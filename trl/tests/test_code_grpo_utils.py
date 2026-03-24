@@ -170,6 +170,34 @@ def test_lambda_soft_range_validation():
         assert False, "Expected ValueError for negative train_generation_truncate_tokens"
     except ValueError:
         pass
+    CodeGRPOConfig(
+        use_cpu=True,
+        bf16=False,
+        fp16=False,
+        train_generation_total_token_cap=512,
+        train_generation_completion_reserve_tokens=128,
+    )
+    try:
+        CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, train_generation_total_token_cap=-1)
+        assert False, "Expected ValueError for negative train_generation_total_token_cap"
+    except ValueError:
+        pass
+    try:
+        CodeGRPOConfig(use_cpu=True, bf16=False, fp16=False, train_generation_completion_reserve_tokens=-1)
+        assert False, "Expected ValueError for negative train_generation_completion_reserve_tokens"
+    except ValueError:
+        pass
+    try:
+        CodeGRPOConfig(
+            use_cpu=True,
+            bf16=False,
+            fp16=False,
+            train_generation_total_token_cap=128,
+            train_generation_completion_reserve_tokens=256,
+        )
+        assert False, "Expected ValueError when reserve exceeds total cap"
+    except ValueError:
+        pass
 
 
 def test_double_zero_node_detection():
@@ -558,6 +586,86 @@ def test_run_question_eval_code_only_supports_multiple_single_trajectory_rounds(
     assert rollout.eval_metrics["pass_at_1_round_2"] == 1.0
     assert rollout.eval_metrics["best_pass_rate_round_2"] == 1.0
     assert rollout.eval_metrics["pass_at_1"] == 1.0
+
+
+def test_resolve_training_generation_kwargs_caps_completion_by_total_budget():
+    runner = object.__new__(CodeGRPOTreeRunner)
+
+    class DummyTokenizer:
+        is_fast = False
+
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+            del add_special_tokens, return_offsets_mapping
+            return {"input_ids": [1] * len(text)}
+
+    runner.tokenizer = DummyTokenizer()
+    runner.args = SimpleNamespace(
+        max_completion_length=512,
+        max_completion_length_code=512,
+        generation_min_new_tokens_code=16,
+        generation_temperature_code=0.7,
+        generation_top_p_code=0.95,
+        train_generation_total_token_cap=100,
+        train_generation_completion_reserve_tokens=24,
+    )
+
+    kwargs, meta = runner._resolve_training_generation_kwargs("x" * 80)
+
+    assert kwargs["max_new_tokens"] == 20
+    assert kwargs["min_new_tokens"] == 16
+    assert meta["prompt_token_count"] == 80
+    assert meta["budget_capped"] is True
+    assert meta["reserve_met"] is False
+
+
+def test_build_train_prompt_and_generation_kwargs_trims_history_to_preserve_completion_budget():
+    runner = object.__new__(CodeGRPOTreeRunner)
+
+    class DummyTokenizer:
+        is_fast = False
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            del tokenize, add_generation_prompt
+            return messages[0]["content"]
+
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+            del add_special_tokens, return_offsets_mapping
+            return {"input_ids": [1] * len(text)}
+
+    runner.tokenizer = DummyTokenizer()
+    runner.args = SimpleNamespace(
+        use_chat_template_for_codegrpo=True,
+        context_round_window=1,
+        max_completion_length=512,
+        max_completion_length_code=512,
+        generation_min_new_tokens_code=16,
+        generation_temperature_code=0.7,
+        generation_top_p_code=0.95,
+        train_generation_total_token_cap=260,
+        train_generation_completion_reserve_tokens=120,
+    )
+
+    history = [
+        {
+            "status_code": "RUNTIME_ERROR",
+            "failed_input": "1 2 3",
+            "failed_actual": "ValueError",
+            "error_summary": "x" * 180,
+            "compile_score": 1.0,
+        }
+    ]
+
+    _, rendered_prompt, kwargs, meta, used_history = runner._build_train_prompt_and_generation_kwargs(
+        question_prompt="Print ok",
+        history=history,
+        parent_code=None,
+    )
+
+    assert meta["history_trimmed_for_budget"] is True
+    assert meta["history_items_used"] == 0
+    assert used_history == []
+    assert kwargs["max_new_tokens"] >= 120
+    assert "Earlier history summary:" not in rendered_prompt
 
 
 def test_make_iterative_prompt_uses_stdio_specific_instruction():

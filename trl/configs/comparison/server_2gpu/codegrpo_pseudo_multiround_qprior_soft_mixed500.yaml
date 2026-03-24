@@ -60,6 +60,8 @@ eval_generation_temperature_code: 0.0
 generation_top_p_code: 0.95
 generation_min_new_tokens_code: 16
 generation_empty_retry_count: 1
+train_generation_total_token_cap: 960
+train_generation_completion_reserve_tokens: 192
 train_generation_truncate_tokens: 384
 generation_outside_noise_chars: 0
 code_timeout_seconds: 2.0

@@ -217,6 +217,90 @@ class CodeGRPOTreeRunner:
             kwargs["top_p"] = float(top_p)
         return kwargs
 
+    def _count_tokens(self, text: str) -> int:
+        return len(self.tokenizer(str(text or ""), add_special_tokens=False)["input_ids"])
+
+    def _resolve_training_generation_kwargs(
+        self,
+        prompt_text: str,
+        *,
+        base_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        generation_kwargs = dict(base_kwargs or self._code_generation_kwargs())
+        total_cap = int(getattr(self.args, "train_generation_total_token_cap", 0) or 0)
+        reserve_tokens = int(getattr(self.args, "train_generation_completion_reserve_tokens", 0) or 0)
+        prompt_token_count = self._count_tokens(prompt_text)
+        requested_max_new_tokens = int(generation_kwargs.get("max_new_tokens", self._code_completion_length()) or 0)
+        budget_meta = {
+            "prompt_token_count": int(prompt_token_count),
+            "requested_max_new_tokens": int(requested_max_new_tokens),
+            "effective_max_new_tokens": int(requested_max_new_tokens),
+            "total_token_cap": int(total_cap),
+            "reserve_tokens": int(reserve_tokens),
+            "budget_capped": False,
+            "reserve_met": True,
+        }
+        if total_cap <= 0:
+            return generation_kwargs, budget_meta
+
+        available_completion_tokens = max(0, total_cap - prompt_token_count)
+        effective_max_new_tokens = min(requested_max_new_tokens, max(1, available_completion_tokens))
+        if "min_new_tokens" in generation_kwargs:
+            generation_kwargs["min_new_tokens"] = min(int(generation_kwargs["min_new_tokens"]), effective_max_new_tokens)
+        generation_kwargs["max_new_tokens"] = effective_max_new_tokens
+        budget_meta["effective_max_new_tokens"] = int(effective_max_new_tokens)
+        budget_meta["budget_capped"] = bool(effective_max_new_tokens < requested_max_new_tokens)
+        budget_meta["reserve_met"] = bool(
+            reserve_tokens <= 0 or available_completion_tokens >= min(requested_max_new_tokens, reserve_tokens)
+        )
+        return generation_kwargs, budget_meta
+
+    def _build_train_prompt_and_generation_kwargs(
+        self,
+        *,
+        question_prompt: str,
+        history: list[dict[str, Any]],
+        parent_code: str | None,
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        context_window = int(getattr(self.args, "context_round_window", 0) or 0)
+        context_history = history[-context_window:] if context_window > 0 else []
+        reserve_tokens = int(getattr(self.args, "train_generation_completion_reserve_tokens", 0) or 0)
+        base_generation_kwargs = self._code_generation_kwargs()
+
+        best_candidate: tuple[str, str, dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None = None
+        for start_idx in range(0, len(context_history) + 1):
+            used_history = context_history[start_idx:]
+            prompt_text_raw = build_generation_prompt(
+                question_prompt=question_prompt,
+                history=used_history,
+                parent_code=parent_code,
+            )
+            prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
+            generation_kwargs, budget_meta = self._resolve_training_generation_kwargs(
+                prompt_text,
+                base_kwargs=base_generation_kwargs,
+            )
+            budget_meta = dict(budget_meta)
+            budget_meta["history_trimmed_for_budget"] = bool(start_idx > 0)
+            budget_meta["history_items_used"] = int(len(used_history))
+            candidate = (prompt_text_raw, prompt_text, generation_kwargs, budget_meta, used_history)
+            best_candidate = candidate
+            if reserve_tokens <= 0 or bool(budget_meta.get("reserve_met", True)):
+                return candidate
+
+        if best_candidate is None:
+            prompt_text_raw = build_generation_prompt(
+                question_prompt=question_prompt,
+                history=[],
+                parent_code=parent_code,
+            )
+            prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
+            generation_kwargs, budget_meta = self._resolve_training_generation_kwargs(prompt_text)
+            budget_meta["history_trimmed_for_budget"] = False
+            budget_meta["history_items_used"] = 0
+            return prompt_text_raw, prompt_text, generation_kwargs, budget_meta, []
+        return best_candidate
+
     def _maybe_truncate_generated_code(
         self,
         code: str,
@@ -529,14 +613,17 @@ class CodeGRPOTreeRunner:
             return accepted, produced_total, resample_count, node_serial, 0, 0
 
         history = list(parent.exec_summary.get("history", []))
-        context_history = history[-self.args.context_round_window :]
-        prompt_text = build_generation_prompt(
+        (
+            prompt_text,
+            rendered_prompt_text,
+            generation_kwargs,
+            prompt_budget_debug,
+            used_context_history,
+        ) = self._build_train_prompt_and_generation_kwargs(
             question_prompt=prompt,
-            history=context_history,
+            history=history,
             parent_code=parent.code,
         )
-        rendered_prompt_text = self._render_prompt_with_chat_template(prompt_text)
-        generation_kwargs = self._code_generation_kwargs()
         soft_reward_problem_logprob_cache: dict[tuple[str, str], float] = {}
 
         for retry_idx in range(int(self.args.M_retry) + 1):
@@ -567,10 +654,13 @@ class CodeGRPOTreeRunner:
                         prompt_text_override=rendered_prompt_text,
                         prompt_text_raw_override=prompt_text,
                         raw_output_override=raw_output,
+                        generation_kwargs_override=generation_kwargs,
                         problem_logprob_cache=soft_reward_problem_logprob_cache,
                         truncate_completion_token_cap=int(
                             getattr(self.args, "train_generation_truncate_tokens", 0) or 0
                         ),
+                        prompt_budget_debug_override=prompt_budget_debug,
+                        prompt_history_debug_override=summarize_generation_history(used_context_history),
                     )
                 )
             produced_total += len(accepted)
@@ -607,8 +697,11 @@ class CodeGRPOTreeRunner:
                     round_idx=round_idx,
                     prompt_text_override=rendered_prompt_text,
                     prompt_text_raw_override=prompt_text,
+                    generation_kwargs_override=generation_kwargs,
                     problem_logprob_cache=soft_reward_problem_logprob_cache,
                     truncate_completion_token_cap=int(getattr(self.args, "train_generation_truncate_tokens", 0) or 0),
+                    prompt_budget_debug_override=prompt_budget_debug,
+                    prompt_history_debug_override=summarize_generation_history(used_context_history),
                 )
                 if abs(accepted[0].R_code - accepted[1].R_code) >= eps or abs(accepted[0].pass_rate - accepted[1].pass_rate) >= eps:
                     undiff_retry_succeeded += 1
@@ -635,32 +728,52 @@ class CodeGRPOTreeRunner:
         generation_kwargs_override: dict[str, Any] | None = None,
         problem_logprob_cache: dict[tuple[str, str], float] | None = None,
         truncate_completion_token_cap: int = 0,
+        prompt_budget_debug_override: dict[str, Any] | None = None,
+        prompt_history_debug_override: dict[str, Any] | None = None,
         log_reward: bool = False,
     ) -> Node:
         history = list(parent.exec_summary.get("history", []))
         context_history = history[-self.args.context_round_window :]
-        prompt_history_debug = summarize_generation_history(context_history)
+        prompt_history_debug = (
+            dict(prompt_history_debug_override)
+            if prompt_history_debug_override is not None
+            else summarize_generation_history(context_history)
+        )
+        prompt_budget_debug = dict(prompt_budget_debug_override or {})
 
         if prompt_text_override is None:
-            prompt_text_raw = build_generation_prompt(
+            (
+                prompt_text_raw,
+                prompt_text,
+                resolved_generation_kwargs,
+                prompt_budget_debug,
+                used_context_history,
+            ) = self._build_train_prompt_and_generation_kwargs(
                 question_prompt=prompt,
-                history=context_history,
+                history=history,
                 parent_code=parent.code,
             )
-            prompt_text = self._render_prompt_with_chat_template(prompt_text_raw)
+            generation_kwargs = generation_kwargs_override or resolved_generation_kwargs
+            prompt_history_debug = summarize_generation_history(used_context_history)
         else:
             prompt_text_raw = prompt_text_raw_override or prompt_text_override
             prompt_text = prompt_text_override
+            generation_kwargs = generation_kwargs_override
+            if raw_output_override is None:
+                generation_kwargs, prompt_budget_debug = self._resolve_training_generation_kwargs(
+                    prompt_text,
+                    base_kwargs=generation_kwargs_override,
+                )
         raw_output = (
             raw_output_override
             if raw_output_override is not None
-            else self.backend.generate(prompt_text, **(generation_kwargs_override or self._code_generation_kwargs()))
+            else self.backend.generate(prompt_text, **(generation_kwargs or self._code_generation_kwargs()))
         )
         if raw_output_override is None and not (raw_output or "").strip():
             retried_outputs = self._retry_empty_generation_outputs(
                 prompt_text,
                 [raw_output],
-                generation_kwargs=generation_kwargs_override,
+                generation_kwargs=generation_kwargs,
             )
             raw_output = retried_outputs[0] if retried_outputs else raw_output
         parsed_code, _, _, _, generation_format_ok = (
@@ -802,6 +915,19 @@ class CodeGRPOTreeRunner:
                 "generation_truncated": bool(generation_truncated),
                 "original_code_token_count": int(original_code_token_count),
                 "truncated_code_token_count": len(token_ids),
+                "prompt_token_count": int(prompt_budget_debug.get("prompt_token_count", self._count_tokens(prompt_text))),
+                "requested_max_new_tokens": int(
+                    prompt_budget_debug.get("requested_max_new_tokens", self._code_completion_length())
+                ),
+                "effective_max_new_tokens": int(
+                    prompt_budget_debug.get("effective_max_new_tokens", self._code_completion_length())
+                ),
+                "train_total_token_cap": int(prompt_budget_debug.get("total_token_cap", 0)),
+                "train_completion_reserve_tokens": int(prompt_budget_debug.get("reserve_tokens", 0)),
+                "generation_budget_capped": bool(prompt_budget_debug.get("budget_capped", False)),
+                "generation_budget_reserve_met": bool(prompt_budget_debug.get("reserve_met", True)),
+                "history_trimmed_for_budget": bool(prompt_budget_debug.get("history_trimmed_for_budget", False)),
+                "history_items_used": int(prompt_budget_debug.get("history_items_used", len(context_history))),
                 "generation_format_score": generation_format_score,
                 "compile_score": compile_score,
                 "soft_reward_eligible": bool(soft_reward_eligible),
@@ -821,6 +947,19 @@ class CodeGRPOTreeRunner:
                     "latest_feedback_summary": summarize_error(prompt_history_debug.get("latest_feedback", ""), trace_max_chars, trace_max_lines),
                     "earlier_history_summary": summarize_error(prompt_history_debug.get("earlier_summary", ""), trace_max_chars, trace_max_lines),
                     "raw_output": summarize_error(raw_output, trace_max_chars, trace_max_lines),
+                    "prompt_token_count": int(prompt_budget_debug.get("prompt_token_count", self._count_tokens(prompt_text))),
+                    "requested_max_new_tokens": int(
+                        prompt_budget_debug.get("requested_max_new_tokens", self._code_completion_length())
+                    ),
+                    "effective_max_new_tokens": int(
+                        prompt_budget_debug.get("effective_max_new_tokens", self._code_completion_length())
+                    ),
+                    "train_total_token_cap": int(prompt_budget_debug.get("total_token_cap", 0)),
+                    "train_completion_reserve_tokens": int(prompt_budget_debug.get("reserve_tokens", 0)),
+                    "generation_budget_capped": bool(prompt_budget_debug.get("budget_capped", False)),
+                    "generation_budget_reserve_met": bool(prompt_budget_debug.get("reserve_met", True)),
+                    "history_trimmed_for_budget": bool(prompt_budget_debug.get("history_trimmed_for_budget", False)),
+                    "history_items_used": int(prompt_budget_debug.get("history_items_used", len(context_history))),
                     **(
                         {
                             "full_prompt_raw": prompt_text_raw,
