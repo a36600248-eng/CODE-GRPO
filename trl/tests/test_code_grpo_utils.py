@@ -967,7 +967,7 @@ def test_build_deferred_code_io_ce_batch_uses_batch_size_limit():
     assert trainer._metrics["train"]["code_io_ce_buffer/size"][-1] == 2.0
 
 
-def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():
+def test_compute_code_only_eval_metrics_carries_forward_cumulative_metrics_to_target_rounds():
     runner = object.__new__(CodeGRPOTreeRunner)
     runner.args = SimpleNamespace(eval_round_n=3, eval_T_max_override=4, T_max=4)
 
@@ -982,9 +982,31 @@ def test_compute_code_only_eval_metrics_does_not_extrapolate_future_rounds():
 
     assert metrics["pass_at_1_within_1"] == 0.0
     assert metrics["best_pass_rate_within_1"] == 0.25
-    assert "pass_at_1_within_2" not in metrics
+    assert metrics["pass_at_1_within_2"] == 0.0
+    assert metrics["pass_at_1_within_4"] == 0.0
+    assert metrics["best_pass_rate_within_4"] == 0.25
     assert metrics["pass_at_1"] == 0.0
     assert metrics["pass_at_k_within_n"] == 0.0
+
+
+def test_compute_code_only_eval_metrics_preserves_early_solved_within_later_rounds():
+    runner = object.__new__(CodeGRPOTreeRunner)
+    runner.args = SimpleNamespace(eval_round_n=2, eval_T_max_override=2, T_max=2)
+
+    metrics = runner._compute_code_only_eval_metrics(
+        [
+            {
+                "stage": "search",
+                "nodes": [{"pass_rate": 1.0}],
+            }
+        ]
+    )
+
+    assert metrics["pass_at_1_within_1"] == 1.0
+    assert metrics["pass_at_1_within_2"] == 1.0
+    assert metrics["best_pass_rate_within_2"] == 1.0
+    assert metrics["pass_at_1"] == 1.0
+    assert metrics["pass_at_k_within_n"] == 1.0
 
 
 def test_generate_node_skips_soft_reward_scoring_for_fully_passing_candidate(monkeypatch):

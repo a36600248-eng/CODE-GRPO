@@ -1079,24 +1079,29 @@ class CodeGRPOTreeRunner:
         search_rounds = [round_item for round_item in rounds if str(round_item.get("stage", "search")) == "search"]
         eval_rounds = search_rounds if search_rounds else rounds
         flat_nodes = [round_item["nodes"][0] for round_item in eval_rounds if round_item.get("nodes")]
+        target_rounds = int(getattr(self.args, "eval_T_max_override", 0) or 0)
+        if target_rounds <= 0:
+            target_rounds = int(getattr(self.args, "T_max", 1) or 1)
+        target_rounds = max(target_rounds, int(getattr(self.args, "eval_round_n", 1) or 1), 1)
         cumulative_solved = False
         cumulative_best = 0.0
-        max_rounds = len(flat_nodes)
-        if max_rounds == 0:
-            metrics["pass_at_1_within_1"] = 0.0
-            metrics["best_pass_rate_within_1"] = 0.0
+        if not flat_nodes:
+            for round_idx in range(1, target_rounds + 1):
+                metrics[f"pass_at_1_within_{round_idx}"] = 0.0
+                metrics[f"best_pass_rate_within_{round_idx}"] = 0.0
             metrics["pass_at_1"] = 0.0
             metrics["pass_at_k_within_n"] = 0.0
             metrics["best_pass_rate_overall"] = 0.0
             return metrics
-        for round_idx in range(1, max_rounds + 1):
-            node = flat_nodes[round_idx - 1]
-            cumulative_solved = cumulative_solved or (float(node.get("pass_rate", 0.0)) == 1.0)
-            cumulative_best = max(cumulative_best, float(node.get("pass_rate", 0.0)))
+        for round_idx in range(1, target_rounds + 1):
+            if round_idx <= len(flat_nodes):
+                node = flat_nodes[round_idx - 1]
+                cumulative_solved = cumulative_solved or (float(node.get("pass_rate", 0.0)) == 1.0)
+                cumulative_best = max(cumulative_best, float(node.get("pass_rate", 0.0)))
             metrics[f"pass_at_1_within_{round_idx}"] = 1.0 if cumulative_solved else 0.0
             metrics[f"best_pass_rate_within_{round_idx}"] = cumulative_best
-        metrics["pass_at_1"] = metrics.get(f"pass_at_1_within_{max_rounds}", 0.0)
-        eval_round_n = min(max(1, int(self.args.eval_round_n)), max_rounds)
+        metrics["pass_at_1"] = metrics.get(f"pass_at_1_within_{target_rounds}", 0.0)
+        eval_round_n = min(max(1, int(self.args.eval_round_n)), target_rounds)
         metrics["pass_at_k_within_n"] = metrics.get(f"pass_at_1_within_{eval_round_n}", 0.0)
         metrics["best_pass_rate_overall"] = max((float(node["pass_rate"]) for node in flat_nodes), default=0.0)
         return metrics
