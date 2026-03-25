@@ -14,6 +14,7 @@ from .soft_reward import (
     compute_zero_pass_beta,
     get_oracle_outputs,
     normalize_soft_reward_to_unit_interval,
+    _case_complexity_key,
 )
 from .types import ExecResult, Node, QuestionRollout, TrainSample
 
@@ -104,7 +105,7 @@ def _build_code_io_aux_samples(
     if not enabled or case_count <= 0:
         return []
 
-    samples: list[dict[str, Any]] = []
+    candidates: list[tuple[tuple[int, int, int, int, int], dict[str, Any]]] = []
     for idx, (_case, parsed_input, actual, passed) in enumerate(
         zip(test_cases, case_inputs, exec_results, pass_flags, strict=True)
     ):
@@ -117,22 +118,28 @@ def _build_code_io_aux_samples(
         target_text = _baseline_aux_target_text(actual)
         if not target_text:
             continue
-        prompt_text = prompt_renderer(build_code_io_training_prompt(code=code, case_input=parsed_input))
-        samples.append(
-            {
-                "question_id": question_id,
-                "case_index": idx,
-                "prompt_text": prompt_text,
-                "completion_text": target_text,
-                "sft_weight": float(sft_weight_correct if passed else sft_weight_incorrect),
-                "match": bool(passed),
-                "target_kind": str(actual.kind),
-                "input_preview": _safe_preview(parsed_input, max_chars=400),
-                "target_preview": _safe_preview(target_text, max_chars=400),
-            }
+        candidates.append(
+            (
+                _case_complexity_key(parsed_input, target_text, idx),
+                {
+                    "question_id": question_id,
+                    "case_index": idx,
+                    "case_input": parsed_input,
+                    "completion_text": target_text,
+                    "sft_weight": float(sft_weight_correct if passed else sft_weight_incorrect),
+                    "match": bool(passed),
+                    "target_kind": str(actual.kind),
+                    "input_preview": _safe_preview(parsed_input, max_chars=400),
+                    "target_preview": _safe_preview(target_text, max_chars=400),
+                },
+            )
         )
-        if len(samples) >= case_count:
-            break
+
+    samples: list[dict[str, Any]] = []
+    for _key, candidate in sorted(candidates, key=lambda item: item[0])[:case_count]:
+        parsed_input = candidate.pop("case_input")
+        candidate["prompt_text"] = prompt_renderer(build_code_io_training_prompt(code=code, case_input=parsed_input))
+        samples.append(candidate)
     return samples
 
 

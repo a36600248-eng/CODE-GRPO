@@ -352,6 +352,20 @@ def test_compute_soft_reward_skips_nonfinite_logprob():
     assert details[0]["skipped"] == "problem_logprob_unavailable"
 
 
+def test_build_diagnostic_inputs_prefers_shorter_paired_cases():
+    problem = {
+        "prompt": "Echo",
+        "diagnostic_inputs": ["99999999999999999999\n", "1\n"],
+        "diagnostic_outputs": ["99999999999999999999\n", "1\n"],
+    }
+
+    selected_inputs = build_diagnostic_inputs(problem, max_count=1)
+    selected_outputs = get_oracle_outputs(problem, selected_inputs)
+
+    assert selected_inputs == ["1\n"]
+    assert selected_outputs == ["1\n"]
+
+
 def test_build_round_record_preserves_iterative_prompt_fields():
     runner = object.__new__(CodeGRPOTreeRunner)
     node = Node(
@@ -1083,6 +1097,35 @@ def test_generate_node_skips_soft_reward_scoring_for_fully_passing_candidate(mon
     assert node.exec_summary["soft_reward_eligible"] is False
     assert node.exec_summary["raw_soft_reward"] == 0.0
     assert node.exec_summary["soft_reward_beta"] == 0.0
+
+
+def test_build_code_io_aux_samples_prefers_shorter_cases():
+    samples = tree_module._build_code_io_aux_samples(
+        question_id="q1",
+        code="print(input())",
+        test_cases=[
+            {"input": "99999999999999999999\n", "output": "99999999999999999999\n"},
+            {"input": "1\n", "output": "1\n"},
+        ],
+        case_inputs=["99999999999999999999\n", "1\n"],
+        exec_results=[
+            ExecResult(kind="OK", value="99999999999999999999\n"),
+            ExecResult(kind="OK", value="1\n"),
+        ],
+        pass_flags=[True, True],
+        enabled=True,
+        case_count=1,
+        include_correct=True,
+        include_incorrect=True,
+        include_errors=True,
+        sft_weight_correct=1.0,
+        sft_weight_incorrect=1.0,
+        prompt_renderer=lambda text: text,
+    )
+
+    assert len(samples) == 1
+    assert samples[0]["case_index"] == 1
+    assert samples[0]["completion_text"] == "1"
 
 
 def test_question_prior_too_hard_requires_min_seen_count():

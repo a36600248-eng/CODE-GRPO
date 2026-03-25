@@ -14,31 +14,56 @@ def _normalize_output_text(value: Any) -> str:
         return str(value).strip()
 
 
-def build_diagnostic_inputs(problem: dict[str, Any], max_count: int = 0) -> list[Any]:
-    explicit_inputs = list(problem.get("diagnostic_inputs", []) or [])
-    if explicit_inputs:
-        return explicit_inputs[:max_count] if max_count > 0 else explicit_inputs
+def _case_complexity_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(value).strip()
 
-    test_cases = list(problem.get("test_cases", []) or [])
-    inputs = [case.get("input") for case in test_cases]
-    return inputs[:max_count] if max_count > 0 else inputs
+
+def _case_complexity_key(case_input: Any, case_output: Any, index: int) -> tuple[int, int, int, int, int]:
+    input_text = _case_complexity_text(case_input)
+    output_text = _case_complexity_text(case_output)
+    total_len = len(input_text) + len(output_text)
+    max_side_len = max(len(input_text), len(output_text))
+    line_count = input_text.count("\n") + output_text.count("\n") + 2
+    digit_count = sum(ch.isdigit() for ch in input_text) + sum(ch.isdigit() for ch in output_text)
+    return (total_len, max_side_len, line_count, digit_count, index)
+
+
+def select_simple_diagnostic_pairs(problem: dict[str, Any], max_count: int = 0) -> list[tuple[Any, Any]]:
+    explicit_inputs = list(problem.get("diagnostic_inputs", []) or [])
+    explicit_outputs = list(problem.get("diagnostic_outputs", []) or [])
+    candidates: list[tuple[Any, Any]] = []
+    if explicit_inputs and explicit_outputs:
+        candidates = list(zip(explicit_inputs, explicit_outputs, strict=False))
+    else:
+        test_cases = list(problem.get("test_cases", []) or [])
+        candidates = [(case.get("input"), case.get("output")) for case in test_cases]
+
+    ranked = sorted(
+        enumerate(candidates),
+        key=lambda item: _case_complexity_key(item[1][0], item[1][1], item[0]),
+    )
+    selected = [pair for _idx, pair in ranked]
+    if max_count > 0:
+        selected = selected[:max_count]
+    return selected
+
+
+def build_diagnostic_inputs(problem: dict[str, Any], max_count: int = 0) -> list[Any]:
+    return [case_input for case_input, _case_output in select_simple_diagnostic_pairs(problem, max_count=max_count)]
 
 
 def get_oracle_outputs(problem: dict[str, Any], diagnostic_inputs: list[Any]) -> list[Any]:
     if not diagnostic_inputs:
         return []
-
-    explicit_outputs = list(problem.get("diagnostic_outputs", []) or [])
-    if explicit_outputs:
-        return explicit_outputs[: len(diagnostic_inputs)]
-
-    test_cases = list(problem.get("test_cases", []) or [])
-    oracle_outputs: list[Any] = []
-    for case in test_cases:
-        oracle_outputs.append(case.get("output"))
-        if len(oracle_outputs) >= len(diagnostic_inputs):
-            break
-    return oracle_outputs
+    return [
+        case_output
+        for _case_input, case_output in select_simple_diagnostic_pairs(problem, max_count=len(diagnostic_inputs))
+    ]
 
 
 def normalize_soft_reward_to_unit_interval(raw_value: float, clip_low: float, clip_high: float) -> float:
