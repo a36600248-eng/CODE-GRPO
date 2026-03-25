@@ -10,11 +10,11 @@ from .parser import build_generation_completion, build_token_masks, parse_genera
 from .prompts import build_code_io_training_prompt, build_generation_prompt, summarize_generation_history
 from .soft_reward import (
     build_diagnostic_inputs,
+    case_complexity_key,
     compute_soft_reward,
     compute_zero_pass_beta,
     get_oracle_outputs,
     normalize_soft_reward_to_unit_interval,
-    _case_complexity_key,
 )
 from .types import ExecResult, Node, QuestionRollout, TrainSample
 
@@ -120,7 +120,7 @@ def _build_code_io_aux_samples(
             continue
         candidates.append(
             (
-                _case_complexity_key(parsed_input, target_text, idx),
+                case_complexity_key(parsed_input, target_text, idx),
                 {
                     "question_id": question_id,
                     "case_index": idx,
@@ -137,9 +137,10 @@ def _build_code_io_aux_samples(
 
     samples: list[dict[str, Any]] = []
     for _key, candidate in sorted(candidates, key=lambda item: item[0])[:case_count]:
-        parsed_input = candidate.pop("case_input")
-        candidate["prompt_text"] = prompt_renderer(build_code_io_training_prompt(code=code, case_input=parsed_input))
-        samples.append(candidate)
+        parsed_input = candidate["case_input"]
+        sample = {key: value for key, value in candidate.items() if key != "case_input"}
+        sample["prompt_text"] = prompt_renderer(build_code_io_training_prompt(code=code, case_input=parsed_input))
+        samples.append(sample)
     return samples
 
 

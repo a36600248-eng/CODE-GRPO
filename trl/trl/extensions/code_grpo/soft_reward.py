@@ -5,32 +5,35 @@ from typing import Any
 from .prompts import build_zero_pass_code_view_prompt, build_zero_pass_problem_view_prompt
 
 
+def _serialize_case_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(value).strip()
+
+
 def _normalize_output_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        return str(value).strip()
+    return _serialize_case_text(value)
 
 
-def _case_complexity_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        return str(value).strip()
-
-
-def _case_complexity_key(case_input: Any, case_output: Any, index: int) -> tuple[int, int, int, int, int]:
-    input_text = _case_complexity_text(case_input)
-    output_text = _case_complexity_text(case_output)
+def case_complexity_key(case_input: Any, case_output: Any, index: int) -> tuple[int, int, int, int, int]:
+    input_text = _serialize_case_text(case_input)
+    output_text = _serialize_case_text(case_output)
     total_len = len(input_text) + len(output_text)
     max_side_len = max(len(input_text), len(output_text))
     line_count = input_text.count("\n") + output_text.count("\n") + 2
     digit_count = sum(ch.isdigit() for ch in input_text) + sum(ch.isdigit() for ch in output_text)
     return (total_len, max_side_len, line_count, digit_count, index)
+
+
+def _find_matching_test_case_output(test_cases: list[dict[str, Any]], case_input: Any) -> Any | None:
+    target_input = _serialize_case_text(case_input)
+    for case in test_cases:
+        if _serialize_case_text(case.get("input")) == target_input:
+            return case.get("output")
+    return None
 
 
 def select_simple_diagnostic_pairs(problem: dict[str, Any], max_count: int = 0) -> list[tuple[Any, Any]]:
@@ -43,15 +46,21 @@ def select_simple_diagnostic_pairs(problem: dict[str, Any], max_count: int = 0) 
             case_output: Any | None = None
             if idx < len(explicit_outputs):
                 case_output = explicit_outputs[idx]
-            elif idx < len(test_cases):
-                case_output = test_cases[idx].get("output")
+            else:
+                case_output = _find_matching_test_case_output(test_cases, case_input)
+            if case_output is None:
+                continue
             candidates.append((case_input, case_output))
     else:
-        candidates = [(case.get("input"), case.get("output")) for case in test_cases]
+        candidates = [
+            (case.get("input"), case.get("output"))
+            for case in test_cases
+            if case.get("output") is not None
+        ]
 
     ranked = sorted(
         enumerate(candidates),
-        key=lambda item: _case_complexity_key(item[1][0], item[1][1], item[0]),
+        key=lambda item: case_complexity_key(item[1][0], item[1][1], item[0]),
     )
     selected = [pair for _idx, pair in ranked]
     if max_count > 0:
@@ -66,10 +75,18 @@ def build_diagnostic_inputs(problem: dict[str, Any], max_count: int = 0) -> list
 def get_oracle_outputs(problem: dict[str, Any], diagnostic_inputs: list[Any]) -> list[Any]:
     if not diagnostic_inputs:
         return []
-    return [
-        case_output
-        for _case_input, case_output in select_simple_diagnostic_pairs(problem, max_count=len(diagnostic_inputs))
-    ]
+    output_queues: dict[str, list[Any]] = {}
+    for case_input, case_output in select_simple_diagnostic_pairs(problem, max_count=0):
+        output_queues.setdefault(_serialize_case_text(case_input), []).append(case_output)
+
+    oracle_outputs: list[Any] = []
+    for case_input in diagnostic_inputs:
+        queue = output_queues.get(_serialize_case_text(case_input), [])
+        if queue:
+            oracle_outputs.append(queue.pop(0))
+        else:
+            oracle_outputs.append(None)
+    return oracle_outputs
 
 
 def normalize_soft_reward_to_unit_interval(raw_value: float, clip_low: float, clip_high: float) -> float:
@@ -100,6 +117,19 @@ def compute_soft_reward(
     deltas: list[float] = []
 
     for case_input, oracle_output in zip(diagnostic_inputs, oracle_outputs, strict=False):
+        if oracle_output is None:
+            details.append(
+                {
+                    "input": case_input,
+                    "oracle_output": oracle_output,
+                    "target_text": "",
+                    "s_prob": float("nan"),
+                    "s_code": float("nan"),
+                    "delta": 0.0,
+                    "skipped": "oracle_output_unavailable",
+                }
+            )
+            continue
         target_text = _normalize_output_text(oracle_output)
         problem_prompt = build_zero_pass_problem_view_prompt(question_prompt=question_prompt, case_input=case_input)
         code_prompt = build_zero_pass_code_view_prompt(code=code, case_input=case_input)

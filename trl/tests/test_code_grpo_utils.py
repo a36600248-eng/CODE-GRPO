@@ -384,6 +384,52 @@ def test_build_diagnostic_inputs_preserves_explicit_inputs_when_outputs_are_miss
     assert selected_outputs == ["1\n"]
 
 
+def test_get_oracle_outputs_aligns_to_requested_input_order():
+    problem = {
+        "prompt": "Echo",
+        "diagnostic_inputs": ["99999999999999999999\n", "1\n"],
+        "diagnostic_outputs": ["99999999999999999999\n", "1\n"],
+    }
+
+    oracle_outputs = get_oracle_outputs(problem, ["1\n", "99999999999999999999\n"])
+
+    assert oracle_outputs == ["1\n", "99999999999999999999\n"]
+
+
+def test_build_diagnostic_inputs_skips_explicit_cases_without_available_output():
+    problem = {
+        "prompt": "Echo",
+        "diagnostic_inputs": ["missing\n", "1\n"],
+        "diagnostic_outputs": [],
+        "test_cases": [{"input": "1\n", "output": "1\n"}],
+    }
+
+    selected_inputs = build_diagnostic_inputs(problem, max_count=2)
+    selected_outputs = get_oracle_outputs(problem, selected_inputs)
+
+    assert selected_inputs == ["1\n"]
+    assert selected_outputs == ["1\n"]
+
+
+def test_compute_soft_reward_skips_missing_oracle_output():
+    class DummyEvaluator:
+        def logprob(self, prompt, target_text):
+            del prompt, target_text
+            raise AssertionError("logprob should not be called when oracle output is missing")
+
+    reward, details = compute_soft_reward(
+        problem={"prompt": "Echo"},
+        code="print(input())",
+        diagnostic_inputs=["missing\n"],
+        oracle_outputs=[None],
+        evaluator=DummyEvaluator(),
+        problem_logprob_cache={},
+    )
+
+    assert math.isnan(reward)
+    assert details[0]["skipped"] == "oracle_output_unavailable"
+
+
 def test_build_round_record_preserves_iterative_prompt_fields():
     runner = object.__new__(CodeGRPOTreeRunner)
     node = Node(
