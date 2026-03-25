@@ -36,11 +36,17 @@ def _case_complexity_key(case_input: Any, case_output: Any, index: int) -> tuple
 def select_simple_diagnostic_pairs(problem: dict[str, Any], max_count: int = 0) -> list[tuple[Any, Any]]:
     explicit_inputs = list(problem.get("diagnostic_inputs", []) or [])
     explicit_outputs = list(problem.get("diagnostic_outputs", []) or [])
+    test_cases = list(problem.get("test_cases", []) or [])
     candidates: list[tuple[Any, Any]] = []
-    if explicit_inputs and explicit_outputs:
-        candidates = list(zip(explicit_inputs, explicit_outputs, strict=False))
+    if explicit_inputs:
+        for idx, case_input in enumerate(explicit_inputs):
+            case_output: Any | None = None
+            if idx < len(explicit_outputs):
+                case_output = explicit_outputs[idx]
+            elif idx < len(test_cases):
+                case_output = test_cases[idx].get("output")
+            candidates.append((case_input, case_output))
     else:
-        test_cases = list(problem.get("test_cases", []) or [])
         candidates = [(case.get("input"), case.get("output")) for case in test_cases]
 
     ranked = sorted(

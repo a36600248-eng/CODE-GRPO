@@ -10,7 +10,7 @@ from trl.extensions.code_grpo import tree as tree_module
 from trl.extensions.code_grpo.error_utils import summarize_error
 from trl.extensions.code_grpo.matcher import is_match, values_equal
 from trl.extensions.code_grpo.parser import build_generation_completion, parse_generation_output, parse_generation_response
-from trl.extensions.code_grpo.soft_reward import compute_soft_reward
+from trl.extensions.code_grpo.soft_reward import build_diagnostic_inputs, compute_soft_reward, get_oracle_outputs
 from trl.scripts import code_grpo as code_grpo_script
 from trl.extensions.code_grpo.tree import (
     CodeGRPOTreeRunner,
@@ -357,6 +357,24 @@ def test_build_diagnostic_inputs_prefers_shorter_paired_cases():
         "prompt": "Echo",
         "diagnostic_inputs": ["99999999999999999999\n", "1\n"],
         "diagnostic_outputs": ["99999999999999999999\n", "1\n"],
+    }
+
+    selected_inputs = build_diagnostic_inputs(problem, max_count=1)
+    selected_outputs = get_oracle_outputs(problem, selected_inputs)
+
+    assert selected_inputs == ["1\n"]
+    assert selected_outputs == ["1\n"]
+
+
+def test_build_diagnostic_inputs_preserves_explicit_inputs_when_outputs_are_missing():
+    problem = {
+        "prompt": "Echo",
+        "diagnostic_inputs": ["99999999999999999999\n", "1\n"],
+        "diagnostic_outputs": [],
+        "test_cases": [
+            {"input": "99999999999999999999\n", "output": "99999999999999999999\n"},
+            {"input": "1\n", "output": "1\n"},
+        ],
     }
 
     selected_inputs = build_diagnostic_inputs(problem, max_count=1)
